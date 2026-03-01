@@ -9,6 +9,7 @@ use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::{Field, Value, FAST, INDEXED, STORED, TEXT};
 use tantivy::{Index, IndexWriter, TantivyDocument, Term};
+use usearch::{IndexOptions, MetricKind, ScalarKind};
 
 const DB_FILE: &str = "meta.sqlite";
 const DEFAULT_SPACE_NAME: &str = "default";
@@ -112,6 +113,12 @@ pub struct BM25Hit {
     pub score: f32,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct DenseHit {
+    pub chunk_id: i64,
+    pub distance: f32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpaceResolution {
     Found(SpaceRow),
@@ -121,9 +128,10 @@ pub enum SpaceResolution {
 
 struct SpaceIndexes {
     _tantivy_dir: PathBuf,
-    _usearch_path: PathBuf,
+    usearch_path: PathBuf,
     tantivy_index: Index,
     tantivy_writer: Mutex<IndexWriter>,
+    usearch_index: RwLock<usearch::Index>,
     fields: TantivyFields,
 }
 
@@ -252,6 +260,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             .append(true)
             .open(&usearch_path)?;
         let tantivy_index = open_or_create_tantivy_index(&tantivy_dir)?;
+        let usearch_index = open_or_create_usearch_index(&usearch_path)?;
         let fields = tantivy_fields_from_schema(&tantivy_index.schema())?;
         let tantivy_writer = tantivy_index.writer(50_000_000)?;
 
@@ -261,9 +270,10 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             .map_err(|_| CoreError::poisoned("spaces"))?;
         spaces.entry(name.to_string()).or_insert(SpaceIndexes {
             _tantivy_dir: tantivy_dir,
-            _usearch_path: usearch_path,
+            usearch_path,
             tantivy_index,
             tantivy_writer: Mutex::new(tantivy_writer),
+            usearch_index: RwLock::new(usearch_index),
             fields,
         });
 
@@ -1279,6 +1289,184 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         Ok(())
     }
 
+    pub fn insert_usearch(&self, space: &str, key: i64, vector: &[f32]) -> Result<()> {
+        self.batch_insert_usearch(space, &[(key, vector)])
+    }
+
+    pub fn batch_insert_usearch(&self, space: &str, entries: &[(i64, &[f32])]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        self.open_space(space)?;
+        let spaces = self
+            .spaces
+            .read()
+            .map_err(|_| CoreError::poisoned("spaces"))?;
+        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
+            name: space.to_string(),
+        })?;
+
+        let expected_dimensions = entries[0].1.len();
+        if expected_dimensions == 0 {
+            return Err(CoreError::Internal(
+                "cannot insert empty vector into usearch index".to_string(),
+            ));
+        }
+        for (_, vector) in entries {
+            if vector.len() != expected_dimensions {
+                return Err(CoreError::Internal(format!(
+                    "vector dimension mismatch in batch insert: expected {expected_dimensions}, got {}",
+                    vector.len()
+                )));
+            }
+        }
+
+        let mut index = space_indexes
+            .usearch_index
+            .write()
+            .map_err(|_| CoreError::poisoned("usearch index"))?;
+        ensure_usearch_dimensions(&mut index, expected_dimensions)?;
+        let target_capacity = index.size().saturating_add(entries.len());
+        index.reserve(target_capacity).map_err(|err| {
+            CoreError::Internal(format!("usearch reserve failed for {target_capacity} items: {err}"))
+        })?;
+
+        for (key, vector) in entries {
+            let key = u64::try_from(*key).map_err(|_| {
+                CoreError::Internal(format!(
+                    "usearch key must be non-negative: {}",
+                    *key
+                ))
+            })?;
+            index
+                .add::<f32>(key, vector)
+                .map_err(|err| CoreError::Internal(format!("usearch add failed: {err}")))?;
+        }
+
+        save_usearch_index(&index, &space_indexes.usearch_path)?;
+        Ok(())
+    }
+
+    pub fn delete_usearch(&self, space: &str, keys: &[i64]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+
+        self.open_space(space)?;
+        let spaces = self
+            .spaces
+            .read()
+            .map_err(|_| CoreError::poisoned("spaces"))?;
+        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
+            name: space.to_string(),
+        })?;
+        let index = space_indexes
+            .usearch_index
+            .write()
+            .map_err(|_| CoreError::poisoned("usearch index"))?;
+
+        for key in keys {
+            let key = u64::try_from(*key).map_err(|_| {
+                CoreError::Internal(format!(
+                    "usearch key must be non-negative: {}",
+                    *key
+                ))
+            })?;
+            index
+                .remove(key)
+                .map_err(|err| CoreError::Internal(format!("usearch remove failed: {err}")))?;
+        }
+
+        save_usearch_index(&index, &space_indexes.usearch_path)?;
+        Ok(())
+    }
+
+    pub fn query_dense(&self, space: &str, vector: &[f32], limit: usize) -> Result<Vec<DenseHit>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        if vector.is_empty() {
+            return Err(CoreError::Internal(
+                "cannot query usearch with empty vector".to_string(),
+            ));
+        }
+
+        self.open_space(space)?;
+        let spaces = self
+            .spaces
+            .read()
+            .map_err(|_| CoreError::poisoned("spaces"))?;
+        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
+            name: space.to_string(),
+        })?;
+        let index = space_indexes
+            .usearch_index
+            .read()
+            .map_err(|_| CoreError::poisoned("usearch index"))?;
+
+        if index.size() == 0 {
+            return Ok(Vec::new());
+        }
+        if vector.len() != index.dimensions() {
+            return Err(CoreError::Internal(format!(
+                "query vector dimension mismatch: expected {}, got {}",
+                index.dimensions(),
+                vector.len()
+            )));
+        }
+
+        let matches = index
+            .search::<f32>(vector, limit)
+            .map_err(|err| CoreError::Internal(format!("usearch query failed: {err}")))?;
+        let hits = matches
+            .keys
+            .into_iter()
+            .zip(matches.distances)
+            .map(|(key, distance)| DenseHit {
+                chunk_id: key as i64,
+                distance,
+            })
+            .collect();
+        Ok(hits)
+    }
+
+    pub fn count_usearch(&self, space: &str) -> Result<usize> {
+        self.open_space(space)?;
+        let spaces = self
+            .spaces
+            .read()
+            .map_err(|_| CoreError::poisoned("spaces"))?;
+        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
+            name: space.to_string(),
+        })?;
+        let index = space_indexes
+            .usearch_index
+            .read()
+            .map_err(|_| CoreError::poisoned("usearch index"))?;
+        Ok(index.size())
+    }
+
+    pub fn clear_usearch(&self, space: &str) -> Result<()> {
+        self.open_space(space)?;
+        let spaces = self
+            .spaces
+            .read()
+            .map_err(|_| CoreError::poisoned("spaces"))?;
+        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
+            name: space.to_string(),
+        })?;
+        let index = space_indexes
+            .usearch_index
+            .write()
+            .map_err(|_| CoreError::poisoned("usearch index"))?;
+        index
+            .reset()
+            .map_err(|err| CoreError::Internal(format!("usearch clear failed: {err}")))?;
+        std::fs::File::create(&space_indexes.usearch_path)?;
+        Ok(())
+    }
+
     pub fn get_fts_dirty_documents(&self) -> Result<Vec<FtsDirtyRecord>> {
         let conn = self
             .db
@@ -1631,6 +1819,63 @@ fn open_or_create_tantivy_index(path: &Path) -> Result<Index> {
     }
 
     Ok(Index::create_in_dir(path, tantivy_schema())?)
+}
+
+fn new_usearch_index(dimensions: usize) -> Result<usearch::Index> {
+    let mut options = IndexOptions::default();
+    options.dimensions = dimensions;
+    options.metric = MetricKind::Cos;
+    options.quantization = ScalarKind::F32;
+    options.connectivity = 16;
+    options.expansion_add = 200;
+    options.expansion_search = 100;
+    usearch::Index::new(&options)
+        .map_err(|err| CoreError::Internal(format!("usearch init failed: {err}")))
+}
+
+fn open_or_create_usearch_index(path: &Path) -> Result<usearch::Index> {
+    let index = new_usearch_index(256)?;
+    let file_size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    if file_size > 0 {
+        let path = path
+            .to_str()
+            .ok_or_else(|| CoreError::Internal("invalid usearch path encoding".to_string()))?;
+        index
+            .load(path)
+            .map_err(|err| CoreError::Internal(format!("usearch load failed: {err}")))?;
+    }
+    Ok(index)
+}
+
+fn ensure_usearch_dimensions(index: &mut usearch::Index, expected_dimensions: usize) -> Result<()> {
+    if index.size() == 0 && index.dimensions() != expected_dimensions {
+        *index = new_usearch_index(expected_dimensions)?;
+        return Ok(());
+    }
+
+    if index.dimensions() != expected_dimensions {
+        return Err(CoreError::Internal(format!(
+            "usearch vector dimension mismatch: index expects {}, got {}",
+            index.dimensions(),
+            expected_dimensions
+        )));
+    }
+    Ok(())
+}
+
+fn save_usearch_index(index: &usearch::Index, path: &Path) -> Result<()> {
+    if index.size() == 0 {
+        std::fs::File::create(path)?;
+        return Ok(());
+    }
+
+    let path = path
+        .to_str()
+        .ok_or_else(|| CoreError::Internal("invalid usearch path encoding".to_string()))?;
+    index
+        .save(path)
+        .map_err(|err| CoreError::Internal(format!("usearch save failed: {err}")))?;
+    Ok(())
 }
 
 fn tantivy_schema() -> tantivy::schema::Schema {
