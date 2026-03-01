@@ -1,4 +1,6 @@
 use tempfile::tempdir;
+use std::ffi::OsString;
+use std::sync::{Mutex, OnceLock};
 
 use crate::config::{Config, ModelConfig, ReapingConfig};
 use crate::engine::Engine;
@@ -45,6 +47,25 @@ fn test_engine_with_default_space(default_space: Option<&str>) -> Engine {
         reaping: ReapingConfig { days: 7 },
     };
     Engine::from_parts(storage, config)
+}
+
+fn with_kbolt_space_env<T>(value: Option<&str>, run: impl FnOnce() -> T) -> T {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let lock = ENV_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().expect("lock env mutex");
+
+    let old_value: Option<OsString> = std::env::var_os("KBOLT_SPACE");
+    match value {
+        Some(v) => std::env::set_var("KBOLT_SPACE", v),
+        None => std::env::remove_var("KBOLT_SPACE"),
+    }
+
+    let result = run();
+    match old_value {
+        Some(v) => std::env::set_var("KBOLT_SPACE", v),
+        None => std::env::remove_var("KBOLT_SPACE"),
+    }
+    result
 }
 
 #[test]
@@ -182,6 +203,104 @@ fn set_default_space_requires_existing_space() {
         KboltError::SpaceNotFound { name } => assert_eq!(name, "missing"),
         other => panic!("unexpected error: {other}"),
     }
+}
+
+#[test]
+fn resolve_space_prefers_env_over_config_default() {
+    with_kbolt_space_env(Some("notes"), || {
+        let engine = test_engine_with_default_space(Some("work"));
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+
+        let resolved = engine.resolve_space(None).expect("resolve space");
+        assert_eq!(resolved, "notes");
+    });
+}
+
+#[test]
+fn resolve_space_returns_no_active_space_when_no_sources_exist() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        let err = engine
+            .resolve_space(None)
+            .expect_err("expected no active space");
+        match KboltError::from(err) {
+            KboltError::NoActiveSpace => {}
+            other => panic!("unexpected error: {other}"),
+        }
+    });
+}
+
+#[test]
+fn collection_info_without_space_uses_unique_collection_lookup() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        engine
+            .add_collection(AddCollectionRequest {
+                path: collection_path,
+                space: Some("work".to_string()),
+                name: Some("api".to_string()),
+                description: None,
+                extensions: None,
+                no_index: true,
+            })
+            .expect("add collection");
+
+        let info = engine
+            .collection_info(None, "api")
+            .expect("resolve unique collection");
+        assert_eq!(info.space, "work");
+        assert_eq!(info.name, "api");
+    });
+}
+
+#[test]
+fn collection_info_without_space_reports_ambiguous_collection_lookup() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        let notes_path = root.path().join("notes-api");
+        std::fs::create_dir_all(&work_path).expect("create work dir");
+        std::fs::create_dir_all(&notes_path).expect("create notes dir");
+        engine
+            .add_collection(AddCollectionRequest {
+                path: work_path,
+                space: Some("work".to_string()),
+                name: Some("api".to_string()),
+                description: None,
+                extensions: None,
+                no_index: true,
+            })
+            .expect("add work collection");
+        engine
+            .add_collection(AddCollectionRequest {
+                path: notes_path,
+                space: Some("notes".to_string()),
+                name: Some("api".to_string()),
+                description: None,
+                extensions: None,
+                no_index: true,
+            })
+            .expect("add notes collection");
+
+        let err = engine
+            .collection_info(None, "api")
+            .expect_err("expected ambiguous collection");
+        match KboltError::from(err) {
+            KboltError::AmbiguousSpace { collection, spaces } => {
+                assert_eq!(collection, "api");
+                assert_eq!(spaces, vec!["notes".to_string(), "work".to_string()]);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    });
 }
 
 #[test]
