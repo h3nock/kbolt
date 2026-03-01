@@ -30,6 +30,10 @@ fn run() -> Result<()> {
                 let line = adapter.space_list()?;
                 println!("{line}");
             }
+            SpaceCommand::Info { name } => {
+                let line = adapter.space_info(&name)?;
+                println!("{line}");
+            }
         },
     }
 

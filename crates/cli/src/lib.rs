@@ -62,6 +62,21 @@ impl CliAdapter {
         }
         Ok(lines.join("\n"))
     }
+
+    pub fn space_info(&self, name: &str) -> Result<String> {
+        let space = self.engine.space_info(name)?;
+        let description = space.description.unwrap_or_default();
+        let description_line = if description.is_empty() {
+            "description:".to_string()
+        } else {
+            format!("description: {description}")
+        };
+
+        Ok(format!(
+            "name: {}\n{description_line}\ncollections: {}\ndocuments: {}\nchunks: {}\ncreated: {}",
+            space.name, space.collection_count, space.document_count, space.chunk_count, space.created
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -206,6 +221,28 @@ mod tests {
 
             let output = adapter.space_list().expect("list spaces");
             assert!(output.contains("- work (collections: 0, documents: 0, chunks: 0) - work docs"));
+        });
+    }
+
+    #[test]
+    fn space_info_reports_selected_space() {
+        with_isolated_xdg_dirs(|| {
+            let engine = Engine::new(None).expect("create engine");
+            engine
+                .add_space("work", Some("work docs"))
+                .expect("add work space");
+            let adapter = CliAdapter::new(engine);
+
+            let output = adapter.space_info("work").expect("show space info");
+            assert!(output.contains("name: work"), "unexpected output: {output}");
+            assert!(
+                output.contains("description: work docs"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("collections: 0"),
+                "unexpected output: {output}"
+            );
         });
     }
 }
