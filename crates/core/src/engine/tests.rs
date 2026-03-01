@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::sync::{Mutex, OnceLock};
 
 use crate::config::{Config, ModelConfig, ReapingConfig};
-use crate::engine::Engine;
+use crate::engine::{ActiveSpaceSource, Engine};
 use crate::storage::Storage;
 use kbolt_types::{AddCollectionRequest, KboltError};
 
@@ -165,11 +165,13 @@ fn resolve_space_returns_explicit_space_when_provided() {
 
 #[test]
 fn resolve_space_uses_configured_default_when_no_explicit_space() {
-    let engine = test_engine_with_default_space(Some("work"));
-    engine.add_space("work", None).expect("add work");
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(Some("work"));
+        engine.add_space("work", None).expect("add work");
 
-    let resolved = engine.resolve_space(None).expect("resolve default space");
-    assert_eq!(resolved, "work");
+        let resolved = engine.resolve_space(None).expect("resolve default space");
+        assert_eq!(resolved, "work");
+    });
 }
 
 #[test]
@@ -228,6 +230,63 @@ fn resolve_space_returns_no_active_space_when_no_sources_exist() {
             KboltError::NoActiveSpace => {}
             other => panic!("unexpected error: {other}"),
         }
+    });
+}
+
+#[test]
+fn current_space_prefers_flag_over_env_and_default() {
+    with_kbolt_space_env(Some("notes"), || {
+        let engine = test_engine_with_default_space(Some("work"));
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+        engine.add_space("ops", None).expect("add ops");
+
+        let current = engine
+            .current_space(Some("ops"))
+            .expect("resolve current space")
+            .expect("expected active space");
+        assert_eq!(current.name, "ops");
+        assert_eq!(current.source, ActiveSpaceSource::Flag);
+    });
+}
+
+#[test]
+fn current_space_reports_env_source() {
+    with_kbolt_space_env(Some("notes"), || {
+        let engine = test_engine_with_default_space(Some("work"));
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+
+        let current = engine
+            .current_space(None)
+            .expect("resolve current space")
+            .expect("expected active space");
+        assert_eq!(current.name, "notes");
+        assert_eq!(current.source, ActiveSpaceSource::EnvVar);
+    });
+}
+
+#[test]
+fn current_space_reports_default_source() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(Some("work"));
+        engine.add_space("work", None).expect("add work");
+
+        let current = engine
+            .current_space(None)
+            .expect("resolve current space")
+            .expect("expected active space");
+        assert_eq!(current.name, "work");
+        assert_eq!(current.source, ActiveSpaceSource::ConfigDefault);
+    });
+}
+
+#[test]
+fn current_space_returns_none_when_no_space_is_active() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        let current = engine.current_space(None).expect("resolve current space");
+        assert_eq!(current, None);
     });
 }
 

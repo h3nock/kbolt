@@ -7,6 +7,19 @@ use crate::storage::Storage;
 use crate::Result;
 use kbolt_types::{AddCollectionRequest, CollectionInfo, KboltError, SpaceInfo};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveSpaceSource {
+    Flag,
+    EnvVar,
+    ConfigDefault,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveSpace {
+    pub name: String,
+    pub source: ActiveSpaceSource,
+}
+
 pub struct Engine {
     storage: Storage,
     config: Config,
@@ -157,6 +170,14 @@ impl Engine {
         Ok(resolved.name)
     }
 
+    pub fn current_space(&self, explicit: Option<&str>) -> Result<Option<ActiveSpace>> {
+        let resolved = self.resolve_preferred_space(explicit)?;
+        Ok(resolved.map(|(space, source)| ActiveSpace {
+            name: space.name,
+            source,
+        }))
+    }
+
     pub fn config(&self) -> &Config {
         &self.config
     }
@@ -210,19 +231,8 @@ impl Engine {
         explicit: Option<&str>,
         collection_for_lookup: Option<&str>,
     ) -> Result<crate::storage::SpaceRow> {
-        if let Some(space_name) = explicit {
-            return self.storage.get_space(space_name);
-        }
-
-        if let Ok(space_name) = std::env::var("KBOLT_SPACE") {
-            let trimmed = space_name.trim();
-            if !trimmed.is_empty() {
-                return self.storage.get_space(trimmed);
-            }
-        }
-
-        if let Some(space_name) = self.config.default_space.as_deref() {
-            return self.storage.get_space(space_name);
+        if let Some((space, _source)) = self.resolve_preferred_space(explicit)? {
+            return Ok(space);
         }
 
         if let Some(collection) = collection_for_lookup {
@@ -241,6 +251,31 @@ impl Engine {
         }
 
         Err(KboltError::NoActiveSpace.into())
+    }
+
+    fn resolve_preferred_space(
+        &self,
+        explicit: Option<&str>,
+    ) -> Result<Option<(crate::storage::SpaceRow, ActiveSpaceSource)>> {
+        if let Some(space_name) = explicit {
+            let space = self.storage.get_space(space_name)?;
+            return Ok(Some((space, ActiveSpaceSource::Flag)));
+        }
+
+        if let Ok(space_name) = std::env::var("KBOLT_SPACE") {
+            let trimmed = space_name.trim();
+            if !trimmed.is_empty() {
+                let space = self.storage.get_space(trimmed)?;
+                return Ok(Some((space, ActiveSpaceSource::EnvVar)));
+            }
+        }
+
+        if let Some(space_name) = self.config.default_space.as_deref() {
+            let space = self.storage.get_space(space_name)?;
+            return Ok(Some((space, ActiveSpaceSource::ConfigDefault)));
+        }
+
+        Ok(None)
     }
 }
 
