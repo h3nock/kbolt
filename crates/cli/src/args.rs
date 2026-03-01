@@ -154,6 +154,7 @@ pub enum CollectionCommand {
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum ModelsCommand {
     List,
+    Pull,
 }
 
 #[cfg(test)]
@@ -900,6 +901,25 @@ mod tests {
 
         match parsed.command {
             Command::Models(models) => assert_eq!(models.command, ModelsCommand::List),
+            Command::Space(_) => panic!("unexpected space command"),
+            Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
+            Command::Get(_) => panic!("unexpected get command"),
+            Command::MultiGet(_) => panic!("unexpected multi-get command"),
+            Command::Mcp => panic!("unexpected mcp command"),
+            Command::Search(_) => panic!("unexpected search command"),
+        }
+    }
+
+    #[test]
+    fn parses_models_pull() {
+        let parsed = Cli::try_parse_from(["kbolt", "models", "pull"]).expect("parse cli");
+        assert_eq!(parsed.space, None);
+
+        match parsed.command {
+            Command::Models(models) => assert_eq!(models.command, ModelsCommand::Pull),
             Command::Space(_) => panic!("unexpected space command"),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),

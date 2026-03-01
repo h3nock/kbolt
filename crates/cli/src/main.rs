@@ -109,6 +109,10 @@ fn run() -> Result<()> {
                 let line = adapter.models_list()?;
                 println!("{line}");
             }
+            ModelsCommand::Pull => {
+                let line = adapter.models_pull()?;
+                println!("{line}");
+            }
         },
         Command::Mcp => unreachable!("mcp command handled before adapter setup"),
         Command::Search(search) => {

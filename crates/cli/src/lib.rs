@@ -324,6 +324,33 @@ impl CliAdapter {
         Ok(lines.join("\n"))
     }
 
+    pub fn models_pull(&self) -> Result<String> {
+        let report = self.engine.pull_models()?;
+        let mut lines = Vec::new();
+        lines.push(format!("downloaded: {}", report.downloaded.len()));
+        lines.push("downloaded_models:".to_string());
+        if report.downloaded.is_empty() {
+            lines.push("- none".to_string());
+        } else {
+            for model in report.downloaded {
+                lines.push(format!("- {model}"));
+            }
+        }
+
+        lines.push(format!("already_present: {}", report.already_present.len()));
+        lines.push("already_present_models:".to_string());
+        if report.already_present.is_empty() {
+            lines.push("- none".to_string());
+        } else {
+            for model in report.already_present {
+                lines.push(format!("- {model}"));
+            }
+        }
+
+        lines.push(format!("total_bytes: {}", report.total_bytes));
+        Ok(lines.join("\n"))
+    }
+
     pub fn search(
         &self,
         space: Option<&str>,
@@ -1308,6 +1335,50 @@ mod tests {
                 output.contains(&format!("- expander: {expander_model} (missing)")),
                 "unexpected output: {output}"
             );
+        });
+    }
+
+    #[test]
+    fn models_pull_reports_already_present_models() {
+        with_isolated_xdg_dirs(|| {
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+            let model_dir = adapter.engine.config().cache_dir.join("models");
+
+            fs::create_dir_all(model_dir.join("embedder")).expect("create embedder dir");
+            fs::create_dir_all(model_dir.join("reranker")).expect("create reranker dir");
+            fs::create_dir_all(model_dir.join("expander")).expect("create expander dir");
+            fs::write(model_dir.join("embedder/model.bin"), b"e").expect("seed embedder");
+            fs::write(model_dir.join("reranker/model.bin"), b"r").expect("seed reranker");
+            fs::write(model_dir.join("expander/model.bin"), b"x").expect("seed expander");
+
+            let embed_model = adapter.engine.config().models.embed.clone();
+            let reranker_model = adapter.engine.config().models.reranker.clone();
+            let expander_model = adapter.engine.config().models.expander.clone();
+
+            let output = adapter.models_pull().expect("pull models");
+            assert!(output.contains("downloaded: 0"), "unexpected output: {output}");
+            assert!(
+                output.contains("downloaded_models:\n- none"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("already_present: 3"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains(&format!("- {embed_model}")),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains(&format!("- {reranker_model}")),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains(&format!("- {expander_model}")),
+                "unexpected output: {output}"
+            );
+            assert!(output.contains("total_bytes: 0"), "unexpected output: {output}");
         });
     }
 
