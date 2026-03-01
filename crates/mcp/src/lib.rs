@@ -2,7 +2,8 @@ use kbolt_core::engine::Engine;
 use kbolt_core::Result;
 use kbolt_types::{
     CollectionInfo, DocumentResponse, FileEntry, GetRequest, MultiGetRequest, MultiGetResponse,
-    ModelStatus, SpaceInfo, StatusResponse, UpdateOptions, UpdateReport,
+    ModelStatus, SearchRequest, SearchResponse, SpaceInfo, StatusResponse, UpdateOptions,
+    UpdateReport,
 };
 
 pub struct McpAdapter {
@@ -50,6 +51,10 @@ impl McpAdapter {
     pub fn model_status(&self) -> Result<ModelStatus> {
         self.engine.model_status()
     }
+
+    pub fn search(&self, req: SearchRequest) -> Result<SearchResponse> {
+        self.engine.search(req)
+    }
 }
 
 #[cfg(test)]
@@ -60,7 +65,10 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use kbolt_core::engine::Engine;
-    use kbolt_types::{AddCollectionRequest, GetRequest, Locator, MultiGetRequest, UpdateOptions};
+    use kbolt_types::{
+        AddCollectionRequest, GetRequest, Locator, MultiGetRequest, SearchMode, SearchRequest,
+        UpdateOptions,
+    };
     use tempfile::tempdir;
 
     use super::McpAdapter;
@@ -333,6 +341,56 @@ mod tests {
             assert!(!status.embedder.downloaded);
             assert!(!status.reranker.downloaded);
             assert!(!status.expander.downloaded);
+        });
+    }
+
+    #[test]
+    fn search_wrapper_returns_keyword_results() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+
+            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: work_path.clone(),
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add work collection");
+            fs::write(work_path.join("a.md"), "search-token\n").expect("write file");
+
+            let adapter = McpAdapter::new(engine);
+            adapter
+                .update(UpdateOptions {
+                    space: Some("work".to_string()),
+                    collections: vec!["api".to_string()],
+                    no_embed: true,
+                    dry_run: false,
+                    verbose: false,
+                })
+                .expect("run update");
+
+            let response = adapter
+                .search(SearchRequest {
+                    query: "search-token".to_string(),
+                    mode: SearchMode::Keyword,
+                    space: Some("work".to_string()),
+                    collections: vec!["api".to_string()],
+                    limit: 5,
+                    min_score: 0.0,
+                    no_rerank: false,
+                    debug: false,
+                })
+                .expect("run search");
+            assert_eq!(response.mode, SearchMode::Keyword);
+            assert_eq!(response.query, "search-token");
+            assert_eq!(response.results.len(), 1);
+            assert_eq!(response.results[0].space, "work");
         });
     }
 }
