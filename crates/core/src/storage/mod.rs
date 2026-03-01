@@ -65,6 +65,16 @@ pub struct ChunkInsert {
     pub kind: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbedRecord {
+    pub chunk_id: i64,
+    pub doc_path: String,
+    pub collection_path: PathBuf,
+    pub space_name: String,
+    pub offset: usize,
+    pub length: usize,
+}
+
 impl Storage {
     pub fn new(cache_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(cache_dir)?;
@@ -777,6 +787,90 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let rows = stmt.query_map(params_from_iter(chunk_ids.iter()), decode_chunk_row)?;
         let chunks = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(chunks)
+    }
+
+    pub fn insert_embeddings(&self, entries: &[(i64, &str)]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let tx = conn.unchecked_transaction()?;
+        let mut stmt = tx.prepare(
+            "INSERT INTO embeddings (chunk_id, model, embedded_at)
+             VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+             ON CONFLICT(chunk_id, model) DO UPDATE SET
+               embedded_at = excluded.embedded_at",
+        )?;
+
+        for (chunk_id, model) in entries {
+            stmt.execute(params![chunk_id, model])?;
+        }
+
+        drop(stmt);
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_unembedded_chunks(&self, model: &str, limit: usize) -> Result<Vec<EmbedRecord>> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let sql_limit = i64::try_from(limit)
+            .map_err(|_| CoreError::Internal("limit too large for sqlite".to_string()))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT c.id, d.path, col.path, s.name, c.offset, c.length
+             FROM chunks c
+             JOIN documents d ON d.id = c.doc_id
+             JOIN collections col ON col.id = d.collection_id
+             JOIN spaces s ON s.id = col.space_id
+             LEFT JOIN embeddings e ON e.chunk_id = c.id AND e.model = ?1
+             WHERE d.active = 1 AND e.chunk_id IS NULL
+             ORDER BY c.id ASC
+             LIMIT ?2",
+        )?;
+
+        let rows = stmt.query_map(params![model, sql_limit], |row| {
+            let offset_value: i64 = row.get(4)?;
+            let length_value: i64 = row.get(5)?;
+            Ok(EmbedRecord {
+                chunk_id: row.get(0)?,
+                doc_path: row.get(1)?,
+                collection_path: PathBuf::from(row.get::<_, String>(2)?),
+                space_name: row.get(3)?,
+                offset: offset_value as usize,
+                length: length_value as usize,
+            })
+        })?;
+
+        let records = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(records)
+    }
+
+    pub fn delete_embeddings_for_model(&self, model: &str) -> Result<usize> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let deleted = conn.execute("DELETE FROM embeddings WHERE model = ?1", params![model])?;
+        Ok(deleted)
+    }
+
+    pub fn count_embeddings(&self) -> Result<usize> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM embeddings", [], |row| row.get(0))?;
+        Ok(count as usize)
     }
 }
 
