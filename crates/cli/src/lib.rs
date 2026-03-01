@@ -158,6 +158,11 @@ impl CliAdapter {
             collection.updated
         ))
     }
+
+    pub fn collection_describe(&self, space: Option<&str>, name: &str, text: &str) -> Result<String> {
+        self.engine.describe_collection(space, name, text)?;
+        Ok(format!("collection description updated: {name}"))
+    }
 }
 
 #[cfg(test)]
@@ -535,6 +540,41 @@ mod tests {
             assert!(
                 output.contains("extensions: rs,md"),
                 "unexpected output: {output}"
+            );
+        });
+    }
+
+    #[test]
+    fn collection_describe_updates_collection_description() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: collection_path,
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: Some("old docs".to_string()),
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add work collection");
+
+            let adapter = CliAdapter::new(engine);
+            let output = adapter
+                .collection_describe(Some("work"), "api", "new docs")
+                .expect("describe collection");
+            assert_eq!(output, "collection description updated: api");
+
+            let info = adapter
+                .collection_info(Some("work"), "api")
+                .expect("collection info");
+            assert!(
+                info.contains("description: new docs"),
+                "unexpected output: {info}"
             );
         });
     }

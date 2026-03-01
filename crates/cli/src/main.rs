@@ -60,6 +60,10 @@ fn run() -> Result<()> {
                 let line = adapter.collection_info(cli.space.as_deref(), &name)?;
                 println!("{line}");
             }
+            CollectionCommand::Describe { name, text } => {
+                let line = adapter.collection_describe(cli.space.as_deref(), &name, &text)?;
+                println!("{line}");
+            }
         },
     }
 
