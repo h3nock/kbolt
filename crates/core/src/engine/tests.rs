@@ -1447,6 +1447,42 @@ fn update_skips_hardcoded_ignored_paths() {
 }
 
 #[test]
+fn update_applies_collection_ignore_patterns() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        write_text_file(&collection_path.join("src/lib.rs"), "fn alpha() {}\n");
+        write_text_file(&collection_path.join("docs/guide.md"), "guide\n");
+
+        let ignore_path = engine
+            .config()
+            .config_dir
+            .join("ignores")
+            .join("work")
+            .join("api.ignore");
+        write_text_file(&ignore_path, "docs/**\n");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("run update");
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.added, 1);
+
+        let files = engine
+            .list_files(Some("work"), "api", None)
+            .expect("list indexed files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "src/lib.rs");
+    });
+}
+
+#[test]
 fn update_tracks_modified_and_deactivated_documents() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);

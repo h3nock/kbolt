@@ -10,6 +10,7 @@ use crate::storage::{ChunkInsert, CollectionRow, DocumentRow, SpaceResolution, T
 use crate::storage::Storage;
 use crate::Result;
 use crate::ModelPullEvent;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 use kbolt_types::{
@@ -940,6 +941,12 @@ impl Engine {
             .collect();
         let mut seen_paths = HashSet::new();
         let extension_filter = normalized_extension_filter(target.collection.extensions.as_deref());
+        let ignore_matcher = load_collection_ignore_matcher(
+            &self.config.config_dir,
+            &target.collection.path,
+            &target.space,
+            &target.collection.name,
+        )?;
         let mut touched_collection = false;
 
         for entry in WalkDir::new(&target.collection.path)
@@ -979,6 +986,12 @@ impl Engine {
                     continue;
                 }
             };
+
+            if let Some(matcher) = ignore_matcher.as_ref() {
+                if matcher.matched(Path::new(&relative_path), false).is_ignore() {
+                    continue;
+                }
+            }
             report.scanned += 1;
             seen_paths.insert(relative_path.clone());
 
@@ -1260,6 +1273,42 @@ fn is_hard_ignored_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("lock"))
+}
+
+fn load_collection_ignore_matcher(
+    config_dir: &Path,
+    collection_root: &Path,
+    space: &str,
+    collection: &str,
+) -> Result<Option<Gitignore>> {
+    let ignore_file = collection_ignore_file_path(config_dir, space, collection);
+    if !ignore_file.is_file() {
+        return Ok(None);
+    }
+
+    let mut builder = GitignoreBuilder::new(collection_root);
+    if let Some(err) = builder.add(&ignore_file) {
+        return Err(KboltError::InvalidInput(format!(
+            "invalid ignore file '{}': {err}",
+            ignore_file.display()
+        ))
+        .into());
+    }
+
+    let matcher = builder.build().map_err(|err| {
+        KboltError::InvalidInput(format!(
+            "invalid ignore file '{}': {err}",
+            ignore_file.display()
+        ))
+    })?;
+    Ok(Some(matcher))
+}
+
+fn collection_ignore_file_path(config_dir: &Path, space: &str, collection: &str) -> std::path::PathBuf {
+    config_dir
+        .join("ignores")
+        .join(space)
+        .join(format!("{collection}.ignore"))
 }
 
 fn collection_relative_path(root: &Path, full_path: &Path) -> std::result::Result<String, KboltError> {
