@@ -102,9 +102,9 @@ pub enum SpaceResolution {
 
 #[derive(Debug, Clone)]
 struct SpaceIndexes {
-    tantivy_dir: PathBuf,
-    usearch_path: PathBuf,
-    tantivy_index: tantivy::Index,
+    _tantivy_dir: PathBuf,
+    _usearch_path: PathBuf,
+    _tantivy_index: tantivy::Index,
 }
 
 impl Storage {
@@ -228,9 +228,9 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             .write()
             .map_err(|_| CoreError::poisoned("spaces"))?;
         spaces.entry(name.to_string()).or_insert(SpaceIndexes {
-            tantivy_dir,
-            usearch_path,
-            tantivy_index,
+            _tantivy_dir: tantivy_dir,
+            _usearch_path: usearch_path,
+            _tantivy_index: tantivy_index,
         });
 
         Ok(())
