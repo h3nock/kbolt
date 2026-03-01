@@ -3,7 +3,7 @@ use tempfile::tempdir;
 use crate::config::{Config, ModelConfig, ReapingConfig};
 use crate::engine::Engine;
 use crate::storage::Storage;
-use kbolt_types::KboltError;
+use kbolt_types::{AddCollectionRequest, KboltError};
 
 fn test_engine() -> Engine {
     let root = tempdir().expect("create temp root");
@@ -108,4 +108,170 @@ fn config_and_storage_accessors_expose_engine_components() {
     assert_eq!(default_space.name, "default");
     assert_eq!(engine.config().default_space, None::<String>);
     assert!(!engine.config().config_dir.as_os_str().is_empty());
+}
+
+#[test]
+fn add_collection_and_collection_info_with_explicit_space() {
+    let engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+    let root = tempdir().expect("create temp root");
+    let collection_path = root.path().join("api");
+    std::fs::create_dir_all(&collection_path).expect("create collection dir");
+
+    let added = engine
+        .add_collection(AddCollectionRequest {
+            path: collection_path.clone(),
+            space: Some("work".to_string()),
+            name: Some("api".to_string()),
+            description: Some("API docs".to_string()),
+            extensions: Some(vec!["rs".to_string(), "md".to_string()]),
+            no_index: true,
+        })
+        .expect("add collection");
+    assert_eq!(added.name, "api");
+    assert_eq!(added.space, "work");
+    assert_eq!(added.path, collection_path);
+    assert_eq!(added.description.as_deref(), Some("API docs"));
+    assert_eq!(
+        added.extensions,
+        Some(vec!["rs".to_string(), "md".to_string()])
+    );
+    assert_eq!(added.document_count, 0);
+    assert_eq!(added.active_document_count, 0);
+    assert_eq!(added.chunk_count, 0);
+    assert_eq!(added.embedded_chunk_count, 0);
+
+    let info = engine
+        .collection_info(Some("work"), "api")
+        .expect("fetch collection info");
+    assert_eq!(info.name, "api");
+    assert_eq!(info.space, "work");
+}
+
+#[test]
+fn add_collection_without_no_index_returns_explicit_error_and_does_not_create_row() {
+    let engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+    let root = tempdir().expect("create temp root");
+    let collection_path = root.path().join("api");
+    std::fs::create_dir_all(&collection_path).expect("create collection dir");
+
+    let err = engine
+        .add_collection(AddCollectionRequest {
+            path: collection_path,
+            space: Some("work".to_string()),
+            name: Some("api".to_string()),
+            description: None,
+            extensions: None,
+            no_index: false,
+        })
+        .expect_err("collection add should fail without --no-index until update is wired");
+    assert!(
+        err.to_string()
+            .contains("automatic indexing on collection add is not wired yet"),
+        "unexpected error: {err}"
+    );
+
+    let collections = engine
+        .list_collections(Some("work"))
+        .expect("list collections");
+    assert!(collections.is_empty(), "collection should not have been created");
+}
+
+#[test]
+fn collection_mutation_wrappers_delegate_to_storage_with_explicit_space() {
+    let engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+    let root = tempdir().expect("create temp root");
+    let collection_path = root.path().join("api");
+    std::fs::create_dir_all(&collection_path).expect("create collection dir");
+    engine
+        .add_collection(AddCollectionRequest {
+            path: collection_path,
+            space: Some("work".to_string()),
+            name: Some("api".to_string()),
+            description: None,
+            extensions: None,
+            no_index: true,
+        })
+        .expect("add collection");
+
+    engine
+        .describe_collection(Some("work"), "api", "updated desc")
+        .expect("describe collection");
+    let described = engine
+        .collection_info(Some("work"), "api")
+        .expect("collection info");
+    assert_eq!(described.description.as_deref(), Some("updated desc"));
+
+    engine
+        .rename_collection(Some("work"), "api", "backend")
+        .expect("rename collection");
+    let renamed = engine
+        .collection_info(Some("work"), "backend")
+        .expect("backend info");
+    assert_eq!(renamed.name, "backend");
+
+    engine
+        .remove_collection(Some("work"), "backend")
+        .expect("remove collection");
+    let missing = engine
+        .collection_info(Some("work"), "backend")
+        .expect_err("backend should be removed");
+    match KboltError::from(missing) {
+        KboltError::CollectionNotFound { name } => assert_eq!(name, "backend"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn list_collections_returns_all_or_space_scoped_collections() {
+    let engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+    engine.add_space("notes", None).expect("add notes");
+
+    let root = tempdir().expect("create temp root");
+    let work_path = root.path().join("work-api");
+    let notes_path = root.path().join("notes-wiki");
+    std::fs::create_dir_all(&work_path).expect("create work dir");
+    std::fs::create_dir_all(&notes_path).expect("create notes dir");
+
+    engine
+        .add_collection(AddCollectionRequest {
+            path: work_path,
+            space: Some("work".to_string()),
+            name: Some("api".to_string()),
+            description: None,
+            extensions: None,
+            no_index: true,
+        })
+        .expect("add work collection");
+    engine
+        .add_collection(AddCollectionRequest {
+            path: notes_path,
+            space: Some("notes".to_string()),
+            name: Some("wiki".to_string()),
+            description: None,
+            extensions: None,
+            no_index: true,
+        })
+        .expect("add notes collection");
+
+    let all = engine.list_collections(None).expect("list all");
+    assert_eq!(all.len(), 2);
+    assert!(
+        all.iter()
+            .any(|collection| collection.space == "work" && collection.name == "api")
+    );
+    assert!(
+        all.iter()
+            .any(|collection| collection.space == "notes" && collection.name == "wiki")
+    );
+
+    let work_only = engine
+        .list_collections(Some("work"))
+        .expect("list work only");
+    assert_eq!(work_only.len(), 1);
+    assert_eq!(work_only[0].space, "work");
+    assert_eq!(work_only[0].name, "api");
 }
