@@ -765,6 +765,8 @@ name = "kbolt-mcp"
 version = "0.1.0"
 dependencies = [
  "kbolt-core",
+ "kbolt-types",
+ "tempfile",
 ]
 
 [[package]]
