@@ -126,6 +126,38 @@ impl CliAdapter {
         }
         Ok(lines.join("\n"))
     }
+
+    pub fn collection_info(&self, space: Option<&str>, name: &str) -> Result<String> {
+        let collection = self.engine.collection_info(space, name)?;
+        let description = collection.description.unwrap_or_default();
+        let extensions = collection
+            .extensions
+            .map(|items| items.join(","))
+            .unwrap_or_default();
+        let description_line = if description.is_empty() {
+            "description:".to_string()
+        } else {
+            format!("description: {description}")
+        };
+        let extensions_line = if extensions.is_empty() {
+            "extensions:".to_string()
+        } else {
+            format!("extensions: {extensions}")
+        };
+
+        Ok(format!(
+            "name: {}\nspace: {}\npath: {}\n{description_line}\n{extensions_line}\ndocuments: {}\nactive_documents: {}\nchunks: {}\nembedded_chunks: {}\ncreated: {}\nupdated: {}",
+            collection.name,
+            collection.space,
+            collection.path.display(),
+            collection.document_count,
+            collection.active_document_count,
+            collection.chunk_count,
+            collection.embedded_chunk_count,
+            collection.created,
+            collection.updated
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -468,6 +500,42 @@ mod tests {
                 .expect("list all collections");
             assert!(all.contains("- work/api"), "unexpected all output: {all}");
             assert!(all.contains("- notes/wiki"), "unexpected all output: {all}");
+        });
+    }
+
+    #[test]
+    fn collection_info_resolves_and_formats_fields() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: collection_path.clone(),
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: Some("API docs".to_string()),
+                    extensions: Some(vec!["rs".to_string(), "md".to_string()]),
+                    no_index: true,
+                })
+                .expect("add work collection");
+
+            let adapter = CliAdapter::new(engine);
+            let output = adapter
+                .collection_info(Some("work"), "api")
+                .expect("collection info");
+            assert!(output.contains("name: api"), "unexpected output: {output}");
+            assert!(output.contains("space: work"), "unexpected output: {output}");
+            assert!(
+                output.contains("description: API docs"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("extensions: rs,md"),
+                "unexpected output: {output}"
+            );
         });
     }
 }

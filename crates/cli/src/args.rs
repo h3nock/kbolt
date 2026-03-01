@@ -55,6 +55,7 @@ pub enum SpaceCommand {
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum CollectionCommand {
     List,
+    Info { name: String },
 }
 
 #[cfg(test)]
@@ -221,6 +222,23 @@ mod tests {
             Command::Collection(collection) => {
                 assert_eq!(collection.command, CollectionCommand::List)
             }
+            Command::Space(_) => panic!("unexpected space command"),
+        }
+    }
+
+    #[test]
+    fn parses_collection_info() {
+        let parsed =
+            Cli::try_parse_from(["kbolt", "collection", "info", "api"]).expect("parse cli");
+        assert_eq!(parsed.space, None);
+
+        match parsed.command {
+            Command::Collection(collection) => assert_eq!(
+                collection.command,
+                CollectionCommand::Info {
+                    name: "api".to_string()
+                }
+            ),
             Command::Space(_) => panic!("unexpected space command"),
         }
     }
