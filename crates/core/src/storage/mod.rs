@@ -1562,6 +1562,68 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         Ok(())
     }
 
+    pub fn count_documents_in_collection(
+        &self,
+        collection_id: i64,
+        active_only: bool,
+    ) -> Result<usize> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let _collection_name = lookup_collection_name(&conn, collection_id)?;
+
+        let sql = if active_only {
+            "SELECT COUNT(*)
+             FROM documents
+             WHERE collection_id = ?1 AND active = 1"
+        } else {
+            "SELECT COUNT(*)
+             FROM documents
+             WHERE collection_id = ?1"
+        };
+
+        let count: i64 = conn.query_row(sql, params![collection_id], |row| row.get(0))?;
+        Ok(count as usize)
+    }
+
+    pub fn count_chunks_in_collection(&self, collection_id: i64) -> Result<usize> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let _collection_name = lookup_collection_name(&conn, collection_id)?;
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*)
+             FROM chunks c
+             JOIN documents d ON d.id = c.doc_id
+             WHERE d.collection_id = ?1",
+            params![collection_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    pub fn count_embedded_chunks_in_collection(&self, collection_id: i64) -> Result<usize> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let _collection_name = lookup_collection_name(&conn, collection_id)?;
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT e.chunk_id)
+             FROM embeddings e
+             JOIN chunks c ON c.id = e.chunk_id
+             JOIN documents d ON d.id = c.doc_id
+             WHERE d.collection_id = ?1",
+            params![collection_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
     pub fn count_documents(&self, space_id: Option<i64>) -> Result<usize> {
         let conn = self
             .db
