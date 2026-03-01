@@ -1,6 +1,9 @@
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
-use kbolt_types::{CollectionInfo, FileEntry, SpaceInfo, StatusResponse, UpdateOptions, UpdateReport};
+use kbolt_types::{
+    CollectionInfo, DocumentResponse, FileEntry, GetRequest, SpaceInfo, StatusResponse,
+    UpdateOptions, UpdateReport,
+};
 
 pub struct McpAdapter {
     pub engine: Engine,
@@ -35,6 +38,10 @@ impl McpAdapter {
     pub fn status(&self, space: Option<&str>) -> Result<StatusResponse> {
         self.engine.status(space)
     }
+
+    pub fn get_document(&self, req: GetRequest) -> Result<DocumentResponse> {
+        self.engine.get_document(req)
+    }
 }
 
 #[cfg(test)]
@@ -45,7 +52,7 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use kbolt_core::engine::Engine;
-    use kbolt_types::{AddCollectionRequest, UpdateOptions};
+    use kbolt_types::{AddCollectionRequest, GetRequest, Locator, UpdateOptions};
     use tempfile::tempdir;
 
     use super::McpAdapter;
@@ -203,6 +210,53 @@ mod tests {
             assert_eq!(status.spaces.len(), 1);
             assert_eq!(status.spaces[0].name, "work");
             assert_eq!(status.total_documents, 1);
+        });
+    }
+
+    #[test]
+    fn get_document_wrapper_returns_content() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+
+            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: work_path.clone(),
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add work collection");
+
+            fs::create_dir_all(work_path.join("src")).expect("create src dir");
+            fs::write(work_path.join("src/lib.rs"), "line-a\nline-b\n").expect("write file");
+
+            let adapter = McpAdapter::new(engine);
+            adapter
+                .update(UpdateOptions {
+                    space: Some("work".to_string()),
+                    collections: vec!["api".to_string()],
+                    no_embed: true,
+                    dry_run: false,
+                    verbose: false,
+                })
+                .expect("run update");
+
+            let document = adapter
+                .get_document(GetRequest {
+                    locator: Locator::Path("api/src/lib.rs".to_string()),
+                    space: Some("work".to_string()),
+                    offset: Some(1),
+                    limit: Some(1),
+                })
+                .expect("get document");
+            assert_eq!(document.path, "api/src/lib.rs");
+            assert_eq!(document.content, "line-b");
+            assert_eq!(document.returned_lines, 1);
         });
     }
 }
