@@ -1,0 +1,9 @@
+[package]
+name = "kbolt-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kbolt-types = { path = "../types" }
+
