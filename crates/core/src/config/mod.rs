@@ -33,8 +33,8 @@ pub struct ModelConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum ModelProvider {
+    #[serde(rename = "huggingface")]
     HuggingFace,
 }
 

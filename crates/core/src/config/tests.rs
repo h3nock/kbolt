@@ -45,16 +45,16 @@ default_space = "work"
 [models]
 
 [models.embedder]
-provider = "hugging-face"
+provider = "huggingface"
 id = "embed-model"
 revision = "main"
 
 [models.reranker]
-provider = "hugging-face"
+provider = "huggingface"
 id = "reranker-model"
 
 [models.expander]
-provider = "hugging-face"
+provider = "huggingface"
 id = "expander-model"
 
 [reaping]

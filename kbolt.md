@@ -941,9 +941,19 @@ pub struct Config {
 }
 
 pub struct ModelConfig {
-    pub embed: String,                     // model identifier (e.g. "google/EmbeddingGemma-256")
-    pub reranker: String,
-    pub expander: String,
+    pub embedder: ModelSourceConfig,
+    pub reranker: ModelSourceConfig,
+    pub expander: ModelSourceConfig,
+}
+
+pub struct ModelSourceConfig {
+    pub provider: ModelProvider,           // "huggingface" in V1
+    pub id: String,                        // provider model identifier
+    pub revision: Option<String>,          // optional pinned revision/tag
+}
+
+pub enum ModelProvider {
+    HuggingFace,
 }
 
 pub struct ReapingConfig {
@@ -1596,9 +1606,19 @@ System-level settings only. Spaces and collections are stored in SQLite, managed
 default_space = "work"    # optional, set via `kbolt space default`
 
 [models]
-embed = "google/EmbeddingGemma-256"
-reranker = "ExpedientFalcon/qwen3-reranker-0.6b-q8"
-expander = "Qwen/Qwen3-1.7B-q4"
+
+[models.embedder]
+provider = "huggingface"
+id = "google/EmbeddingGemma-256"
+# revision = "main"
+
+[models.reranker]
+provider = "huggingface"
+id = "ExpedientFalcon/qwen3-reranker-0.6b-q8"
+
+[models.expander]
+provider = "huggingface"
+id = "Qwen/Qwen3-1.7B-q4"
 
 [reaping]
 days = 7    # hard-delete documents deactivated longer than this
