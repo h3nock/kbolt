@@ -2,7 +2,8 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use kbolt_types::{KboltError, Result};
+use crate::error::Result;
+use kbolt_types::KboltError;
 use serde::{Deserialize, Serialize};
 
 const APP_NAME: &str = "kbolt";
@@ -46,8 +47,7 @@ pub fn save(config: &Config) -> Result<()> {
     fs::create_dir_all(&config.cache_dir)?;
 
     let file_config = FileConfig::from(config);
-    let serialized = toml::to_string_pretty(&file_config)
-        .map_err(|err| KboltError::Config(format!("failed to serialize config: {err}")))?;
+    let serialized = toml::to_string_pretty(&file_config)?;
     let content = if serialized.ends_with('\n') {
         serialized
     } else {
@@ -71,10 +71,13 @@ fn resolve_config_dir(config_path: Option<&Path>) -> Result<PathBuf> {
             }
 
             if path.extension() == Some(OsStr::new("toml")) {
-                return Err(KboltError::Config(format!(
-                    "config file override must be named {CONFIG_FILENAME}: {}",
-                    path.display()
-                )));
+                return Err(
+                    KboltError::Config(format!(
+                        "config file override must be named {CONFIG_FILENAME}: {}",
+                        path.display()
+                    ))
+                    .into(),
+                );
             }
 
             Ok(path.to_path_buf())
@@ -116,8 +119,7 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
     }
 
     let raw = fs::read_to_string(config_file)?;
-    let file_config: FileConfig = toml::from_str(&raw)
-        .map_err(|err| KboltError::Config(format!("failed to parse config file: {err}")))?;
+    let file_config: FileConfig = toml::from_str(&raw)?;
 
     Ok(Config {
         config_dir: config_dir.to_path_buf(),
