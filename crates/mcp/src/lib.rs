@@ -1,6 +1,5 @@
 use kbolt_core::engine::Engine;
 
-#[derive(Debug)]
 pub struct McpAdapter {
     pub engine: Engine,
 }
