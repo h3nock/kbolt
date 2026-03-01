@@ -75,6 +75,17 @@ pub struct EmbedRecord {
     pub length: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FtsDirtyRecord {
+    pub doc_id: i64,
+    pub doc_path: String,
+    pub doc_title: String,
+    pub doc_hash: String,
+    pub collection_path: PathBuf,
+    pub space_name: String,
+    pub chunks: Vec<ChunkRow>,
+}
+
 impl Storage {
     pub fn new(cache_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(cache_dir)?;
@@ -872,6 +883,66 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM embeddings", [], |row| row.get(0))?;
         Ok(count as usize)
     }
+
+    pub fn get_fts_dirty_documents(&self) -> Result<Vec<FtsDirtyRecord>> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT d.id, d.path, d.title, d.hash, c.path, s.name
+             FROM documents d
+             JOIN collections c ON c.id = d.collection_id
+             JOIN spaces s ON s.id = c.space_id
+             WHERE d.fts_dirty = 1
+             ORDER BY d.id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        let headers = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        let mut records = Vec::with_capacity(headers.len());
+        for (doc_id, doc_path, doc_title, doc_hash, collection_path, space_name) in headers {
+            let chunks = load_chunks_for_doc(&conn, doc_id)?;
+            records.push(FtsDirtyRecord {
+                doc_id,
+                doc_path,
+                doc_title,
+                doc_hash,
+                collection_path: PathBuf::from(collection_path),
+                space_name,
+                chunks,
+            });
+        }
+
+        Ok(records)
+    }
+
+    pub fn batch_clear_fts_dirty(&self, doc_ids: &[i64]) -> Result<()> {
+        if doc_ids.is_empty() {
+            return Ok(());
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let placeholders = vec!["?"; doc_ids.len()].join(", ");
+        let sql = format!("UPDATE documents SET fts_dirty = 0 WHERE id IN ({placeholders})");
+        conn.execute(&sql, params_from_iter(doc_ids.iter()))?;
+        Ok(())
+    }
 }
 
 fn lookup_space_name(conn: &Connection, space_id: i64) -> Result<String> {
@@ -920,6 +991,18 @@ fn lookup_document_id(conn: &Connection, doc_id: i64) -> Result<i64> {
         .into()),
         Err(err) => Err(err.into()),
     }
+}
+
+fn load_chunks_for_doc(conn: &Connection, doc_id: i64) -> Result<Vec<ChunkRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, doc_id, seq, offset, length, heading, kind
+         FROM chunks
+         WHERE doc_id = ?1
+         ORDER BY seq ASC",
+    )?;
+    let rows = stmt.query_map(params![doc_id], decode_chunk_row)?;
+    let chunks = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(chunks)
 }
 
 fn serialize_extensions(extensions: Option<&[String]>) -> Result<Option<String>> {
