@@ -1345,6 +1345,117 @@ fn list_documents_missing_collection_returns_not_found() {
 }
 
 #[test]
+fn list_collection_file_rows_reports_counts_and_active_filter() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    let doc_a = storage
+        .upsert_document(
+            collection_id,
+            "src/a.rs",
+            "a.rs",
+            "hash-a",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc a");
+    let doc_b = storage
+        .upsert_document(
+            collection_id,
+            "src/b.rs",
+            "b.rs",
+            "hash-b",
+            "2026-03-01T11:00:00Z",
+        )
+        .expect("insert doc b");
+
+    let chunk_ids = storage
+        .insert_chunks(
+            doc_a,
+            &[
+                super::ChunkInsert {
+                    seq: 0,
+                    offset: 0,
+                    length: 10,
+                    heading: None,
+                    kind: "section".to_string(),
+                },
+                super::ChunkInsert {
+                    seq: 1,
+                    offset: 10,
+                    length: 8,
+                    heading: None,
+                    kind: "section".to_string(),
+                },
+            ],
+        )
+        .expect("insert chunks for doc a");
+    storage
+        .insert_chunks(
+            doc_b,
+            &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 12,
+                heading: None,
+                kind: "section".to_string(),
+            }],
+        )
+        .expect("insert chunk for doc b");
+    storage
+        .insert_embeddings(&[(chunk_ids[0], "embed-model")])
+        .expect("insert embeddings");
+    storage
+        .deactivate_document(doc_b)
+        .expect("deactivate doc b");
+
+    let all = storage
+        .list_collection_file_rows(collection_id, false)
+        .expect("list all files");
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].path, "src/a.rs");
+    assert_eq!(all[0].chunk_count, 2);
+    assert_eq!(all[0].embedded_chunk_count, 1);
+    assert!(all[0].active);
+    assert_eq!(all[1].path, "src/b.rs");
+    assert_eq!(all[1].chunk_count, 1);
+    assert_eq!(all[1].embedded_chunk_count, 0);
+    assert!(!all[1].active);
+
+    let active_only = storage
+        .list_collection_file_rows(collection_id, true)
+        .expect("list active files");
+    assert_eq!(active_only.len(), 1);
+    assert_eq!(active_only[0].path, "src/a.rs");
+    assert!(active_only[0].active);
+}
+
+#[test]
+fn list_collection_file_rows_missing_collection_returns_not_found() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+
+    let err = storage
+        .list_collection_file_rows(99999, false)
+        .expect_err("missing collection should fail");
+    match KboltError::from(err) {
+        KboltError::CollectionNotFound { name } => assert_eq!(name, "id=99999"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
 fn get_document_by_hash_prefix_returns_matching_rows() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");

@@ -57,6 +57,17 @@ pub struct DocumentRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileListRow {
+    pub doc_id: i64,
+    pub path: String,
+    pub title: String,
+    pub hash: String,
+    pub active: bool,
+    pub chunk_count: usize,
+    pub embedded_chunk_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkRow {
     pub id: i64,
     pub doc_id: i64,
@@ -864,6 +875,57 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let rows = stmt.query_map(params![collection_id], decode_document_row)?;
         let docs = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(docs)
+    }
+
+    pub fn list_collection_file_rows(
+        &self,
+        collection_id: i64,
+        active_only: bool,
+    ) -> Result<Vec<FileListRow>> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let _collection_name = lookup_collection_name(&conn, collection_id)?;
+
+        let sql = if active_only {
+            "SELECT d.id, d.path, d.title, d.hash, d.active,
+                    COUNT(DISTINCT c.id) AS chunk_count,
+                    COUNT(DISTINCT e.chunk_id) AS embedded_chunk_count
+             FROM documents d
+             LEFT JOIN chunks c ON c.doc_id = d.id
+             LEFT JOIN embeddings e ON e.chunk_id = c.id
+             WHERE d.collection_id = ?1 AND d.active = 1
+             GROUP BY d.id, d.path, d.title, d.hash, d.active
+             ORDER BY d.path ASC"
+        } else {
+            "SELECT d.id, d.path, d.title, d.hash, d.active,
+                    COUNT(DISTINCT c.id) AS chunk_count,
+                    COUNT(DISTINCT e.chunk_id) AS embedded_chunk_count
+             FROM documents d
+             LEFT JOIN chunks c ON c.doc_id = d.id
+             LEFT JOIN embeddings e ON e.chunk_id = c.id
+             WHERE d.collection_id = ?1
+             GROUP BY d.id, d.path, d.title, d.hash, d.active
+             ORDER BY d.path ASC"
+        };
+
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![collection_id], |row| {
+            let chunk_count: i64 = row.get(5)?;
+            let embedded_chunk_count: i64 = row.get(6)?;
+            Ok(FileListRow {
+                doc_id: row.get(0)?,
+                path: row.get(1)?,
+                title: row.get(2)?,
+                hash: row.get(3)?,
+                active: row.get::<_, i64>(4)? != 0,
+                chunk_count: chunk_count as usize,
+                embedded_chunk_count: embedded_chunk_count as usize,
+            })
+        })?;
+        let files = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(files)
     }
 
     pub fn get_document_by_hash_prefix(&self, prefix: &str) -> Result<Vec<DocumentRow>> {

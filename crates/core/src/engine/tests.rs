@@ -559,6 +559,119 @@ fn list_collections_returns_all_or_space_scoped_collections() {
 }
 
 #[test]
+fn list_files_returns_entries_and_applies_prefix_filter() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        write_text_file(&work_path.join("src/lib.rs"), "fn alpha() {}\n");
+        write_text_file(&work_path.join("docs/guide.md"), "guide text\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(work_space.id, "api")
+            .expect("get api collection");
+        let to_deactivate = engine
+            .storage()
+            .get_document_by_path(collection.id, "docs/guide.md")
+            .expect("get docs/guide.md")
+            .expect("docs/guide.md should exist");
+        engine
+            .storage()
+            .deactivate_document(to_deactivate.id)
+            .expect("deactivate docs file");
+
+        let all = engine
+            .list_files(Some("work"), "api", None)
+            .expect("list all files");
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].path, "docs/guide.md");
+        assert_eq!(all[1].path, "src/lib.rs");
+        assert!(!all[0].active);
+        assert!(all[1].active);
+        assert!(all.iter().all(|file| file.docid.starts_with('#')));
+        assert!(all.iter().all(|file| file.chunk_count > 0));
+        assert!(all.iter().all(|file| !file.embedded));
+
+        let src_only = engine
+            .list_files(Some("work"), "api", Some("src"))
+            .expect("list src files");
+        assert_eq!(src_only.len(), 1);
+        assert_eq!(src_only[0].path, "src/lib.rs");
+    });
+}
+
+#[test]
+fn list_files_without_space_uses_unique_collection_lookup() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+        write_text_file(&work_path.join("src/lib.rs"), "fn alpha() {}\n");
+        engine
+            .update(update_options(None, &["api"]))
+            .expect("initial update");
+
+        let files = engine
+            .list_files(None, "api", None)
+            .expect("list files with unique lookup");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "src/lib.rs");
+    });
+}
+
+#[test]
+fn list_files_errors_for_ambiguous_collection_and_invalid_prefix() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        let notes_path = root.path().join("notes-api");
+        std::fs::create_dir_all(&work_path).expect("create work dir");
+        std::fs::create_dir_all(&notes_path).expect("create notes dir");
+        add_collection_fixture(&engine, "work", "api", work_path);
+        add_collection_fixture(&engine, "notes", "api", notes_path);
+
+        let err = engine
+            .list_files(None, "api", None)
+            .expect_err("expected ambiguous collection");
+        match KboltError::from(err) {
+            KboltError::AmbiguousSpace { collection, spaces } => {
+                assert_eq!(collection, "api");
+                assert_eq!(spaces, vec!["notes".to_string(), "work".to_string()]);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+
+        let err = engine
+            .list_files(Some("work"), "api", Some("../src"))
+            .expect_err("expected invalid prefix");
+        match KboltError::from(err) {
+            KboltError::InvalidInput(message) => {
+                assert!(message.contains("prefix"), "unexpected message: {message}");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    });
+}
+
+#[test]
 fn resolve_update_targets_returns_all_collections_when_unscoped() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);

@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 use kbolt_types::{
     ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, KboltError, SpaceInfo,
-    CollectionStatus, FileError, ModelInfo, ModelStatus, SpaceStatus, StatusResponse,
+    CollectionStatus, FileEntry, FileError, ModelInfo, ModelStatus, SpaceStatus, StatusResponse,
     UpdateOptions, UpdateReport,
 };
 
@@ -164,6 +164,43 @@ impl Engine {
         let resolved = self.resolve_space_row(space, Some(name))?;
         let collection = self.storage.get_collection(resolved.id, name)?;
         self.build_collection_info(&resolved.name, &collection)
+    }
+
+    pub fn list_files(
+        &self,
+        space: Option<&str>,
+        collection: &str,
+        prefix: Option<&str>,
+    ) -> Result<Vec<FileEntry>> {
+        let resolved_space = self.resolve_space_row(space, Some(collection))?;
+        let collection_row = self
+            .storage
+            .get_collection(resolved_space.id, collection)?;
+        let normalized_prefix = normalize_list_prefix(prefix)?;
+        let file_rows = self
+            .storage
+            .list_collection_file_rows(collection_row.id, false)?;
+
+        let mut files = Vec::with_capacity(file_rows.len());
+        for file_row in file_rows {
+            if let Some(prefix) = normalized_prefix.as_deref() {
+                if !path_matches_prefix(&file_row.path, prefix) {
+                    continue;
+                }
+            }
+
+            files.push(FileEntry {
+                path: file_row.path,
+                title: file_row.title,
+                docid: short_docid(&file_row.hash),
+                active: file_row.active,
+                chunk_count: file_row.chunk_count,
+                embedded: file_row.chunk_count > 0
+                    && file_row.embedded_chunk_count >= file_row.chunk_count,
+            });
+        }
+
+        Ok(files)
     }
 
     pub fn resolve_space(&self, explicit: Option<&str>) -> Result<String> {
@@ -691,6 +728,51 @@ fn normalized_extension_filter(raw: Option<&[String]>) -> Option<HashSet<String>
             .collect::<HashSet<_>>()
     })
     .filter(|items| !items.is_empty())
+}
+
+fn normalize_list_prefix(prefix: Option<&str>) -> Result<Option<String>> {
+    let Some(raw_prefix) = prefix else {
+        return Ok(None);
+    };
+
+    let trimmed = raw_prefix.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let parsed = Path::new(trimmed);
+    if parsed.is_absolute() {
+        return Err(KboltError::InvalidInput("prefix must be relative".to_string()).into());
+    }
+
+    let mut parts = Vec::new();
+    for component in parsed.components() {
+        match component {
+            Component::Normal(item) => parts.push(item.to_string_lossy().into_owned()),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(
+                    KboltError::InvalidInput("prefix must not traverse directories".to_string())
+                        .into(),
+                )
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(parts.join("/")))
+}
+
+fn path_matches_prefix(path: &str, prefix: &str) -> bool {
+    path == prefix || path.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn short_docid(hash: &str) -> String {
+    let short = hash.get(..6).unwrap_or(hash);
+    format!("#{short}")
 }
 
 fn extension_allowed(path: &Path, filter: Option<&HashSet<String>>) -> bool {
