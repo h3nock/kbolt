@@ -18,6 +18,7 @@ pub enum Command {
     Collection(CollectionArgs),
     Update(UpdateArgs),
     Status,
+    Ls(LsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -42,6 +43,14 @@ pub struct UpdateArgs {
     pub dry_run: bool,
     #[arg(long)]
     pub verbose: bool,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct LsArgs {
+    pub collection: String,
+    pub prefix: Option<String>,
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -97,7 +106,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Cli, CollectionCommand, Command, SpaceCommand, UpdateArgs};
+    use super::{Cli, CollectionCommand, Command, LsArgs, SpaceCommand, UpdateArgs};
 
     #[test]
     fn parses_space_current_command() {
@@ -109,6 +118,7 @@ mod tests {
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -132,6 +142,7 @@ mod tests {
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -164,6 +175,7 @@ mod tests {
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -186,6 +198,7 @@ mod tests {
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -199,6 +212,7 @@ mod tests {
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -219,6 +233,7 @@ mod tests {
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -238,6 +253,7 @@ mod tests {
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -258,6 +274,7 @@ mod tests {
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -276,6 +293,7 @@ mod tests {
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -289,6 +307,7 @@ mod tests {
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -307,6 +326,7 @@ mod tests {
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -321,6 +341,7 @@ mod tests {
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -336,6 +357,7 @@ mod tests {
             Command::Space(_) => panic!("unexpected space command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -371,6 +393,7 @@ mod tests {
             Command::Space(_) => panic!("unexpected space command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -390,6 +413,7 @@ mod tests {
             Command::Space(_) => panic!("unexpected space command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -411,6 +435,7 @@ mod tests {
             Command::Space(_) => panic!("unexpected space command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -431,6 +456,7 @@ mod tests {
             Command::Space(_) => panic!("unexpected space command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -450,6 +476,7 @@ mod tests {
             Command::Space(_) => panic!("unexpected space command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -471,6 +498,7 @@ mod tests {
             Command::Space(_) => panic!("unexpected space command"),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -503,6 +531,7 @@ mod tests {
             Command::Space(_) => panic!("unexpected space command"),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
     }
 
@@ -515,6 +544,7 @@ mod tests {
             Command::Space(_) => panic!("unexpected space command"),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
         }
 
         let parsed = Cli::try_parse_from(["kbolt", "--space", "work", "status"])
@@ -525,6 +555,45 @@ mod tests {
             Command::Space(_) => panic!("unexpected space command"),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
+        }
+    }
+
+    #[test]
+    fn parses_ls_with_defaults_and_options() {
+        let parsed = Cli::try_parse_from(["kbolt", "ls", "api"]).expect("parse cli");
+        assert_eq!(parsed.space, None);
+        match parsed.command {
+            Command::Ls(ls) => assert_eq!(
+                ls,
+                LsArgs {
+                    collection: "api".to_string(),
+                    prefix: None,
+                    all: false
+                }
+            ),
+            Command::Space(_) => panic!("unexpected space command"),
+            Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
+        }
+
+        let parsed = Cli::try_parse_from(["kbolt", "--space", "work", "ls", "api", "src", "--all"])
+            .expect("parse cli");
+        assert_eq!(parsed.space.as_deref(), Some("work"));
+        match parsed.command {
+            Command::Ls(ls) => assert_eq!(
+                ls,
+                LsArgs {
+                    collection: "api".to_string(),
+                    prefix: Some("src".to_string()),
+                    all: true
+                }
+            ),
+            Command::Space(_) => panic!("unexpected space command"),
+            Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 }

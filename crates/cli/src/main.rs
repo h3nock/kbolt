@@ -109,6 +109,15 @@ fn run() -> Result<()> {
             let line = adapter.status(cli.space.as_deref())?;
             println!("{line}");
         }
+        Command::Ls(ls) => {
+            let line = adapter.ls(
+                cli.space.as_deref(),
+                &ls.collection,
+                ls.prefix.as_deref(),
+                ls.all,
+            )?;
+            println!("{line}");
+        }
     }
 
     Ok(())

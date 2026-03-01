@@ -413,6 +413,39 @@ impl CliAdapter {
 
         Ok(lines.join("\n"))
     }
+
+    pub fn ls(
+        &self,
+        space: Option<&str>,
+        collection: &str,
+        prefix: Option<&str>,
+        all: bool,
+    ) -> Result<String> {
+        let mut files = self.engine.list_files(space, collection, prefix)?;
+        if !all {
+            files.retain(|file| file.active);
+        }
+
+        let mut lines = Vec::new();
+        lines.push("files:".to_string());
+        if files.is_empty() {
+            lines.push("- none".to_string());
+            return Ok(lines.join("\n"));
+        }
+
+        for file in files {
+            if all {
+                lines.push(format!(
+                    "- {} | {} | {} | active: {}",
+                    file.path, file.title, file.docid, file.active
+                ));
+            } else {
+                lines.push(format!("- {} | {} | {}", file.path, file.title, file.docid));
+            }
+        }
+
+        Ok(lines.join("\n"))
+    }
 }
 
 #[cfg(test)]
@@ -1117,6 +1150,109 @@ mod tests {
                 .list_documents(collection.id, false)
                 .expect("list docs");
             assert!(docs.is_empty(), "dry run should not persist docs");
+        });
+    }
+
+    #[test]
+    fn ls_filters_inactive_by_default_and_includes_it_with_all() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            adapter
+                .space_add("work", None, false, &[])
+                .expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            adapter
+                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .expect("add collection");
+
+            fs::create_dir_all(collection_path.join("src")).expect("create src dir");
+            fs::write(collection_path.join("src/lib.rs"), "fn alpha() {}\n").expect("write src");
+            fs::create_dir_all(collection_path.join("docs")).expect("create docs dir");
+            fs::write(collection_path.join("docs/guide.md"), "guide\n").expect("write docs");
+            adapter
+                .update(Some("work"), &["api".to_string()], true, false, false)
+                .expect("run update");
+
+            let space = adapter.engine.storage().get_space("work").expect("get space");
+            let collection = adapter
+                .engine
+                .storage()
+                .get_collection(space.id, "api")
+                .expect("get collection");
+            let docs_entry = adapter
+                .engine
+                .storage()
+                .get_document_by_path(collection.id, "docs/guide.md")
+                .expect("lookup docs file")
+                .expect("docs file should exist");
+            adapter
+                .engine
+                .storage()
+                .deactivate_document(docs_entry.id)
+                .expect("deactivate docs file");
+
+            let default_output = adapter
+                .ls(Some("work"), "api", None, false)
+                .expect("run ls");
+            assert!(default_output.contains("files:"), "unexpected output: {default_output}");
+            assert!(
+                default_output.contains("- src/lib.rs | lib.rs | #"),
+                "unexpected output: {default_output}"
+            );
+            assert!(
+                !default_output.contains("docs/guide.md"),
+                "unexpected output: {default_output}"
+            );
+
+            let all_output = adapter
+                .ls(Some("work"), "api", None, true)
+                .expect("run ls --all");
+            assert!(
+                all_output.contains("- docs/guide.md | guide.md | #"),
+                "unexpected output: {all_output}"
+            );
+            assert!(
+                all_output.contains("active: false"),
+                "unexpected output: {all_output}"
+            );
+        });
+    }
+
+    #[test]
+    fn ls_supports_prefix_and_unique_space_resolution() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            adapter
+                .space_add("work", None, false, &[])
+                .expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            adapter
+                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .expect("add collection");
+
+            fs::create_dir_all(collection_path.join("src")).expect("create src dir");
+            fs::write(collection_path.join("src/lib.rs"), "fn alpha() {}\n").expect("write src");
+            fs::create_dir_all(collection_path.join("docs")).expect("create docs dir");
+            fs::write(collection_path.join("docs/guide.md"), "guide\n").expect("write docs");
+            adapter
+                .update(None, &["api".to_string()], true, false, false)
+                .expect("run update");
+
+            let output = adapter.ls(None, "api", Some("src"), false).expect("run ls");
+            assert!(
+                output.contains("- src/lib.rs | lib.rs | #"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                !output.contains("docs/guide.md"),
+                "unexpected output: {output}"
+            );
         });
     }
 
