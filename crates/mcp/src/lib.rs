@@ -1,3 +1,5 @@
+pub mod protocol;
+
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
 use kbolt_types::{
