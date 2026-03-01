@@ -1172,21 +1172,27 @@ mod tests {
     }
 
     #[test]
-    fn collection_add_without_no_index_surfaces_current_core_error() {
+    fn collection_add_without_no_index_triggers_index_update() {
         with_isolated_xdg_dirs(|| {
             let root = tempdir().expect("create collection root");
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
             let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            fs::create_dir_all(collection_path.join("src")).expect("create src dir");
+            fs::write(collection_path.join("src/lib.rs"), "fn alpha() {}\n").expect("write file");
             let adapter = CliAdapter::new(engine);
 
-            let err = adapter
+            let output = adapter
                 .collection_add(Some("work"), &collection_path, Some("api"), None, None, false)
-                .expect_err("collection add should fail without --no-index for now");
+                .expect("collection add should trigger update");
+            assert_eq!(output, "collection added: work/api");
+
+            let info = adapter
+                .collection_info(Some("work"), "api")
+                .expect("collection info");
             assert!(
-                err.to_string()
-                    .contains("automatic indexing on collection add is not wired yet"),
-                "unexpected error: {err}"
+                info.contains("documents: 1"),
+                "expected indexed document count in output: {info}"
             );
         });
     }
