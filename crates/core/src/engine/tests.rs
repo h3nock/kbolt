@@ -943,7 +943,7 @@ fn multi_get_respects_max_files_and_preserves_locator_order() {
             })
             .expect("run multi_get");
 
-        assert_eq!(result.resolved_count, 2);
+        assert_eq!(result.resolved_count, 3);
         assert_eq!(result.documents.len(), 2);
         assert_eq!(result.documents[0].path, "api/a.md");
         assert_eq!(result.documents[1].path, "api/b.md");
@@ -992,7 +992,7 @@ fn multi_get_respects_max_bytes_and_supports_mixed_locators() {
             })
             .expect("run multi_get");
 
-        assert_eq!(result.resolved_count, 1);
+        assert_eq!(result.resolved_count, 2);
         assert_eq!(result.documents.len(), 1);
         assert_eq!(result.documents[0].path, "api/a.md");
         assert_eq!(result.omitted.len(), 1);

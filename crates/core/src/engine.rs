@@ -353,6 +353,7 @@ impl Engine {
 
         let mut documents = Vec::new();
         let mut omitted = Vec::new();
+        let mut resolved_count = 0usize;
         let mut consumed_bytes = 0usize;
 
         for locator in req.locators {
@@ -362,6 +363,7 @@ impl Engine {
                 offset: None,
                 limit: None,
             })?;
+            resolved_count = resolved_count.saturating_add(1);
 
             let size_bytes = document.content.as_bytes().len();
             if documents.len() >= req.max_files {
@@ -389,7 +391,7 @@ impl Engine {
         }
 
         Ok(MultiGetResponse {
-            resolved_count: documents.len(),
+            resolved_count,
             documents,
             omitted,
         })

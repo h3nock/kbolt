@@ -1778,7 +1778,7 @@ mod tests {
                 "unexpected output: {output}"
             );
             assert!(
-                output.contains("resolved_count: 2"),
+                output.contains("resolved_count: 3"),
                 "unexpected output: {output}"
             );
         });

@@ -767,7 +767,7 @@ mod tests {
                 .expect("run multi_get");
             assert_eq!(response.documents.len(), 2);
             assert_eq!(response.omitted.len(), 1);
-            assert_eq!(response.resolved_count, 2);
+            assert_eq!(response.resolved_count, 3);
         });
     }
 
