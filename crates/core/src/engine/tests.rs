@@ -152,6 +152,39 @@ fn resolve_space_uses_configured_default_when_no_explicit_space() {
 }
 
 #[test]
+fn set_default_space_persists_config_and_can_clear_it() {
+    let mut engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+
+    let set = engine
+        .set_default_space(Some("work"))
+        .expect("set default space");
+    assert_eq!(set.as_deref(), Some("work"));
+    assert_eq!(engine.config().default_space.as_deref(), Some("work"));
+
+    let loaded = crate::config::load(Some(engine.config().config_dir.as_path()))
+        .expect("reload config from disk");
+    assert_eq!(loaded.default_space.as_deref(), Some("work"));
+
+    let cleared = engine.set_default_space(None).expect("clear default space");
+    assert_eq!(cleared, None);
+    assert_eq!(engine.config().default_space, None);
+}
+
+#[test]
+fn set_default_space_requires_existing_space() {
+    let mut engine = test_engine();
+
+    let err = engine
+        .set_default_space(Some("missing"))
+        .expect_err("missing space should fail");
+    match KboltError::from(err) {
+        KboltError::SpaceNotFound { name } => assert_eq!(name, "missing"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
 fn add_collection_and_collection_info_with_explicit_space() {
     let engine = test_engine();
     engine.add_space("work", None).expect("add work");
