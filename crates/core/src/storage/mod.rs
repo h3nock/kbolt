@@ -32,6 +32,19 @@ pub struct CollectionRow {
     pub updated: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentRow {
+    pub id: i64,
+    pub collection_id: i64,
+    pub path: String,
+    pub title: String,
+    pub hash: String,
+    pub modified: String,
+    pub active: bool,
+    pub deactivated_at: Option<String>,
+    pub fts_dirty: bool,
+}
+
 impl Storage {
     pub fn new(cache_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(cache_dir)?;
@@ -221,10 +234,9 @@ CREATE TABLE IF NOT EXISTS llm_cache (
 
     pub fn rename_space(&self, old: &str, new: &str) -> Result<()> {
         if old == DEFAULT_SPACE_NAME {
-            return Err(KboltError::Config(
-                "cannot rename reserved space: default".to_string(),
-            )
-            .into());
+            return Err(
+                KboltError::Config("cannot rename reserved space: default".to_string()).into(),
+            );
         }
 
         let conn = self
@@ -471,6 +483,94 @@ CREATE TABLE IF NOT EXISTS llm_cache (
 
         Ok(())
     }
+
+    pub fn upsert_document(
+        &self,
+        collection_id: i64,
+        path: &str,
+        title: &str,
+        hash: &str,
+        modified: &str,
+    ) -> Result<i64> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let _collection_name = lookup_collection_name(&conn, collection_id)?;
+
+        conn.execute(
+            "INSERT INTO documents (collection_id, path, title, hash, modified, active, deactivated_at, fts_dirty)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, NULL, 1)
+             ON CONFLICT(collection_id, path) DO UPDATE SET
+                 title = excluded.title,
+                 hash = excluded.hash,
+                 modified = excluded.modified,
+                 active = 1,
+                 deactivated_at = NULL,
+                 fts_dirty = 1",
+            params![collection_id, path, title, hash, modified],
+        )?;
+
+        let id: i64 = conn.query_row(
+            "SELECT id FROM documents WHERE collection_id = ?1 AND path = ?2",
+            params![collection_id, path],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    pub fn get_document_by_path(
+        &self,
+        collection_id: i64,
+        path: &str,
+    ) -> Result<Option<DocumentRow>> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let _collection_name = lookup_collection_name(&conn, collection_id)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, collection_id, path, title, hash, modified, active, deactivated_at, fts_dirty
+             FROM documents
+             WHERE collection_id = ?1 AND path = ?2",
+        )?;
+
+        let result = stmt.query_row(params![collection_id, path], decode_document_row);
+        match result {
+            Ok(row) => Ok(Some(row)),
+            Err(Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn list_documents(
+        &self,
+        collection_id: i64,
+        active_only: bool,
+    ) -> Result<Vec<DocumentRow>> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let _collection_name = lookup_collection_name(&conn, collection_id)?;
+
+        let sql = if active_only {
+            "SELECT id, collection_id, path, title, hash, modified, active, deactivated_at, fts_dirty
+             FROM documents
+             WHERE collection_id = ?1 AND active = 1
+             ORDER BY path ASC"
+        } else {
+            "SELECT id, collection_id, path, title, hash, modified, active, deactivated_at, fts_dirty
+             FROM documents
+             WHERE collection_id = ?1
+             ORDER BY path ASC"
+        };
+
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![collection_id], decode_document_row)?;
+        let docs = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(docs)
+    }
 }
 
 fn lookup_space_name(conn: &Connection, space_id: i64) -> Result<String> {
@@ -483,6 +583,22 @@ fn lookup_space_name(conn: &Connection, space_id: i64) -> Result<String> {
         Ok(name) => Ok(name),
         Err(Error::QueryReturnedNoRows) => Err(KboltError::SpaceNotFound {
             name: format!("id={space_id}"),
+        }
+        .into()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn lookup_collection_name(conn: &Connection, collection_id: i64) -> Result<String> {
+    let result = conn.query_row(
+        "SELECT name FROM collections WHERE id = ?1",
+        params![collection_id],
+        |row| row.get::<_, String>(0),
+    );
+    match result {
+        Ok(name) => Ok(name),
+        Err(Error::QueryReturnedNoRows) => Err(KboltError::CollectionNotFound {
+            name: format!("id={collection_id}"),
         }
         .into()),
         Err(err) => Err(err.into()),
@@ -519,6 +635,22 @@ fn decode_collection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Collection
         extensions,
         created: row.get(6)?,
         updated: row.get(7)?,
+    })
+}
+
+fn decode_document_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentRow> {
+    let active_value: i64 = row.get(6)?;
+    let fts_dirty_value: i64 = row.get(8)?;
+    Ok(DocumentRow {
+        id: row.get(0)?,
+        collection_id: row.get(1)?,
+        path: row.get(2)?,
+        title: row.get(3)?,
+        hash: row.get(4)?,
+        modified: row.get(5)?,
+        active: active_value != 0,
+        deactivated_at: row.get(7)?,
+        fts_dirty: fts_dirty_value != 0,
     })
 }
 
