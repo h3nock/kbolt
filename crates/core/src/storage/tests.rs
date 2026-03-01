@@ -144,6 +144,151 @@ fn open_space_initializes_expected_tantivy_schema_fields() {
 }
 
 #[test]
+fn tantivy_index_and_query_returns_ranked_hits() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    storage.create_space("work", None).expect("create work");
+
+    storage
+        .index_tantivy(
+            "work",
+            &[
+                super::TantivyEntry {
+                    chunk_id: 11,
+                    doc_id: 1,
+                    filepath: "api/lib.rs".to_string(),
+                    title: "alpha guide".to_string(),
+                    heading: Some("intro".to_string()),
+                    body: "alpha token in body".to_string(),
+                },
+                super::TantivyEntry {
+                    chunk_id: 22,
+                    doc_id: 2,
+                    filepath: "api/main.rs".to_string(),
+                    title: "beta guide".to_string(),
+                    heading: Some("usage".to_string()),
+                    body: "beta token only".to_string(),
+                },
+            ],
+        )
+        .expect("index entries");
+    storage.commit_tantivy("work").expect("commit tantivy");
+
+    let hits = storage
+        .query_bm25("work", "alpha", &[("title", 3.0), ("body", 1.0)], 10)
+        .expect("query bm25");
+    assert!(!hits.is_empty(), "expected at least one hit");
+    assert_eq!(hits[0].chunk_id, 11);
+}
+
+#[test]
+fn delete_tantivy_removes_chunk_after_commit() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    storage.create_space("work", None).expect("create work");
+
+    storage
+        .index_tantivy(
+            "work",
+            &[
+                super::TantivyEntry {
+                    chunk_id: 11,
+                    doc_id: 1,
+                    filepath: "api/lib.rs".to_string(),
+                    title: "alpha guide".to_string(),
+                    heading: None,
+                    body: "alphaunique".to_string(),
+                },
+                super::TantivyEntry {
+                    chunk_id: 22,
+                    doc_id: 2,
+                    filepath: "api/main.rs".to_string(),
+                    title: "beta guide".to_string(),
+                    heading: None,
+                    body: "betaunique".to_string(),
+                },
+            ],
+        )
+        .expect("index entries");
+    storage.commit_tantivy("work").expect("commit tantivy");
+
+    storage
+        .delete_tantivy("work", &[11])
+        .expect("delete first chunk");
+    storage.commit_tantivy("work").expect("commit delete");
+
+    let alpha_hits = storage
+        .query_bm25("work", "alphaunique", &[("body", 1.0)], 10)
+        .expect("query alpha");
+    assert!(alpha_hits.is_empty(), "deleted chunk should not be returned");
+
+    let beta_hits = storage
+        .query_bm25("work", "betaunique", &[("body", 1.0)], 10)
+        .expect("query beta");
+    assert_eq!(beta_hits.len(), 1);
+    assert_eq!(beta_hits[0].chunk_id, 22);
+}
+
+#[test]
+fn delete_tantivy_by_doc_removes_all_doc_chunks_after_commit() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    storage.create_space("work", None).expect("create work");
+
+    storage
+        .index_tantivy(
+            "work",
+            &[
+                super::TantivyEntry {
+                    chunk_id: 11,
+                    doc_id: 1,
+                    filepath: "api/lib.rs".to_string(),
+                    title: "alpha one".to_string(),
+                    heading: None,
+                    body: "doconea".to_string(),
+                },
+                super::TantivyEntry {
+                    chunk_id: 12,
+                    doc_id: 1,
+                    filepath: "api/lib.rs".to_string(),
+                    title: "alpha two".to_string(),
+                    heading: None,
+                    body: "doconeb".to_string(),
+                },
+                super::TantivyEntry {
+                    chunk_id: 21,
+                    doc_id: 2,
+                    filepath: "api/main.rs".to_string(),
+                    title: "beta".to_string(),
+                    heading: None,
+                    body: "doctwo".to_string(),
+                },
+            ],
+        )
+        .expect("index entries");
+    storage.commit_tantivy("work").expect("commit tantivy");
+
+    storage
+        .delete_tantivy_by_doc("work", 1)
+        .expect("delete doc 1");
+    storage.commit_tantivy("work").expect("commit delete");
+
+    let removed_a = storage
+        .query_bm25("work", "doconea", &[("body", 1.0)], 10)
+        .expect("query removed chunk a");
+    let removed_b = storage
+        .query_bm25("work", "doconeb", &[("body", 1.0)], 10)
+        .expect("query removed chunk b");
+    let remaining = storage
+        .query_bm25("work", "doctwo", &[("body", 1.0)], 10)
+        .expect("query remaining chunk");
+    assert!(removed_a.is_empty());
+    assert!(removed_b.is_empty());
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].chunk_id, 21);
+}
+
+#[test]
 fn find_space_for_collection_returns_not_found_when_absent() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
