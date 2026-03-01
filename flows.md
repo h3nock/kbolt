@@ -48,9 +48,14 @@ After install, `kbolt` command is available. No configuration needed yet — the
 kbolt models pull
 ```
 
-Downloads embedding model (~600MB), reranker (~700MB), and query expander (~1.2GB) from HuggingFace Hub to `~/.cache/kbolt/models/`. Shows download progress per model.
+Downloads embedding model (~600MB), reranker (~700MB), and query expander (~1.2GB) via the configured model provider (default: HuggingFace Hub) to `~/.cache/kbolt/models/{role}/` (`embedder`, `reranker`, `expander`). The command reports per-model progress events and a final download summary.
 
-If models are missing when a command needs them (search, update with embedding), kbolt prompts: "Models not downloaded. Download now and continue? (Y/n)" — if declined, falls back to keyword-only search. This flow exists so the user can pre-download to avoid the prompt, prepare for offline use, or avoid a slow first search.
+If models are missing when a command needs them (search, update with embedding), prompt/fallback behavior is CLI-only:
+- interactive CLI (TTY): kbolt prompts "Models not downloaded. Download now and continue? (Y/n)".
+- non-interactive CLI: no prompt; command fails with actionable guidance.
+- MCP/agent usage: no prompt; return deterministic error behavior.
+
+When the user declines the interactive prompt in auto search mode, kbolt falls back to keyword-only search. For explicitly requested semantic/deep modes, kbolt fails instead of silently changing mode.
 
 ---
 

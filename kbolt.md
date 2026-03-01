@@ -139,7 +139,7 @@ Every module that crosses the Core boundary:
 | `models/` | ONNX Runtime | in-process | Embedding inference (CPU, thread-safe) |
 | `models/` | llama-cpp | in-process | Reranking + generation (GPU, single-thread) |
 | `models/` | `~/.cache/models/` | read | Load .onnx and .gguf files from disk |
-| `models/` | HuggingFace Hub | download | Fetch model files on first use |
+| `models/` | Model artifact provider (default: HuggingFace Hub via `hf-hub`) | download | Fetch model files on first use |
 | `config/` | `~/.config/index.toml` | read/write | System settings (models, reaping, default space) |
 | `config/` | `~/.config/ignores/` | read/write | Ignore patterns (per space/collection) |
 | `ingest/` | Collection directories | read | Scan files, read bytes, compute hashes |
@@ -989,6 +989,8 @@ pub struct PullReport {
 
 `embed()`, `rerank()`, and `generate()` trigger lazy model loading on first invocation. The loaded model stays in memory for the process lifetime. Thread safety: embedder (ONNX) is `Arc<dyn Embedder>` (thread-safe, concurrent calls OK). Reranker and generator (llama-cpp) are `Mutex<dyn Reranker>` / `Mutex<dyn Generator>` (serialized access — llama-cpp is not thread-safe).
 
+Model download is delegated through a provider abstraction (for example, HuggingFace, local filesystem mirrors, or cloud object storage). The core model module must not hardcode provider-specific assumptions in orchestration logic.
+
 ---
 
 ## Entity Model
@@ -1212,10 +1214,10 @@ Key type:       u64 (chunk_id from SQLite)
         {space}/
             tantivy/        # Tantivy index (managed by Tantivy)
             vectors.usearch # USearch HNSW file (managed by USearch)
-    models/                 # downloaded via HuggingFace Hub (hf-hub crate)
-        embed.onnx
-        reranker.gguf
-        expander.gguf
+    models/                 # model artifacts (provider-managed cache)
+        embedder/           # embedder role artifacts
+        reranker/           # reranker role artifacts
+        expander/           # query-expander role artifacts
 ```
 
 SQLite is shared globally (one database for all spaces). Tantivy and USearch are per-space — each space has its own index directory under `~/.cache/kbolt/spaces/{space_name}/`. This gives each space independent BM25 IDF statistics, preventing one space's content from skewing another's keyword search quality.
@@ -1725,7 +1727,9 @@ Injected into LLM system prompt on connection:
 | Reranker | Qwen3-Reranker 0.6B | GGUF Q8 | ~700MB | llama-cpp-rs (GPU) |
 | Expander | Qwen3 1.7B | GGUF Q4 | ~1.2GB | llama-cpp-rs (GPU) |
 
-Download: HuggingFace Hub via `hf-hub` crate. Handles resumable downloads, SHA-256 checksum verification, local caching. Auto-download on first use (`kbolt models pull` for explicit pre-download).
+Download path is provider-agnostic in core: model orchestration depends on a provider abstraction, and artifact download is delegated to provider adapters. Default adapter is HuggingFace Hub via `hf-hub` (resumable downloads, checksum verification, local caching). `kbolt models pull` is the explicit pre-download path.
+
+Prompting is CLI-only: interactive terminal sessions may prompt to pull models when missing; non-interactive CLI and MCP never prompt.
 
 Models loaded lazily — embedder loads on first `kbolt update` (with embedding), reranker loads on first search that triggers reranking, expander loads on first `--deep` search. Once loaded, models stay in memory for the process lifetime (freed when the process exits). No inactivity timeout in V1 — it would add timer/reload complexity and cause unpredictable latency spikes during MCP sessions. Memory reclamation via timeout is a V2/daemon-mode feature.
 
