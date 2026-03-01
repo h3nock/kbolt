@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use serde_json::json;
 use tempfile::tempdir;
 
 use crate::config::{ModelConfig, ModelProvider, ModelSourceConfig};
@@ -8,6 +9,8 @@ use crate::models::{
     ModelPullEvent,
 };
 use crate::Result;
+
+const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";
 
 #[derive(Default)]
 struct FakeDownloader {
@@ -20,6 +23,26 @@ impl ModelArtifactProvider for FakeDownloader {
         std::fs::write(target_dir.join("model.bin"), model_id.as_bytes())?;
         Ok(self.bytes_per_model)
     }
+}
+
+fn provider_key(provider: &ModelProvider) -> &'static str {
+    match provider {
+        ModelProvider::HuggingFace => "huggingface",
+    }
+}
+
+fn seed_model(root: &Path, role: &str, source: &ModelSourceConfig, payload: &[u8]) {
+    let role_dir = root.join(role);
+    std::fs::create_dir_all(&role_dir).expect("create role dir");
+    std::fs::write(role_dir.join("model.bin"), payload).expect("write model payload");
+
+    let manifest = json!({
+        "provider": provider_key(&source.provider),
+        "id": source.id,
+        "revision": source.revision,
+    });
+    let bytes = serde_json::to_vec_pretty(&manifest).expect("serialize manifest");
+    std::fs::write(role_dir.join(MODEL_MANIFEST_FILENAME), bytes).expect("write model manifest");
 }
 
 fn test_config() -> ModelConfig {
@@ -75,7 +98,9 @@ fn status_reports_missing_models_when_directories_are_empty() {
 fn pull_downloads_all_missing_models_and_reports_bytes() {
     let root = tempdir().expect("create temp root");
     let config = test_config();
-    let downloader = FakeDownloader { bytes_per_model: 11 };
+    let downloader = FakeDownloader {
+        bytes_per_model: 11,
+    };
 
     let report = pull_with_downloader(&config, root.path(), &downloader).expect("pull models");
     assert_eq!(report.downloaded.len(), 3);
@@ -95,8 +120,7 @@ fn pull_skips_models_that_are_already_present() {
     let config = test_config();
     let downloader = FakeDownloader { bytes_per_model: 5 };
 
-    std::fs::create_dir_all(root.path().join("embedder")).expect("create embedder dir");
-    std::fs::write(root.path().join("embedder/model.bin"), b"existing").expect("seed existing");
+    seed_model(root.path(), "embedder", &config.embedder, b"existing");
 
     let report = pull_with_downloader(&config, root.path(), &downloader).expect("pull models");
     assert_eq!(report.downloaded.len(), 2);
@@ -110,8 +134,7 @@ fn pull_emits_progress_events_for_downloaded_and_present_models() {
     let config = test_config();
     let downloader = FakeDownloader { bytes_per_model: 7 };
 
-    std::fs::create_dir_all(root.path().join("embedder")).expect("create embedder dir");
-    std::fs::write(root.path().join("embedder/model.bin"), b"existing").expect("seed existing");
+    seed_model(root.path(), "embedder", &config.embedder, b"existing");
 
     let mut events = Vec::new();
     let report = pull_with_downloader_and_progress(&config, root.path(), &downloader, |event| {
@@ -151,4 +174,38 @@ fn pull_emits_progress_events_for_downloaded_and_present_models() {
             },
         ]
     );
+}
+
+#[test]
+fn status_treats_payload_without_manifest_as_missing() {
+    let root = tempdir().expect("create temp root");
+    let config = test_config();
+
+    std::fs::create_dir_all(root.path().join("embedder")).expect("create embedder dir");
+    std::fs::write(root.path().join("embedder/model.bin"), b"payload").expect("seed embedder");
+
+    let model_status = status(&config, root.path()).expect("read model status");
+    assert!(!model_status.embedder.downloaded);
+    assert_eq!(model_status.embedder.size_bytes, None);
+}
+
+#[test]
+fn pull_redownloads_model_when_manifest_does_not_match_source() {
+    let root = tempdir().expect("create temp root");
+    let config = test_config();
+    let downloader = FakeDownloader { bytes_per_model: 5 };
+
+    let mut mismatched_embedder = config.embedder.clone();
+    mismatched_embedder.id = "embed-model-old".to_string();
+    seed_model(root.path(), "embedder", &mismatched_embedder, b"existing");
+    seed_model(root.path(), "reranker", &config.reranker, b"existing");
+    seed_model(root.path(), "expander", &config.expander, b"existing");
+
+    let report = pull_with_downloader(&config, root.path(), &downloader).expect("pull models");
+    assert_eq!(report.downloaded, vec!["embed-model"]);
+    assert_eq!(
+        report.already_present,
+        vec!["rerank-model".to_string(), "expand-model".to_string()]
+    );
+    assert_eq!(report.total_bytes, 5);
 }

@@ -2,8 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use kbolt_types::{ModelInfo, ModelStatus, PullReport};
+use serde::{Deserialize, Serialize};
 
-use crate::config::{ModelConfig, ModelSourceConfig};
+use crate::config::{ModelConfig, ModelProvider, ModelSourceConfig};
 use crate::Result;
 
 mod provider;
@@ -12,6 +13,7 @@ mod providers;
 const MODEL_DIRNAME_EMBEDDER: &str = "embedder";
 const MODEL_DIRNAME_RERANKER: &str = "reranker";
 const MODEL_DIRNAME_EXPANDER: &str = "expander";
+const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";
 
 pub(crate) use provider::ModelArtifactProvider;
 use providers::hf::HfHubDownloader;
@@ -20,6 +22,28 @@ use providers::hf::HfHubDownloader;
 struct ModelTarget {
     role_dir: &'static str,
     source: ModelSourceConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ModelManifest {
+    provider: ModelProvider,
+    id: String,
+    #[serde(default)]
+    revision: Option<String>,
+}
+
+impl ModelManifest {
+    fn from_source(source: &ModelSourceConfig) -> Self {
+        Self {
+            provider: source.provider.clone(),
+            id: source.id.clone(),
+            revision: source.revision.clone(),
+        }
+    }
+
+    fn matches_source(&self, source: &ModelSourceConfig) -> bool {
+        self.provider == source.provider && self.id == source.id && self.revision == source.revision
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +78,11 @@ pub(crate) fn pull_with_downloader(
     pull_with_downloader_and_progress(config, model_dir, downloader, |_| {})
 }
 
-pub fn pull_with_progress<F>(config: &ModelConfig, model_dir: &Path, on_event: F) -> Result<PullReport>
+pub fn pull_with_progress<F>(
+    config: &ModelConfig,
+    model_dir: &Path,
+    on_event: F,
+) -> Result<PullReport>
 where
     F: FnMut(ModelPullEvent),
 {
@@ -82,8 +110,7 @@ where
         let role = target.role_dir.to_string();
         let model = target.source.id.clone();
         let target_dir = model_dir.join(target.role_dir);
-        let existing_bytes = dir_size_bytes(&target_dir).unwrap_or(0);
-        if existing_bytes > 0 {
+        if let Some(existing_bytes) = model_payload_size_bytes(&target_dir, &target.source)? {
             on_event(ModelPullEvent::AlreadyPresent {
                 role,
                 model: model.clone(),
@@ -103,6 +130,7 @@ where
             model: model.clone(),
             bytes: downloaded_bytes,
         });
+        write_model_manifest(&target_dir, &target.source)?;
         report.downloaded.push(model);
         report.total_bytes = report.total_bytes.saturating_add(downloaded_bytes);
     }
@@ -142,7 +170,7 @@ fn model_targets(config: &ModelConfig) -> [ModelTarget; 3] {
 
 fn info_for_target(model_dir: &Path, target: &ModelTarget) -> Result<ModelInfo> {
     let target_dir = model_dir.join(target.role_dir);
-    let size = dir_size_bytes(&target_dir)?;
+    let size = model_payload_size_bytes(&target_dir, &target.source)?.unwrap_or(0);
     Ok(ModelInfo {
         name: target.source.id.clone(),
         downloaded: size > 0,
@@ -151,7 +179,52 @@ fn info_for_target(model_dir: &Path, target: &ModelTarget) -> Result<ModelInfo> 
     })
 }
 
-fn dir_size_bytes(path: &Path) -> Result<u64> {
+fn model_payload_size_bytes(path: &Path, source: &ModelSourceConfig) -> Result<Option<u64>> {
+    let manifest = read_model_manifest(path)?;
+    let Some(manifest) = manifest else {
+        return Ok(None);
+    };
+
+    if !manifest.matches_source(source) {
+        return Ok(None);
+    }
+
+    let size = dir_size_bytes(path, true)?;
+    if size == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(size))
+}
+
+fn write_model_manifest(path: &Path, source: &ModelSourceConfig) -> Result<()> {
+    fs::create_dir_all(path)?;
+    let manifest = ModelManifest::from_source(source);
+    let serialized = serde_json::to_vec_pretty(&manifest)?;
+    let manifest_path = path.join(MODEL_MANIFEST_FILENAME);
+    let tmp_path = path.join(format!("{MODEL_MANIFEST_FILENAME}.tmp"));
+    fs::write(&tmp_path, serialized)?;
+    fs::rename(tmp_path, manifest_path)?;
+    Ok(())
+}
+
+fn read_model_manifest(path: &Path) -> Result<Option<ModelManifest>> {
+    let manifest_path = path.join(MODEL_MANIFEST_FILENAME);
+    let bytes = match fs::read(&manifest_path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+
+    let parsed = match serde_json::from_slice::<ModelManifest>(&bytes) {
+        Ok(parsed) => parsed,
+        Err(_) => return Ok(None),
+    };
+
+    Ok(Some(parsed))
+}
+
+fn dir_size_bytes(path: &Path, skip_manifest: bool) -> Result<u64> {
     if !path.exists() {
         return Ok(0);
     }
@@ -162,11 +235,17 @@ fn dir_size_bytes(path: &Path) -> Result<u64> {
         let entry_path = entry.path();
         let metadata = entry.metadata()?;
         if metadata.is_file() {
+            if skip_manifest
+                && entry_path.file_name().and_then(|name| name.to_str())
+                    == Some(MODEL_MANIFEST_FILENAME)
+            {
+                continue;
+            }
             total = total.saturating_add(metadata.len());
             continue;
         }
         if metadata.is_dir() {
-            total = total.saturating_add(dir_size_bytes(&entry_path)?);
+            total = total.saturating_add(dir_size_bytes(&entry_path, skip_manifest)?);
         }
     }
     Ok(total)

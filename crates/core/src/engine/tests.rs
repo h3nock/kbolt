@@ -128,6 +128,43 @@ fn write_text_file(path: &std::path::Path, text: &str) {
     std::fs::write(path, text).expect("write file");
 }
 
+const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";
+
+fn model_provider_key(provider: &ModelProvider) -> &'static str {
+    match provider {
+        ModelProvider::HuggingFace => "huggingface",
+    }
+}
+
+fn json_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn seed_model_artifact(
+    model_root: &std::path::Path,
+    role: &str,
+    source: &ModelSourceConfig,
+    payload: &[u8],
+) {
+    let role_dir = model_root.join(role);
+    std::fs::create_dir_all(&role_dir).expect("create model role dir");
+    std::fs::write(role_dir.join("model.bin"), payload).expect("write model payload");
+
+    let provider = model_provider_key(&source.provider);
+    let id = json_escape(&source.id);
+    let manifest = match source.revision.as_deref() {
+        Some(revision) => format!(
+            "{{\n  \"provider\": \"{provider}\",\n  \"id\": \"{id}\",\n  \"revision\": \"{}\"\n}}\n",
+            json_escape(revision)
+        ),
+        None => format!(
+            "{{\n  \"provider\": \"{provider}\",\n  \"id\": \"{id}\",\n  \"revision\": null\n}}\n"
+        ),
+    };
+
+    std::fs::write(role_dir.join(MODEL_MANIFEST_FILENAME), manifest).expect("write model manifest");
+}
+
 #[test]
 fn add_space_and_space_info_include_description_and_zero_counts() {
     let engine = test_engine();
@@ -1773,13 +1810,10 @@ fn model_status_reflects_configured_model_names() {
 fn pull_models_skips_already_present_model_directories() {
     let engine = test_engine();
     let model_dir = engine.config().cache_dir.join("models");
-
-    std::fs::create_dir_all(model_dir.join("embedder")).expect("create embedder dir");
-    std::fs::create_dir_all(model_dir.join("reranker")).expect("create reranker dir");
-    std::fs::create_dir_all(model_dir.join("expander")).expect("create expander dir");
-    std::fs::write(model_dir.join("embedder/model.bin"), b"e").expect("seed embedder");
-    std::fs::write(model_dir.join("reranker/model.bin"), b"r").expect("seed reranker");
-    std::fs::write(model_dir.join("expander/model.bin"), b"x").expect("seed expander");
+    let models = &engine.config().models;
+    seed_model_artifact(&model_dir, "embedder", &models.embedder, b"e");
+    seed_model_artifact(&model_dir, "reranker", &models.reranker, b"r");
+    seed_model_artifact(&model_dir, "expander", &models.expander, b"x");
 
     let report = engine.pull_models().expect("pull models");
     assert_eq!(report.downloaded.len(), 0);
@@ -1791,13 +1825,10 @@ fn pull_models_skips_already_present_model_directories() {
 fn pull_models_with_progress_emits_already_present_events() {
     let engine = test_engine();
     let model_dir = engine.config().cache_dir.join("models");
-
-    std::fs::create_dir_all(model_dir.join("embedder")).expect("create embedder dir");
-    std::fs::create_dir_all(model_dir.join("reranker")).expect("create reranker dir");
-    std::fs::create_dir_all(model_dir.join("expander")).expect("create expander dir");
-    std::fs::write(model_dir.join("embedder/model.bin"), b"e").expect("seed embedder");
-    std::fs::write(model_dir.join("reranker/model.bin"), b"r").expect("seed reranker");
-    std::fs::write(model_dir.join("expander/model.bin"), b"x").expect("seed expander");
+    let models = &engine.config().models;
+    seed_model_artifact(&model_dir, "embedder", &models.embedder, b"e");
+    seed_model_artifact(&model_dir, "reranker", &models.reranker, b"r");
+    seed_model_artifact(&model_dir, "expander", &models.expander, b"x");
 
     let mut events = Vec::new();
     let report = engine
