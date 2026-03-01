@@ -5,7 +5,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::config::{Config, ModelConfig, ReapingConfig};
 use crate::engine::Engine;
 use crate::storage::Storage;
-use kbolt_types::{ActiveSpaceSource, AddCollectionRequest, KboltError};
+use kbolt_types::{ActiveSpaceSource, AddCollectionRequest, KboltError, UpdateOptions};
 
 fn test_engine() -> Engine {
     let root = tempdir().expect("create temp root");
@@ -66,6 +66,29 @@ fn with_kbolt_space_env<T>(value: Option<&str>, run: impl FnOnce() -> T) -> T {
         None => std::env::remove_var("KBOLT_SPACE"),
     }
     result
+}
+
+fn update_options(space: Option<&str>, collections: &[&str]) -> UpdateOptions {
+    UpdateOptions {
+        space: space.map(ToString::to_string),
+        collections: collections.iter().map(|item| item.to_string()).collect(),
+        no_embed: false,
+        dry_run: false,
+        verbose: false,
+    }
+}
+
+fn add_collection_fixture(engine: &Engine, space: &str, name: &str, path: std::path::PathBuf) {
+    engine
+        .add_collection(AddCollectionRequest {
+            path,
+            space: Some(space.to_string()),
+            name: Some(name.to_string()),
+            description: None,
+            extensions: None,
+            no_index: true,
+        })
+        .expect("add collection fixture");
 }
 
 #[test]
@@ -526,4 +549,169 @@ fn list_collections_returns_all_or_space_scoped_collections() {
     assert_eq!(work_only.len(), 1);
     assert_eq!(work_only[0].space, "work");
     assert_eq!(work_only[0].name, "api");
+}
+
+#[test]
+fn resolve_update_targets_returns_all_collections_when_unscoped() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        let notes_path = root.path().join("notes-wiki");
+        std::fs::create_dir_all(&work_path).expect("create work dir");
+        std::fs::create_dir_all(&notes_path).expect("create notes dir");
+
+        add_collection_fixture(&engine, "work", "api", work_path);
+        add_collection_fixture(&engine, "notes", "wiki", notes_path);
+
+        let targets = engine
+            .resolve_update_targets(&update_options(None, &[]))
+            .expect("resolve update targets");
+        assert_eq!(targets.len(), 2);
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.space == "work" && target.collection.name == "api")
+        );
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.space == "notes" && target.collection.name == "wiki")
+        );
+    });
+}
+
+#[test]
+fn resolve_update_targets_scopes_to_requested_space() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        let notes_path = root.path().join("notes-wiki");
+        std::fs::create_dir_all(&work_path).expect("create work dir");
+        std::fs::create_dir_all(&notes_path).expect("create notes dir");
+
+        add_collection_fixture(&engine, "work", "api", work_path);
+        add_collection_fixture(&engine, "notes", "wiki", notes_path);
+
+        let targets = engine
+            .resolve_update_targets(&update_options(Some("work"), &[]))
+            .expect("resolve update targets");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].space, "work");
+        assert_eq!(targets[0].collection.name, "api");
+    });
+}
+
+#[test]
+fn resolve_update_targets_named_collection_uses_unique_lookup() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create work dir");
+        add_collection_fixture(&engine, "work", "api", work_path);
+
+        let targets = engine
+            .resolve_update_targets(&update_options(None, &["api"]))
+            .expect("resolve update targets");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].space, "work");
+        assert_eq!(targets[0].collection.name, "api");
+    });
+}
+
+#[test]
+fn resolve_update_targets_named_collection_errors_on_ambiguity() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        let notes_path = root.path().join("notes-api");
+        std::fs::create_dir_all(&work_path).expect("create work dir");
+        std::fs::create_dir_all(&notes_path).expect("create notes dir");
+
+        add_collection_fixture(&engine, "work", "api", work_path);
+        add_collection_fixture(&engine, "notes", "api", notes_path);
+
+        let err = engine
+            .resolve_update_targets(&update_options(None, &["api"]))
+            .expect_err("expected ambiguous collection");
+        match KboltError::from(err) {
+            KboltError::AmbiguousSpace { collection, spaces } => {
+                assert_eq!(collection, "api");
+                assert_eq!(spaces, vec!["notes".to_string(), "work".to_string()]);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    });
+}
+
+#[test]
+fn resolve_update_targets_named_collection_honors_default_space_precedence() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(Some("work"));
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+
+        let root = tempdir().expect("create temp root");
+        let notes_path = root.path().join("notes-api");
+        std::fs::create_dir_all(&notes_path).expect("create notes dir");
+        add_collection_fixture(&engine, "notes", "api", notes_path);
+
+        let err = engine
+            .resolve_update_targets(&update_options(None, &["api"]))
+            .expect_err("default precedence should look in work first");
+        match KboltError::from(err) {
+            KboltError::CollectionNotFound { name } => assert_eq!(name, "api"),
+            other => panic!("unexpected error: {other}"),
+        }
+    });
+}
+
+#[test]
+fn resolve_update_targets_deduplicates_repeated_collection_names() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create work dir");
+        add_collection_fixture(&engine, "work", "api", work_path);
+
+        let targets = engine
+            .resolve_update_targets(&update_options(Some("work"), &["api", "api"]))
+            .expect("resolve update targets");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].space, "work");
+        assert_eq!(targets[0].collection.name, "api");
+    });
+}
+
+#[test]
+fn resolve_update_targets_rejects_empty_collection_names() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        let err = engine
+            .resolve_update_targets(&update_options(None, &[""]))
+            .expect_err("empty collection names should be rejected");
+        match KboltError::from(err) {
+            KboltError::InvalidInput(message) => {
+                assert!(message.contains("cannot be empty"), "unexpected message: {message}");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    });
 }

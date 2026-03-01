@@ -7,11 +7,18 @@ use crate::storage::Storage;
 use crate::Result;
 use kbolt_types::{
     ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, KboltError, SpaceInfo,
+    UpdateOptions,
 };
 
 pub struct Engine {
     storage: Storage,
     config: Config,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateTarget {
+    pub space: String,
+    pub collection: CollectionRow,
 }
 
 impl Engine {
@@ -167,6 +174,39 @@ impl Engine {
         }))
     }
 
+    pub fn resolve_update_targets(&self, options: &UpdateOptions) -> Result<Vec<UpdateTarget>> {
+        let mut targets = Vec::new();
+
+        if options.collections.is_empty() {
+            return self.resolve_update_targets_for_all_collections(options.space.as_deref());
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for raw_collection_name in &options.collections {
+            let collection_name = raw_collection_name.trim();
+            if collection_name.is_empty() {
+                return Err(
+                    KboltError::InvalidInput("collection names cannot be empty".to_string()).into(),
+                );
+            }
+
+            let resolved_space =
+                self.resolve_space_row(options.space.as_deref(), Some(collection_name))?;
+            let collection = self
+                .storage
+                .get_collection(resolved_space.id, collection_name)?;
+
+            if seen.insert((collection.space_id, collection.name.clone())) {
+                targets.push(UpdateTarget {
+                    space: resolved_space.name,
+                    collection,
+                });
+            }
+        }
+
+        Ok(targets)
+    }
+
     pub fn config(&self) -> &Config {
         &self.config
     }
@@ -265,6 +305,45 @@ impl Engine {
         }
 
         Ok(None)
+    }
+
+    fn resolve_update_targets_for_all_collections(
+        &self,
+        space: Option<&str>,
+    ) -> Result<Vec<UpdateTarget>> {
+        let (space_id_filter, spaces_by_id) = if let Some(space_name) = space {
+            let resolved = self.resolve_space_row(Some(space_name), None)?;
+            let mut map = std::collections::HashMap::new();
+            map.insert(resolved.id, resolved.name.clone());
+            (Some(resolved.id), map)
+        } else {
+            let spaces = self.storage.list_spaces()?;
+            let map = spaces
+                .into_iter()
+                .map(|space| (space.id, space.name))
+                .collect::<std::collections::HashMap<_, _>>();
+            (None, map)
+        };
+
+        let collections = self.storage.list_collections(space_id_filter)?;
+        let mut targets = Vec::with_capacity(collections.len());
+        for collection in collections {
+            let space_name = spaces_by_id
+                .get(&collection.space_id)
+                .ok_or_else(|| {
+                    KboltError::Internal(format!(
+                        "missing space mapping for collection '{}'",
+                        collection.name
+                    ))
+                })?
+                .clone();
+            targets.push(UpdateTarget {
+                space: space_name,
+                collection,
+            });
+        }
+
+        Ok(targets)
     }
 }
 
