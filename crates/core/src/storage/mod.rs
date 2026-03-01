@@ -571,6 +571,74 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let docs = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(docs)
     }
+
+    pub fn get_document_by_hash_prefix(&self, prefix: &str) -> Result<Vec<DocumentRow>> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let pattern = format!("{prefix}%");
+        let mut stmt = conn.prepare(
+            "SELECT id, collection_id, path, title, hash, modified, active, deactivated_at, fts_dirty
+             FROM documents
+             WHERE hash LIKE ?1
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![pattern], decode_document_row)?;
+        let docs = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(docs)
+    }
+
+    pub fn deactivate_document(&self, doc_id: i64) -> Result<()> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let updated = conn.execute(
+            "UPDATE documents
+             SET active = 0,
+                 deactivated_at = CASE
+                    WHEN active = 1 THEN strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                    ELSE deactivated_at
+                 END
+             WHERE id = ?1",
+            params![doc_id],
+        )?;
+
+        if updated == 0 {
+            return Err(KboltError::DocumentNotFound {
+                path: format!("id={doc_id}"),
+            }
+            .into());
+        }
+
+        Ok(())
+    }
+
+    pub fn reactivate_document(&self, doc_id: i64) -> Result<()> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let updated = conn.execute(
+            "UPDATE documents
+             SET active = 1, deactivated_at = NULL
+             WHERE id = ?1",
+            params![doc_id],
+        )?;
+
+        if updated == 0 {
+            return Err(KboltError::DocumentNotFound {
+                path: format!("id={doc_id}"),
+            }
+            .into());
+        }
+
+        Ok(())
+    }
 }
 
 fn lookup_space_name(conn: &Connection, space_id: i64) -> Result<String> {
