@@ -5,12 +5,15 @@ use kbolt_types::{
     MultiGetRequest, MultiGetResponse, SearchMode, SearchRequest, SearchResponse, SpaceInfo,
     StatusResponse, UpdateOptions, UpdateReport,
 };
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 const DEFAULT_SEARCH_LIMIT: usize = 10;
 const DEFAULT_MULTI_GET_MAX_FILES: usize = 20;
 const DEFAULT_MULTI_GET_MAX_BYTES: usize = 50 * 1024;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum McpToolCall {
     Search {
         query: String,
@@ -187,6 +190,143 @@ impl McpAdapter {
             }
         }
     }
+
+    pub fn call_tool_json(&self, name: &str, args: Value) -> Result<Value> {
+        let call = parse_tool_call_json(name, args)?;
+        let response = self.call_tool(call)?;
+        serialize_tool_response(response)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchToolArgs {
+    query: String,
+    #[serde(default)]
+    space: Option<String>,
+    #[serde(default)]
+    collection: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetToolArgs {
+    identifier: String,
+    #[serde(default)]
+    space: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MultiGetToolArgs {
+    locators: Vec<String>,
+    #[serde(default)]
+    space: Option<String>,
+    #[serde(default)]
+    max_files: Option<usize>,
+    #[serde(default)]
+    max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListFilesToolArgs {
+    #[serde(default)]
+    space: Option<String>,
+    collection: String,
+    #[serde(default)]
+    prefix: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StatusToolArgs {
+    #[serde(default)]
+    space: Option<String>,
+}
+
+fn parse_tool_call_json(name: &str, args: Value) -> Result<McpToolCall> {
+    match name {
+        "search" => {
+            let parsed: SearchToolArgs = parse_tool_args(name, args)?;
+            Ok(McpToolCall::Search {
+                query: parsed.query,
+                space: parsed.space,
+                collection: parsed.collection,
+                limit: parsed.limit,
+                mode: parsed.mode,
+            })
+        }
+        "get" => {
+            let parsed: GetToolArgs = parse_tool_args(name, args)?;
+            Ok(McpToolCall::Get {
+                identifier: parsed.identifier,
+                space: parsed.space,
+            })
+        }
+        "multi_get" => {
+            let parsed: MultiGetToolArgs = parse_tool_args(name, args)?;
+            Ok(McpToolCall::MultiGet {
+                locators: parsed.locators,
+                space: parsed.space,
+                max_files: parsed.max_files,
+                max_bytes: parsed.max_bytes,
+            })
+        }
+        "list_files" => {
+            let parsed: ListFilesToolArgs = parse_tool_args(name, args)?;
+            Ok(McpToolCall::ListFiles {
+                space: parsed.space,
+                collection: parsed.collection,
+                prefix: parsed.prefix,
+            })
+        }
+        "status" => {
+            let parsed: StatusToolArgs = parse_tool_args(name, args)?;
+            Ok(McpToolCall::Status {
+                space: parsed.space,
+            })
+        }
+        _ => Err(KboltError::InvalidInput(format!("unknown tool: {name}")).into()),
+    }
+}
+
+fn parse_tool_args<T>(tool: &str, args: Value) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let normalized = if args.is_null() {
+        Value::Object(Map::new())
+    } else {
+        args
+    };
+
+    serde_json::from_value(normalized).map_err(|err| {
+        KboltError::InvalidInput(format!("invalid arguments for '{tool}': {err}")).into()
+    })
+}
+
+fn serialize_tool_response(response: McpToolResponse) -> Result<Value> {
+    match response {
+        McpToolResponse::Search(data) => serialize_response_value(data),
+        McpToolResponse::Get(data) => serialize_response_value(data),
+        McpToolResponse::MultiGet(data) => serialize_response_value(data),
+        McpToolResponse::ListFiles(data) => serialize_response_value(data),
+        McpToolResponse::Status(data) => serialize_response_value(data),
+    }
+}
+
+fn serialize_response_value<T>(response: T) -> Result<Value>
+where
+    T: Serialize,
+{
+    serde_json::to_value(response).map_err(|err| {
+        KboltError::Internal(format!("failed to serialize tool response: {err}")).into()
+    })
 }
 
 fn parse_tool_search_mode(raw_mode: Option<&str>) -> Result<SearchMode> {
@@ -232,6 +372,7 @@ mod tests {
         AddCollectionRequest, GetRequest, Locator, MultiGetRequest, SearchMode, SearchRequest,
         UpdateOptions,
     };
+    use serde_json::json;
     use tempfile::tempdir;
 
     use super::{McpAdapter, McpToolCall, McpToolResponse};
@@ -690,6 +831,91 @@ mod tests {
             assert!(
                 err.to_string()
                     .contains("mode must be one of: auto, deep, keyword, semantic"),
+                "unexpected error: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn call_tool_json_search_returns_structured_data() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+
+            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: work_path.clone(),
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add work collection");
+            fs::write(work_path.join("a.md"), "search-token\n").expect("write file");
+
+            let adapter = McpAdapter::new(engine);
+            adapter
+                .update(UpdateOptions {
+                    space: Some("work".to_string()),
+                    collections: vec!["api".to_string()],
+                    no_embed: true,
+                    dry_run: false,
+                    verbose: false,
+                })
+                .expect("run update");
+
+            let response = adapter
+                .call_tool_json(
+                    "search",
+                    json!({
+                        "query": "search-token",
+                        "space": "work",
+                        "collection": "api"
+                    }),
+                )
+                .expect("run search via json bridge");
+
+            assert_eq!(response["query"], "search-token");
+            assert_eq!(response["mode"], "Keyword");
+            let results = response["results"]
+                .as_array()
+                .expect("results should be an array");
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0]["space"], "work");
+            assert_eq!(results[0]["path"], "api/a.md");
+        });
+    }
+
+    #[test]
+    fn call_tool_json_rejects_unknown_tool() {
+        with_isolated_xdg_dirs(|| {
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = McpAdapter::new(engine);
+
+            let err = adapter
+                .call_tool_json("unknown_tool", json!({}))
+                .expect_err("unknown tool should fail");
+            assert!(
+                err.to_string().contains("unknown tool"),
+                "unexpected error: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn call_tool_json_rejects_invalid_arguments() {
+        with_isolated_xdg_dirs(|| {
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = McpAdapter::new(engine);
+
+            let err = adapter
+                .call_tool_json("search", json!({ "query": "alpha", "limit": "five" }))
+                .expect_err("invalid arguments should fail");
+            assert!(
+                err.to_string().contains("invalid arguments for 'search'"),
                 "unexpected error: {err}"
             );
         });

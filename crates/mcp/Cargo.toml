@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 kbolt-core = { path = "../core" }
 kbolt-types = { path = "../types" }
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile = "3.26"
