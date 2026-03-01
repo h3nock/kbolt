@@ -20,6 +20,74 @@ fn new_creates_db_and_default_space() {
 }
 
 #[test]
+fn new_preloads_default_space_index_paths() {
+    let tmp = tempdir().expect("create tempdir");
+    let cache_dir = tmp.path().join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+
+    assert!(cache_dir.join("spaces/default/tantivy").is_dir());
+    assert!(cache_dir.join("spaces/default/vectors.usearch").is_file());
+
+    let spaces = storage.spaces.read().expect("lock spaces map");
+    assert!(spaces.contains_key("default"));
+}
+
+#[test]
+fn open_space_registers_paths_for_existing_space() {
+    let tmp = tempdir().expect("create tempdir");
+    let cache_dir = tmp.path().join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+    storage.create_space("work", None).expect("create work");
+
+    storage.open_space("work").expect("open work space");
+    assert!(cache_dir.join("spaces/work/tantivy").is_dir());
+    assert!(cache_dir.join("spaces/work/vectors.usearch").is_file());
+
+    let spaces = storage.spaces.read().expect("lock spaces map");
+    assert!(spaces.contains_key("work"));
+}
+
+#[test]
+fn open_space_missing_space_returns_not_found() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+
+    let err = storage
+        .open_space("missing")
+        .expect_err("missing space should fail");
+    match KboltError::from(err) {
+        KboltError::SpaceNotFound { name } => assert_eq!(name, "missing"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn close_space_removes_loaded_space_entry() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    storage.create_space("work", None).expect("create work");
+    storage.open_space("work").expect("open work");
+
+    storage.close_space("work").expect("close work");
+    let spaces = storage.spaces.read().expect("lock spaces map");
+    assert!(!spaces.contains_key("work"));
+}
+
+#[test]
+fn close_space_missing_space_returns_not_found() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+
+    let err = storage
+        .close_space("missing")
+        .expect_err("missing space should fail");
+    match KboltError::from(err) {
+        KboltError::SpaceNotFound { name } => assert_eq!(name, "missing"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
 fn create_and_list_spaces() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
