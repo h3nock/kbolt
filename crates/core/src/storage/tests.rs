@@ -1448,3 +1448,119 @@ fn get_unembedded_chunks_filters_active_and_model_specific_backlog() {
         .expect("query limited backlog");
     assert_eq!(limited.len(), 1);
 }
+
+#[test]
+fn get_fts_dirty_documents_returns_context_and_chunks() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/lib.rs",
+            "lib title",
+            "hash-abc123",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc");
+    storage
+        .insert_chunks(
+            doc_id,
+            &[
+                super::ChunkInsert {
+                    seq: 0,
+                    offset: 0,
+                    length: 100,
+                    heading: Some("# Intro".to_string()),
+                    kind: "section".to_string(),
+                },
+                super::ChunkInsert {
+                    seq: 1,
+                    offset: 100,
+                    length: 80,
+                    heading: Some("# Usage".to_string()),
+                    kind: "section".to_string(),
+                },
+            ],
+        )
+        .expect("insert chunks");
+
+    let dirty = storage
+        .get_fts_dirty_documents()
+        .expect("get fts dirty docs");
+    assert_eq!(dirty.len(), 1);
+    assert_eq!(dirty[0].doc_id, doc_id);
+    assert_eq!(dirty[0].doc_path, "src/lib.rs");
+    assert_eq!(dirty[0].doc_title, "lib title");
+    assert_eq!(dirty[0].doc_hash, "hash-abc123");
+    assert_eq!(
+        dirty[0].collection_path,
+        std::path::PathBuf::from("/tmp/api")
+    );
+    assert_eq!(dirty[0].space_name, "work");
+    assert_eq!(dirty[0].chunks.len(), 2);
+    assert_eq!(dirty[0].chunks[0].seq, 0);
+    assert_eq!(dirty[0].chunks[1].seq, 1);
+}
+
+#[test]
+fn batch_clear_fts_dirty_clears_selected_documents_only() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    let doc_a = storage
+        .upsert_document(
+            collection_id,
+            "src/a.rs",
+            "a",
+            "hash-a",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc a");
+    let doc_b = storage
+        .upsert_document(
+            collection_id,
+            "src/b.rs",
+            "b",
+            "hash-b",
+            "2026-03-01T10:01:00Z",
+        )
+        .expect("insert doc b");
+
+    storage
+        .batch_clear_fts_dirty(&[doc_a])
+        .expect("clear doc_a dirty flag");
+
+    let dirty = storage
+        .get_fts_dirty_documents()
+        .expect("get remaining dirty docs");
+    assert_eq!(dirty.len(), 1);
+    assert_eq!(dirty[0].doc_id, doc_b);
+
+    storage
+        .batch_clear_fts_dirty(&[])
+        .expect("empty batch should be no-op");
+}
