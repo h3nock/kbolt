@@ -13,6 +13,17 @@ impl CliAdapter {
         Self { engine }
     }
 
+    pub fn space_add(&self, name: &str, description: Option<&str>) -> Result<String> {
+        let added = self.engine.add_space(name, description)?;
+        let description = added.description.unwrap_or_default();
+        let suffix = if description.is_empty() {
+            String::new()
+        } else {
+            format!(" - {description}")
+        };
+        Ok(format!("space added: {}{suffix}", added.name))
+    }
+
     pub fn space_default(&mut self, name: Option<&str>) -> Result<String> {
         if let Some(space_name) = name {
             let updated = self.engine.set_default_space(Some(space_name))?;
@@ -243,6 +254,33 @@ mod tests {
                 output.contains("collections: 0"),
                 "unexpected output: {output}"
             );
+        });
+    }
+
+    #[test]
+    fn space_add_creates_space_without_description() {
+        with_isolated_xdg_dirs(|| {
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            let output = adapter.space_add("work", None).expect("add space");
+            assert_eq!(output, "space added: work");
+
+            let info = adapter.space_info("work").expect("space info");
+            assert!(info.contains("name: work"), "unexpected output: {info}");
+        });
+    }
+
+    #[test]
+    fn space_add_includes_description_in_output() {
+        with_isolated_xdg_dirs(|| {
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            let output = adapter
+                .space_add("work", Some("work docs"))
+                .expect("add space");
+            assert_eq!(output, "space added: work - work docs");
         });
     }
 }

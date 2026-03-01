@@ -18,6 +18,10 @@ fn run() -> Result<()> {
 
     match cli.command {
         Command::Space(space) => match space.command {
+            SpaceCommand::Add { name, description } => {
+                let line = adapter.space_add(&name, description.as_deref())?;
+                println!("{line}");
+            }
             SpaceCommand::Current => {
                 let line = adapter.space_current(cli.space.as_deref())?;
                 println!("{line}");

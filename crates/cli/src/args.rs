@@ -23,6 +23,11 @@ pub struct SpaceArgs {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum SpaceCommand {
+    Add {
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+    },
     Current,
     Default { name: Option<String> },
     List,
@@ -42,6 +47,24 @@ mod tests {
 
         match parsed.command {
             Command::Space(space) => assert_eq!(space.command, SpaceCommand::Current),
+        }
+    }
+
+    #[test]
+    fn parses_space_add_with_description() {
+        let parsed =
+            Cli::try_parse_from(["kbolt", "space", "add", "work", "--description", "work docs"])
+                .expect("parse cli");
+        assert_eq!(parsed.space, None);
+
+        match parsed.command {
+            Command::Space(space) => assert_eq!(
+                space.command,
+                SpaceCommand::Add {
+                    name: "work".to_string(),
+                    description: Some("work docs".to_string())
+                }
+            ),
         }
     }
 
