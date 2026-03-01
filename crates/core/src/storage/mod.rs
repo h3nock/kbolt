@@ -5,7 +5,10 @@ use std::sync::{Mutex, RwLock};
 use crate::error::{CoreError, Result};
 use kbolt_types::{DiskUsage, KboltError};
 use rusqlite::{params, params_from_iter, Connection, Error, ErrorCode};
-use tantivy::schema::{FAST, INDEXED, STORED, TEXT};
+use tantivy::collector::TopDocs;
+use tantivy::query::QueryParser;
+use tantivy::schema::{Field, Value, FAST, INDEXED, STORED, TEXT};
+use tantivy::{Index, IndexWriter, TantivyDocument, Term};
 
 const DB_FILE: &str = "meta.sqlite";
 const DEFAULT_SPACE_NAME: &str = "default";
@@ -94,17 +97,44 @@ pub struct FtsDirtyRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TantivyEntry {
+    pub chunk_id: i64,
+    pub doc_id: i64,
+    pub filepath: String,
+    pub title: String,
+    pub heading: Option<String>,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BM25Hit {
+    pub chunk_id: i64,
+    pub score: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpaceResolution {
     Found(SpaceRow),
     Ambiguous(Vec<String>),
     NotFound,
 }
 
-#[derive(Debug, Clone)]
 struct SpaceIndexes {
     _tantivy_dir: PathBuf,
     _usearch_path: PathBuf,
-    _tantivy_index: tantivy::Index,
+    tantivy_index: Index,
+    tantivy_writer: Mutex<IndexWriter>,
+    fields: TantivyFields,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TantivyFields {
+    chunk_id: Field,
+    doc_id: Field,
+    filepath: Field,
+    title: Field,
+    heading: Field,
+    body: Field,
 }
 
 impl Storage {
@@ -222,6 +252,8 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             .append(true)
             .open(&usearch_path)?;
         let tantivy_index = open_or_create_tantivy_index(&tantivy_dir)?;
+        let fields = tantivy_fields_from_schema(&tantivy_index.schema())?;
+        let tantivy_writer = tantivy_index.writer(50_000_000)?;
 
         let mut spaces = self
             .spaces
@@ -230,7 +262,9 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         spaces.entry(name.to_string()).or_insert(SpaceIndexes {
             _tantivy_dir: tantivy_dir,
             _usearch_path: usearch_path,
-            _tantivy_index: tantivy_index,
+            tantivy_index,
+            tantivy_writer: Mutex::new(tantivy_writer),
+            fields,
         });
 
         Ok(())
@@ -1067,6 +1101,184 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         Ok(count as usize)
     }
 
+    pub fn index_tantivy(&self, space: &str, entries: &[TantivyEntry]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        self.open_space(space)?;
+        let spaces = self
+            .spaces
+            .read()
+            .map_err(|_| CoreError::poisoned("spaces"))?;
+        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
+            name: space.to_string(),
+        })?;
+        let writer = space_indexes
+            .tantivy_writer
+            .lock()
+            .map_err(|_| CoreError::poisoned("tantivy writer"))?;
+
+        for entry in entries {
+            let chunk_id = u64::try_from(entry.chunk_id).map_err(|_| {
+                CoreError::Internal(format!(
+                    "chunk_id must be non-negative for tantivy indexing: {}",
+                    entry.chunk_id
+                ))
+            })?;
+            let doc_id = u64::try_from(entry.doc_id).map_err(|_| {
+                CoreError::Internal(format!(
+                    "doc_id must be non-negative for tantivy indexing: {}",
+                    entry.doc_id
+                ))
+            })?;
+
+            let mut doc = TantivyDocument::default();
+            doc.add_u64(space_indexes.fields.chunk_id, chunk_id);
+            doc.add_u64(space_indexes.fields.doc_id, doc_id);
+            doc.add_text(space_indexes.fields.filepath, &entry.filepath);
+            doc.add_text(space_indexes.fields.title, &entry.title);
+            if let Some(heading) = &entry.heading {
+                doc.add_text(space_indexes.fields.heading, heading);
+            }
+            doc.add_text(space_indexes.fields.body, &entry.body);
+            writer.add_document(doc)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn delete_tantivy(&self, space: &str, chunk_ids: &[i64]) -> Result<()> {
+        if chunk_ids.is_empty() {
+            return Ok(());
+        }
+
+        self.open_space(space)?;
+        let spaces = self
+            .spaces
+            .read()
+            .map_err(|_| CoreError::poisoned("spaces"))?;
+        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
+            name: space.to_string(),
+        })?;
+        let writer = space_indexes
+            .tantivy_writer
+            .lock()
+            .map_err(|_| CoreError::poisoned("tantivy writer"))?;
+
+        for chunk_id in chunk_ids {
+            let chunk_key = u64::try_from(*chunk_id).map_err(|_| {
+                CoreError::Internal(format!(
+                    "chunk_id must be non-negative for tantivy delete: {chunk_id}"
+                ))
+            })?;
+            writer.delete_term(Term::from_field_u64(space_indexes.fields.chunk_id, chunk_key));
+        }
+
+        Ok(())
+    }
+
+    pub fn delete_tantivy_by_doc(&self, space: &str, doc_id: i64) -> Result<()> {
+        self.open_space(space)?;
+        let spaces = self
+            .spaces
+            .read()
+            .map_err(|_| CoreError::poisoned("spaces"))?;
+        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
+            name: space.to_string(),
+        })?;
+        let writer = space_indexes
+            .tantivy_writer
+            .lock()
+            .map_err(|_| CoreError::poisoned("tantivy writer"))?;
+        let doc_key = u64::try_from(doc_id).map_err(|_| {
+            CoreError::Internal(format!(
+                "doc_id must be non-negative for tantivy delete-by-doc: {doc_id}"
+            ))
+        })?;
+        writer.delete_term(Term::from_field_u64(space_indexes.fields.doc_id, doc_key));
+        Ok(())
+    }
+
+    pub fn query_bm25(
+        &self,
+        space: &str,
+        query: &str,
+        fields: &[(&str, f32)],
+        limit: usize,
+    ) -> Result<Vec<BM25Hit>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        if fields.is_empty() {
+            return Err(CoreError::Internal(
+                "bm25 query requires at least one field".to_string(),
+            ));
+        }
+
+        self.open_space(space)?;
+        let spaces = self
+            .spaces
+            .read()
+            .map_err(|_| CoreError::poisoned("spaces"))?;
+        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
+            name: space.to_string(),
+        })?;
+
+        let query_fields = fields
+            .iter()
+            .map(|(name, _)| resolve_tantivy_field(space_indexes.fields, name))
+            .collect::<Result<Vec<_>>>()?;
+        let mut parser = QueryParser::for_index(&space_indexes.tantivy_index, query_fields);
+        for (field_name, boost) in fields {
+            let field = resolve_tantivy_field(space_indexes.fields, field_name)?;
+            parser.set_field_boost(field, *boost);
+        }
+
+        let parsed_query = parser.parse_query(query).map_err(|err| {
+            CoreError::Internal(format!("failed to parse bm25 query '{query}': {err}"))
+        })?;
+        let reader = space_indexes.tantivy_index.reader()?;
+        reader.reload()?;
+        let searcher = reader.searcher();
+        let docs = searcher.search(&parsed_query, &TopDocs::with_limit(limit))?;
+
+        let mut hits = Vec::with_capacity(docs.len());
+        for (score, address) in docs {
+            let doc = searcher.doc::<TantivyDocument>(address)?;
+            let chunk_id = doc
+                .get_first(space_indexes.fields.chunk_id)
+                .and_then(|value| value.as_u64())
+                .ok_or_else(|| {
+                    CoreError::Internal("tantivy hit missing chunk_id field".to_string())
+                })?;
+            hits.push(BM25Hit {
+                chunk_id: chunk_id as i64,
+                score,
+            });
+        }
+
+        Ok(hits)
+    }
+
+    pub fn commit_tantivy(&self, space: &str) -> Result<()> {
+        self.open_space(space)?;
+        let spaces = self
+            .spaces
+            .read()
+            .map_err(|_| CoreError::poisoned("spaces"))?;
+        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
+            name: space.to_string(),
+        })?;
+        let mut writer = space_indexes
+            .tantivy_writer
+            .lock()
+            .map_err(|_| CoreError::poisoned("tantivy writer"))?;
+        writer.commit()?;
+        Ok(())
+    }
+
     pub fn get_fts_dirty_documents(&self) -> Result<Vec<FtsDirtyRecord>> {
         let conn = self
             .db
@@ -1412,13 +1624,13 @@ fn dir_size_or_zero(path: &Path) -> Result<u64> {
     Ok(total)
 }
 
-fn open_or_create_tantivy_index(path: &Path) -> Result<tantivy::Index> {
+fn open_or_create_tantivy_index(path: &Path) -> Result<Index> {
     let meta_path = path.join("meta.json");
     if meta_path.exists() {
-        return Ok(tantivy::Index::open_in_dir(path)?);
+        return Ok(Index::open_in_dir(path)?);
     }
 
-    Ok(tantivy::Index::create_in_dir(path, tantivy_schema())?)
+    Ok(Index::create_in_dir(path, tantivy_schema())?)
 }
 
 fn tantivy_schema() -> tantivy::schema::Schema {
@@ -1430,6 +1642,43 @@ fn tantivy_schema() -> tantivy::schema::Schema {
     builder.add_text_field("heading", TEXT | STORED);
     builder.add_text_field("body", TEXT);
     builder.build()
+}
+
+fn tantivy_fields_from_schema(schema: &tantivy::schema::Schema) -> Result<TantivyFields> {
+    Ok(TantivyFields {
+        chunk_id: schema.get_field("chunk_id").map_err(|_| {
+            CoreError::Internal("tantivy schema missing field: chunk_id".to_string())
+        })?,
+        doc_id: schema.get_field("doc_id").map_err(|_| {
+            CoreError::Internal("tantivy schema missing field: doc_id".to_string())
+        })?,
+        filepath: schema.get_field("filepath").map_err(|_| {
+            CoreError::Internal("tantivy schema missing field: filepath".to_string())
+        })?,
+        title: schema
+            .get_field("title")
+            .map_err(|_| CoreError::Internal("tantivy schema missing field: title".to_string()))?,
+        heading: schema.get_field("heading").map_err(|_| {
+            CoreError::Internal("tantivy schema missing field: heading".to_string())
+        })?,
+        body: schema
+            .get_field("body")
+            .map_err(|_| CoreError::Internal("tantivy schema missing field: body".to_string()))?,
+    })
+}
+
+fn resolve_tantivy_field(fields: TantivyFields, name: &str) -> Result<Field> {
+    match name {
+        "chunk_id" => Ok(fields.chunk_id),
+        "doc_id" => Ok(fields.doc_id),
+        "filepath" => Ok(fields.filepath),
+        "title" => Ok(fields.title),
+        "heading" => Ok(fields.heading),
+        "body" => Ok(fields.body),
+        other => Err(CoreError::Internal(format!(
+            "unsupported tantivy field: {other}"
+        ))),
+    }
 }
 
 fn serialize_extensions(extensions: Option<&[String]>) -> Result<Option<String>> {
