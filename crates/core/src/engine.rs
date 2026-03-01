@@ -1,13 +1,17 @@
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path};
+use std::time::{Instant, UNIX_EPOCH};
 
 use crate::config;
 use crate::config::Config;
-use crate::storage::{CollectionRow, SpaceResolution};
+use crate::storage::{ChunkInsert, CollectionRow, DocumentRow, SpaceResolution, TantivyEntry};
 use crate::storage::Storage;
 use crate::Result;
+use sha2::{Digest, Sha256};
+use walkdir::WalkDir;
 use kbolt_types::{
     ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, KboltError, SpaceInfo,
-    UpdateOptions,
+    FileError, UpdateOptions, UpdateReport,
 };
 
 pub struct Engine {
@@ -172,6 +176,53 @@ impl Engine {
             name: space.name,
             source,
         }))
+    }
+
+    pub fn update(&self, options: UpdateOptions) -> Result<UpdateReport> {
+        let started = Instant::now();
+        let mut report = UpdateReport {
+            scanned: 0,
+            skipped_mtime: 0,
+            skipped_hash: 0,
+            added: 0,
+            updated: 0,
+            deactivated: 0,
+            reactivated: 0,
+            reaped: 0,
+            embedded: 0,
+            errors: Vec::new(),
+            elapsed_ms: 0,
+        };
+
+        let targets = self.resolve_update_targets(&options)?;
+        if targets.is_empty() {
+            report.elapsed_ms = started.elapsed().as_millis() as u64;
+            return Ok(report);
+        }
+
+        let mut fts_dirty_by_space: HashMap<String, HashSet<i64>> = HashMap::new();
+        for target in &targets {
+            self.update_collection_target(target, &options, &mut report, &mut fts_dirty_by_space)?;
+        }
+
+        if !options.dry_run {
+            for (space, doc_ids) in fts_dirty_by_space {
+                if doc_ids.is_empty() {
+                    continue;
+                }
+
+                self.storage.commit_tantivy(&space)?;
+                let mut ids = doc_ids.into_iter().collect::<Vec<_>>();
+                ids.sort_unstable();
+                self.storage.batch_clear_fts_dirty(&ids)?;
+            }
+
+            let reaped = self.storage.reap_documents(self.config.reaping.days)?;
+            report.reaped = reaped.len();
+        }
+
+        report.elapsed_ms = started.elapsed().as_millis() as u64;
+        Ok(report)
     }
 
     pub fn resolve_update_targets(&self, options: &UpdateOptions) -> Result<Vec<UpdateTarget>> {
@@ -344,6 +395,277 @@ impl Engine {
         }
 
         Ok(targets)
+    }
+
+    fn update_collection_target(
+        &self,
+        target: &UpdateTarget,
+        options: &UpdateOptions,
+        report: &mut UpdateReport,
+        fts_dirty_by_space: &mut HashMap<String, HashSet<i64>>,
+    ) -> Result<()> {
+        let all_documents = self.storage.list_documents(target.collection.id, false)?;
+        let mut docs_by_path: HashMap<String, DocumentRow> = all_documents
+            .into_iter()
+            .map(|doc| (doc.path.clone(), doc))
+            .collect();
+        let mut seen_paths = HashSet::new();
+        let extension_filter = normalized_extension_filter(target.collection.extensions.as_deref());
+        let mut touched_collection = false;
+
+        for entry in WalkDir::new(&target.collection.path)
+            .follow_links(false)
+            .into_iter()
+        {
+            let entry = match entry {
+                Ok(item) => item,
+                Err(err) => {
+                    report.errors.push(file_error(
+                        err.path().map(Path::to_path_buf),
+                        format!("walkdir error: {err}"),
+                    ));
+                    continue;
+                }
+            };
+
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            if !extension_allowed(entry.path(), extension_filter.as_ref()) {
+                continue;
+            }
+
+            let relative_path = match collection_relative_path(&target.collection.path, entry.path()) {
+                Ok(path) => path,
+                Err(err) => {
+                    report.errors.push(file_error(Some(entry.path().to_path_buf()), err.to_string()));
+                    continue;
+                }
+            };
+            report.scanned += 1;
+            seen_paths.insert(relative_path.clone());
+
+            let metadata = match entry.metadata() {
+                Ok(data) => data,
+                Err(err) => {
+                    report
+                        .errors
+                        .push(file_error(Some(entry.path().to_path_buf()), err.to_string()));
+                    continue;
+                }
+            };
+
+            let modified = match modified_token(&metadata) {
+                Ok(value) => value,
+                Err(err) => {
+                    report.errors.push(file_error(
+                        Some(entry.path().to_path_buf()),
+                        format!("modified timestamp error: {err}"),
+                    ));
+                    continue;
+                }
+            };
+
+            if let Some(existing) = docs_by_path.get(&relative_path) {
+                if existing.active && existing.modified == modified {
+                    report.skipped_mtime += 1;
+                    continue;
+                }
+            }
+
+            let bytes = match std::fs::read(entry.path()) {
+                Ok(data) => data,
+                Err(err) => {
+                    report
+                        .errors
+                        .push(file_error(Some(entry.path().to_path_buf()), err.to_string()));
+                    continue;
+                }
+            };
+            let hash = sha256_hex(&bytes);
+            let title = file_title(entry.path());
+
+            let existing = docs_by_path.get(&relative_path).cloned();
+            if let Some(doc) = existing.as_ref() {
+                if doc.hash == hash {
+                    if doc.active {
+                        report.skipped_hash += 1;
+                    } else {
+                        report.reactivated += 1;
+                    }
+
+                    if !options.dry_run {
+                        self.storage.update_document_metadata(doc.id, &title, &modified)?;
+                    }
+                    continue;
+                }
+
+                report.updated += 1;
+                if !doc.active {
+                    report.reactivated += 1;
+                }
+            } else {
+                report.added += 1;
+            }
+
+            if options.dry_run {
+                continue;
+            }
+
+            let doc_id = self.storage.upsert_document(
+                target.collection.id,
+                &relative_path,
+                &title,
+                &hash,
+                &modified,
+            )?;
+
+            if let Some(doc) = existing.as_ref() {
+                let old_chunk_ids = self.storage.delete_chunks_for_document(doc.id)?;
+                if !old_chunk_ids.is_empty() {
+                    self.storage.delete_tantivy(&target.space, &old_chunk_ids)?;
+                    self.storage.delete_usearch(&target.space, &old_chunk_ids)?;
+                }
+            }
+
+            let body = String::from_utf8_lossy(&bytes).into_owned();
+            let chunk_ids = self.storage.insert_chunks(
+                doc_id,
+                &[ChunkInsert {
+                    seq: 0,
+                    offset: 0,
+                    length: body.len(),
+                    heading: None,
+                    kind: "section".to_string(),
+                }],
+            )?;
+
+            if let Some(chunk_id) = chunk_ids.first() {
+                self.storage.index_tantivy(
+                    &target.space,
+                    &[TantivyEntry {
+                        chunk_id: *chunk_id,
+                        doc_id,
+                        filepath: relative_path.clone(),
+                        title,
+                        heading: None,
+                        body,
+                    }],
+                )?;
+                fts_dirty_by_space
+                    .entry(target.space.clone())
+                    .or_default()
+                    .insert(doc_id);
+            }
+
+            docs_by_path.insert(
+                relative_path.clone(),
+                self.storage
+                    .get_document_by_path(target.collection.id, &relative_path)?
+                    .ok_or_else(|| {
+                        KboltError::Internal(format!(
+                            "document missing after upsert: collection={}, path={relative_path}",
+                            target.collection.id
+                        ))
+                    })?,
+            );
+            touched_collection = true;
+        }
+
+        for doc in docs_by_path.values() {
+            if doc.active && !seen_paths.contains(&doc.path) {
+                report.deactivated += 1;
+                if !options.dry_run {
+                    self.storage.deactivate_document(doc.id)?;
+                    touched_collection = true;
+                }
+            }
+        }
+
+        if touched_collection && !options.dry_run {
+            self.storage.update_collection_timestamp(target.collection.id)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn normalized_extension_filter(raw: Option<&[String]>) -> Option<HashSet<String>> {
+    raw.map(|items| {
+        items
+            .iter()
+            .filter_map(|item| {
+                let normalized = item.trim().trim_start_matches('.').to_ascii_lowercase();
+                if normalized.is_empty() {
+                    None
+                } else {
+                    Some(normalized)
+                }
+            })
+            .collect::<HashSet<_>>()
+    })
+    .filter(|items| !items.is_empty())
+}
+
+fn extension_allowed(path: &Path, filter: Option<&HashSet<String>>) -> bool {
+    match filter {
+        None => true,
+        Some(allowed) => path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| allowed.contains(&ext.to_ascii_lowercase()))
+            .unwrap_or(false),
+    }
+}
+
+fn collection_relative_path(root: &Path, full_path: &Path) -> std::result::Result<String, KboltError> {
+    let relative = full_path
+        .strip_prefix(root)
+        .map_err(|_| KboltError::InvalidPath(full_path.to_path_buf()))?;
+
+    let parts = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(item) => Some(item.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        return Err(KboltError::InvalidPath(full_path.to_path_buf()));
+    }
+
+    Ok(parts.join("/"))
+}
+
+fn modified_token(metadata: &std::fs::Metadata) -> Result<String> {
+    let modified = metadata.modified()?;
+    let duration = modified.duration_since(UNIX_EPOCH).map_err(|_| {
+        KboltError::Internal("file modified timestamp predates unix epoch".to_string())
+    })?;
+    Ok(duration.as_nanos().to_string())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn file_title(path: &Path) -> String {
+    path.file_name()
+        .and_then(|item| item.to_str())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+fn file_error(path: Option<std::path::PathBuf>, error: String) -> FileError {
+    FileError {
+        path: path
+            .map(|item| item.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<unknown>".to_string()),
+        error,
     }
 }
 

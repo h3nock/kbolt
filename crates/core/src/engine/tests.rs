@@ -91,6 +91,13 @@ fn add_collection_fixture(engine: &Engine, space: &str, name: &str, path: std::p
         .expect("add collection fixture");
 }
 
+fn write_text_file(path: &std::path::Path, text: &str) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create parent directories");
+    }
+    std::fs::write(path, text).expect("write file");
+}
+
 #[test]
 fn add_space_and_space_info_include_description_and_zero_counts() {
     let engine = test_engine();
@@ -713,5 +720,126 @@ fn resolve_update_targets_rejects_empty_collection_names() {
             }
             other => panic!("unexpected error: {other}"),
         }
+    });
+}
+
+#[test]
+fn update_indexes_new_document_and_skips_unchanged_mtime() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("src/lib.rs");
+        write_text_file(&file_path, "fn alpha() {}\n");
+
+        let first = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("first update");
+        assert_eq!(first.scanned, 1);
+        assert_eq!(first.added, 1);
+        assert_eq!(first.updated, 0);
+        assert_eq!(first.deactivated, 0);
+        assert!(first.errors.is_empty(), "unexpected errors: {:?}", first.errors);
+
+        let hits = engine
+            .storage()
+            .query_bm25("work", "alpha", &[("body", 1.0)], 10)
+            .expect("query bm25");
+        assert_eq!(hits.len(), 1);
+
+        let second = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("second update");
+        assert_eq!(second.scanned, 1);
+        assert_eq!(second.skipped_mtime, 1);
+        assert_eq!(second.added, 0);
+        assert_eq!(second.updated, 0);
+        assert_eq!(second.deactivated, 0);
+    });
+}
+
+#[test]
+fn update_tracks_modified_and_deactivated_documents() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("src/lib.rs");
+        write_text_file(&file_path, "fn alpha() {}\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        write_text_file(&file_path, "fn beta() {}\n");
+        let changed = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("changed update");
+        assert_eq!(changed.updated, 1);
+        assert_eq!(changed.added, 0);
+        assert_eq!(changed.deactivated, 0);
+
+        std::fs::remove_file(&file_path).expect("remove file");
+        let removed = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("deactivate removed file");
+        assert_eq!(removed.deactivated, 1);
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let docs = engine
+            .storage()
+            .list_documents(collection.id, false)
+            .expect("list all documents");
+        assert_eq!(docs.len(), 1);
+        assert!(!docs[0].active, "removed document should be inactive");
+    });
+}
+
+#[test]
+fn update_dry_run_reports_changes_without_writing() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("src/lib.rs");
+        write_text_file(&file_path, "fn alpha() {}\n");
+
+        let mut options = update_options(Some("work"), &["api"]);
+        options.dry_run = true;
+        let report = engine.update(options).expect("dry run update");
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.added, 1);
+        assert_eq!(report.updated, 0);
+        assert_eq!(report.deactivated, 0);
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let docs = engine
+            .storage()
+            .list_documents(collection.id, false)
+            .expect("list all documents");
+        assert!(docs.is_empty(), "dry run should not persist documents");
     });
 }
