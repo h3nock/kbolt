@@ -289,6 +289,105 @@ fn delete_tantivy_by_doc_removes_all_doc_chunks_after_commit() {
 }
 
 #[test]
+fn usearch_insert_query_and_count_round_trip() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    storage.create_space("work", None).expect("create work");
+
+    storage
+        .insert_usearch("work", 11, &[1.0, 0.0])
+        .expect("insert first vector");
+    storage
+        .insert_usearch("work", 22, &[0.0, 1.0])
+        .expect("insert second vector");
+
+    let count = storage.count_usearch("work").expect("count vectors");
+    assert_eq!(count, 2);
+
+    let hits = storage
+        .query_dense("work", &[1.0, 0.0], 2)
+        .expect("query dense");
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].chunk_id, 11);
+}
+
+#[test]
+fn batch_insert_usearch_rejects_mixed_dimensions() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    storage.create_space("work", None).expect("create work");
+
+    let err = storage
+        .batch_insert_usearch("work", &[(1, &[1.0, 0.0]), (2, &[1.0, 0.0, 0.0])])
+        .expect_err("mixed dimensions should fail");
+    assert!(
+        err.to_string().contains("vector dimension mismatch"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn delete_usearch_removes_keys() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    storage.create_space("work", None).expect("create work");
+
+    storage
+        .batch_insert_usearch("work", &[(11, &[1.0, 0.0]), (22, &[0.0, 1.0])])
+        .expect("insert vectors");
+    assert_eq!(storage.count_usearch("work").expect("count before delete"), 2);
+
+    storage
+        .delete_usearch("work", &[11])
+        .expect("delete key 11 from usearch");
+    assert_eq!(storage.count_usearch("work").expect("count after delete"), 1);
+
+    let hits = storage
+        .query_dense("work", &[0.0, 1.0], 2)
+        .expect("query after delete");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].chunk_id, 22);
+}
+
+#[test]
+fn clear_usearch_resets_index() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    storage.create_space("work", None).expect("create work");
+    storage
+        .batch_insert_usearch("work", &[(11, &[1.0, 0.0]), (22, &[0.0, 1.0])])
+        .expect("insert vectors");
+
+    storage.clear_usearch("work").expect("clear usearch");
+    assert_eq!(storage.count_usearch("work").expect("count after clear"), 0);
+    let hits = storage
+        .query_dense("work", &[1.0, 0.0], 2)
+        .expect("query after clear");
+    assert!(hits.is_empty());
+}
+
+#[test]
+fn usearch_persists_across_close_and_open_space() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    storage.create_space("work", None).expect("create work");
+    storage
+        .insert_usearch("work", 11, &[1.0, 0.0])
+        .expect("insert vector");
+    assert_eq!(storage.count_usearch("work").expect("count before close"), 1);
+
+    storage.close_space("work").expect("close work");
+    storage.open_space("work").expect("reopen work");
+
+    assert_eq!(storage.count_usearch("work").expect("count after reopen"), 1);
+    let hits = storage
+        .query_dense("work", &[1.0, 0.0], 1)
+        .expect("query after reopen");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].chunk_id, 11);
+}
+
+#[test]
 fn find_space_for_collection_returns_not_found_when_absent() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
