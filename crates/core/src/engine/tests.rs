@@ -1537,9 +1537,21 @@ fn status_reports_space_collection_and_model_counts() {
         assert_eq!(status.models.embedder.size_bytes, None);
         assert_eq!(status.models.reranker.size_bytes, None);
         assert_eq!(status.models.expander.size_bytes, None);
-        assert_eq!(status.models.embedder.path, None);
-        assert_eq!(status.models.reranker.path, None);
-        assert_eq!(status.models.expander.path, None);
+        let expected_embedder = engine.config().cache_dir.join("models/embedder");
+        let expected_reranker = engine.config().cache_dir.join("models/reranker");
+        let expected_expander = engine.config().cache_dir.join("models/expander");
+        assert_eq!(
+            status.models.embedder.path.as_deref(),
+            Some(expected_embedder.as_path())
+        );
+        assert_eq!(
+            status.models.reranker.path.as_deref(),
+            Some(expected_reranker.as_path())
+        );
+        assert_eq!(
+            status.models.expander.path.as_deref(),
+            Some(expected_expander.as_path())
+        );
 
         let default_status = status
             .spaces
@@ -1715,7 +1727,37 @@ fn model_status_reflects_configured_model_names() {
     assert_eq!(status.embedder.size_bytes, None);
     assert_eq!(status.reranker.size_bytes, None);
     assert_eq!(status.expander.size_bytes, None);
-    assert_eq!(status.embedder.path, None);
-    assert_eq!(status.reranker.path, None);
-    assert_eq!(status.expander.path, None);
+    let expected_embedder = engine.config().cache_dir.join("models/embedder");
+    let expected_reranker = engine.config().cache_dir.join("models/reranker");
+    let expected_expander = engine.config().cache_dir.join("models/expander");
+    assert_eq!(
+        status.embedder.path.as_deref(),
+        Some(expected_embedder.as_path())
+    );
+    assert_eq!(
+        status.reranker.path.as_deref(),
+        Some(expected_reranker.as_path())
+    );
+    assert_eq!(
+        status.expander.path.as_deref(),
+        Some(expected_expander.as_path())
+    );
+}
+
+#[test]
+fn pull_models_skips_already_present_model_directories() {
+    let engine = test_engine();
+    let model_dir = engine.config().cache_dir.join("models");
+
+    std::fs::create_dir_all(model_dir.join("embedder")).expect("create embedder dir");
+    std::fs::create_dir_all(model_dir.join("reranker")).expect("create reranker dir");
+    std::fs::create_dir_all(model_dir.join("expander")).expect("create expander dir");
+    std::fs::write(model_dir.join("embedder/model.bin"), b"e").expect("seed embedder");
+    std::fs::write(model_dir.join("reranker/model.bin"), b"r").expect("seed reranker");
+    std::fs::write(model_dir.join("expander/model.bin"), b"x").expect("seed expander");
+
+    let report = engine.pull_models().expect("pull models");
+    assert_eq!(report.downloaded.len(), 0);
+    assert_eq!(report.already_present.len(), 3);
+    assert_eq!(report.total_bytes, 0);
 }

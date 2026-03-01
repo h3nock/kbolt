@@ -5,6 +5,7 @@ use std::time::{Instant, UNIX_EPOCH};
 use crate::config;
 use crate::config::Config;
 use crate::lock::{LockMode, OperationLock};
+use crate::models;
 use crate::storage::{ChunkInsert, CollectionRow, DocumentRow, SpaceResolution, TantivyEntry};
 use crate::storage::Storage;
 use crate::Result;
@@ -12,8 +13,8 @@ use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 use kbolt_types::{
     ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, CollectionStatus,
-    DocumentResponse, FileEntry, FileError, GetRequest, KboltError, Locator, ModelInfo,
-    ModelStatus, MultiGetRequest, MultiGetResponse, OmitReason, OmittedFile, SearchMode,
+    DocumentResponse, FileEntry, FileError, GetRequest, KboltError, Locator, ModelStatus,
+    MultiGetRequest, MultiGetResponse, OmitReason, OmittedFile, PullReport, SearchMode,
     SearchRequest, SearchResponse, SearchResult, SearchSignals, SpaceInfo, SpaceStatus,
     StatusResponse, UpdateOptions, UpdateReport,
 };
@@ -692,7 +693,7 @@ impl Engine {
             });
         }
 
-        let models = self.model_status()?;
+        let models = self.model_status_unlocked()?;
 
         Ok(StatusResponse {
             spaces: space_statuses,
@@ -707,26 +708,17 @@ impl Engine {
     }
 
     pub fn model_status(&self) -> Result<ModelStatus> {
-        Ok(ModelStatus {
-            embedder: ModelInfo {
-                name: self.config.models.embed.clone(),
-                downloaded: false,
-                size_bytes: None,
-                path: None,
-            },
-            reranker: ModelInfo {
-                name: self.config.models.reranker.clone(),
-                downloaded: false,
-                size_bytes: None,
-                path: None,
-            },
-            expander: ModelInfo {
-                name: self.config.models.expander.clone(),
-                downloaded: false,
-                size_bytes: None,
-                path: None,
-            },
-        })
+        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
+        self.model_status_unlocked()
+    }
+
+    fn model_status_unlocked(&self) -> Result<ModelStatus> {
+        models::status(&self.config.models, &self.model_dir())
+    }
+
+    pub fn pull_models(&self) -> Result<PullReport> {
+        let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
+        models::pull(&self.config.models, &self.model_dir())
     }
 
     pub fn resolve_update_targets(&self, options: &UpdateOptions) -> Result<Vec<UpdateTarget>> {
@@ -768,6 +760,10 @@ impl Engine {
 
     pub fn storage(&self) -> &Storage {
         &self.storage
+    }
+
+    fn model_dir(&self) -> std::path::PathBuf {
+        self.config.cache_dir.join("models")
     }
 
     fn acquire_operation_lock(&self, mode: LockMode) -> Result<OperationLock> {
