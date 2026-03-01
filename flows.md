@@ -404,9 +404,11 @@ kbolt update --space {name}
 
 Without `--space`: updates all collections in all spaces. With `--space`: scopes to that space only.
 
-For each collection: scans the directory, applies filters (hardcoded ignores → ignore patterns → extractor registry → extensions), detects new/changed/deleted files, extracts content, chunks, writes to the space's FTS index, embeds vectors into the space's USearch file. Deactivates missing files, reaps old deactivated files past the reaping period.
+For each collection: scans the directory and applies filters (hardcoded ignores → ignore patterns → extractor registry → extensions). For each file that passes filters, checks the file's modification time (mtime) against the stored value — if unchanged, skips the file entirely (no read needed). If mtime changed, reads the file and computes a SHA-256 hash — if the hash matches the stored hash, updates the stored mtime and skips re-indexing. Only when the hash actually changed does the full pipeline run: extract content, chunk, write to the space's FTS index, embed vectors into the space's USearch file. Files that disappeared from disk are deactivated (soft-deleted). Files deactivated longer than the reaping period (default: 7 days) are hard-deleted.
 
-Returns a summary report: files scanned, added, updated, deactivated, reactivated, reaped, chunks created, chunks embedded, duration.
+This two-level change detection (mtime first, hash second) makes "nothing changed" scans extremely fast — ~10ms for 10K files. The SHA-256 hash is the source of truth; mtime is a fast pre-filter to avoid unnecessary file reads.
+
+Returns a summary report: files scanned, skipped (unchanged), added, updated, deactivated, reactivated, reaped, chunks created, chunks embedded, duration.
 
 ---
 
@@ -418,10 +420,13 @@ Returns a summary report: files scanned, added, updated, deactivated, reactivate
 ```
 kbolt update --collection {name}
 kbolt update --collection {name},{name},...
+kbolt update --space {space} --collection {name}
+kbolt update --space {space} --collection {name},{name},...
 ```
 
 **Parameters**:
 - **--collection** (required for this flow) — comma-separated collection names (resolved via space precedence)
+- **--space** (optional) — resolve collection names within this space
 
 Same pipeline as flow 23, but scoped to the named collections. Unchanged collections are skipped entirely. Useful when a few collections have heavy changes and a full `kbolt update` would be slow.
 
@@ -434,12 +439,16 @@ Same pipeline as flow 23, but scoped to the named collections. Unchanged collect
 
 ```
 kbolt update --no-embed
+kbolt update --space {name} --no-embed
+kbolt update --space {name} --collection {name} --no-embed
 ```
 
 **Parameters**:
 - **--no-embed** — skip embedding step
+- **--space** (optional) — scope to a specific space
+- **--collection** (optional) — scope to specific collections
 
-Useful when models aren't downloaded yet, or for a quick index pass where keyword search is sufficient. Embedding can be done later by running `kbolt update` normally (it will embed any unembedded chunks).
+Useful when models aren't downloaded yet, or for a quick index pass where keyword search is sufficient. Embedding can be done later by running `kbolt update` normally (it will embed any unembedded chunks). All flags compose independently — `--no-embed` can be combined with `--space`, `--collection`, `--dry-run`, and `--verbose`.
 
 ---
 
@@ -451,10 +460,14 @@ Useful when models aren't downloaded yet, or for a quick index pass where keywor
 ```
 kbolt update --dry-run
 kbolt update --collection {name} --dry-run
+kbolt update --space {name} --dry-run
+kbolt update --space {name} --collection {name} --dry-run
 ```
 
 **Parameters**:
 - **--dry-run** — simulate the update, report what would happen
+- **--space** (optional) — scope to a specific space
+- **--collection** (optional) — scope to specific collections
 
 Shows: how many files would be added, updated, deactivated, reaped. No writes to SQLite, Tantivy, or USearch. Useful before first index of a large collection to understand scope.
 
@@ -467,12 +480,17 @@ Shows: how many files would be added, updated, deactivated, reaped. No writes to
 
 ```
 kbolt update --verbose
+kbolt update --space {name} --verbose
+kbolt update --space {name} --collection {name} --verbose
+kbolt update --collection {name} --dry-run --verbose
 ```
 
 **Parameters**:
 - **--verbose** — log per-file decisions
+- **--space** (optional) — scope to a specific space
+- **--collection** (optional) — scope to specific collections
 
-Prints why each file was skipped (hash unchanged, filtered by ignore patterns, unsupported extension, extraction failed) or processed (new, changed). Useful when a file isn't appearing in search results and the user wants to know why.
+Prints why each file was skipped (hash unchanged, filtered by ignore patterns, unsupported extension, extraction failed) or processed (new, changed). Useful when a file isn't appearing in search results and the user wants to know why. `--verbose` combines with `--dry-run` to preview per-file decisions without making changes.
 
 ---
 
@@ -488,8 +506,12 @@ kbolt search {query}
 kbolt search {query} --space {name}
 kbolt search {query} --collection {name}
 kbolt search {query} --collection {name},{name},...
+kbolt search {query} --space {name} --collection {name}
+kbolt search {query} --space {name} --collection {name},{name},...
 kbolt search {query} --limit {n}
 kbolt search {query} --deep
+kbolt search {query} --space {name} --deep
+kbolt search {query} --space {name} --collection {name} --deep
 kbolt search {query} --keyword
 kbolt search {query} --semantic
 kbolt search {query} --no-rerank
@@ -509,7 +531,7 @@ Default behavior (no mode flag): auto mode — the system analyzes the query and
 
 **Cross-space search**: When searching without `--space`, each space's Tantivy and USearch indexes are queried independently. Candidate lists from all spaces are concatenated, then fused and reranked together. The cross-encoder reranker normalizes scores across spaces.
 
-Returns ranked results. Each result shows: rank, docid, space, collection, path, title, heading breadcrumb, snippet, score.
+Returns ranked results. Each result shows: rank, docid, space, collection, path, title, heading breadcrumb, snippet, score. The output footer includes a staleness hint: "Index last updated: {time ago}" based on the most recent update timestamp across the searched collections. This helps users understand why a recently saved file might not appear in results.
 
 `--keyword`, `--semantic`, and `--no-rerank` are diagnostic flags for troubleshooting retrieval quality — they let the user isolate which retrieval signal is working or failing.
 
@@ -532,7 +554,7 @@ kbolt get {docid} --offset {n} --limit {n}
 - **--offset** (optional) — start at line N
 - **--limit** (optional) — max lines to return
 
-Resolves the docid to a document in SQLite, reads the file from disk at the collection's path, returns the content. Primarily useful as a quick reference after seeing a docid in search results.
+Resolves the docid to a document in SQLite, reads the file from disk at the collection's path, returns the content. Always reads the **live file**, not a cached copy. If the file's current hash doesn't match the indexed hash, the output includes a `stale` indicator — the content has changed since indexing, and search snippets may not match. If the file has been deleted from disk, returns an error: "File deleted since indexing. Run `kbolt update` to refresh." Primarily useful as a quick reference after seeing a docid in search results.
 
 ---
 
@@ -544,14 +566,16 @@ Resolves the docid to a document in SQLite, reads the file from disk at the coll
 ```
 kbolt get {collection/path}
 kbolt get {collection/path} --offset {n} --limit {n}
+kbolt get {collection/path} --space {name}
 ```
 
 **Parameters**:
 - **collection/path** (required) — collection-relative path like `{collection}/{relative/path}`
 - **--offset** (optional) — start at line N
 - **--limit** (optional) — max lines to return
+- **--space** (optional) — resolve the collection name within this space
 
-Resolves the path to a collection + relative path, reads the file from disk. The main convenience over `cat` is that the user doesn't need to know the absolute path — kbolt resolves `{collection}/...` to the collection's root path via the collection registry.
+Resolves the path to a collection + relative path, reads the file from disk. Always reads the **live file**. If the file's current hash doesn't match the indexed hash, includes a `stale` indicator. If the file has been deleted, returns an error with guidance to run `kbolt update`. The main convenience over `cat` is that the user doesn't need to know the absolute path — kbolt resolves `{collection}/...` to the collection's root path via the collection registry. Use `--space` when the same collection name exists in multiple spaces.
 
 ---
 
@@ -561,17 +585,22 @@ Resolves the path to a collection + relative path, reads the file from disk. The
 **Goal**: Read several documents at once
 
 ```
-kbolt multi-get {pattern}
 kbolt multi-get {path},{path},...
-kbolt multi-get {pattern} --max-bytes {n} --limit {n}
+kbolt multi-get {docid},{docid},...
+kbolt multi-get {path},{docid},{path},...
+kbolt multi-get {path},{path} --max-bytes {n} --max-files {n}
+kbolt multi-get {path},{path} --space {name}
 ```
 
 **Parameters**:
-- **pattern** (required) — glob pattern or comma-separated paths
-- **--max-bytes** (optional) — max total bytes returned, default 10KB
-- **--limit** (optional) — max number of files returned
+- **locators** (required) — comma-separated paths (`collection/path`) and/or docids (`#a1b2c3`), resolved in order given
+- **--max-files** (optional) — max number of files returned, default 20
+- **--max-bytes** (optional) — max total bytes returned, default 50KB
+- **--space** (optional) — resolve collection references within this space
 
-Primarily exists for MCP clients (LLMs can't access the file system). CLI users can use it for scripting. Both `--max-bytes` and `--limit` act as safety caps to prevent accidentally dumping huge amounts of content.
+Locators are resolved in the order given. Budget (`--max-files`, `--max-bytes`) is consumed in that order, so the caller controls priority — put the most important files first. Files are returned whole, never truncated mid-file. When budget is exhausted, remaining files are reported as omitted with their sizes, so the caller can fetch them individually via `kbolt get` if needed.
+
+Primarily exists for MCP clients (LLMs can't access the file system). CLI users can use it for scripting. Each returned document includes a `stale` indicator if its content has changed since indexing. Documents whose files have been deleted are omitted from results with a warning.
 
 ---
 
@@ -586,12 +615,15 @@ Primarily exists for MCP clients (LLMs can't access the file system). CLI users 
 kbolt ls {collection}
 kbolt ls {collection} {prefix}
 kbolt ls {collection} --all
+kbolt ls {collection} --space {name}
+kbolt ls {collection} {prefix} --space {name}
 ```
 
 **Parameters**:
-- **collection** (required)
+- **collection** (required) — resolved via space precedence
 - **prefix** (optional) — subdirectory filter
 - **--all** (optional) — include deactivated (soft-deleted) files
+- **--space** (optional) — resolve collection name within this space
 
 Shows: path, title, docid, active status (if `--all`). Default shows only active files.
 
@@ -624,14 +656,19 @@ Shows: list of spaces with collection counts, doc/chunk counts per collection, t
 kbolt schedule --every {interval}
 kbolt schedule --every {interval} --no-embed
 kbolt schedule --at {time}
+kbolt schedule --every {interval} --space {name}
+kbolt schedule --every {interval} --space {name} --collection {name}
+kbolt schedule --every {interval} --space {name} --collection {name},{name},...
 ```
 
 **Parameters**:
 - **--every** — interval (e.g. `6h`, `30m`, `1d`)
 - **--at** — daily at specific time (e.g. `03:00`)
 - **--no-embed** (optional) — FTS-only re-index for speed
+- **--space** (optional) — scope scheduled updates to a specific space
+- **--collection** (optional) — scope scheduled updates to specific collections
 
-Creates a launchd plist (macOS) or cron job / systemd timer (Linux) that runs `kbolt update` on the specified schedule.
+Creates a launchd plist (macOS) or cron job / systemd timer (Linux) that runs `kbolt update` on the specified schedule. Without `--space`/`--collection`, schedules a full `kbolt update` across all spaces. With scoping flags, the scheduled command runs `kbolt update --space {name}` or `kbolt update --space {name} --collection {name}` accordingly. Multiple schedules can coexist (e.g. a fast `--no-embed` every 30m for one space, and a full update daily for everything).
 
 ---
 
@@ -644,7 +681,7 @@ Creates a launchd plist (macOS) or cron job / systemd timer (Linux) that runs `k
 kbolt schedule --status
 ```
 
-Shows: whether a schedule is active, interval/time, last run, next run, whether embedding is included.
+Shows all active schedules. Each entry shows: scope (all / space / collection), interval/time, last run, next run, whether embedding is included.
 
 ---
 
@@ -655,9 +692,11 @@ Shows: whether a schedule is active, interval/time, last run, next run, whether 
 
 ```
 kbolt schedule --off
+kbolt schedule --off --space {name}
+kbolt schedule --off --space {name} --collection {name}
 ```
 
-Removes the launchd plist or cron job. No more automated updates.
+Without scoping flags, removes all schedules. With `--space` or `--collection`, removes only the matching schedule. Removes the corresponding launchd plist or cron job.
 
 ---
 
@@ -672,8 +711,8 @@ These flows are performed by an LLM/agent connected to kbolt via MCP stdio trans
 
 On MCP connection, the server injects dynamic instructions into the LLM's system prompt:
 - Number of indexed documents, spaces, and collections
-- Available spaces with descriptions and their collections
-- Guidance on when to use `--deep` vs default search
+- Available spaces with descriptions and their collections (including collection descriptions)
+- Guidance on when to use `mode: "deep"` vs default search
 
 The LLM can also call the `status` tool for detailed information.
 
@@ -696,7 +735,7 @@ MCP tool call:
 - **limit** (optional, default 10)
 - **mode** (optional) — auto / deep / keyword / semantic
 
-Same as CLI search (flow 28) but invoked as an MCP tool. Returns structured results with docid, space, collection, path, title, heading, snippet, score.
+Same as CLI search (flow 28) but invoked as an MCP tool. When `space` is omitted, searches across all spaces (cross-space search). Returns structured results with docid, space, collection, path, title, heading, snippet, score.
 
 ---
 
@@ -707,11 +746,12 @@ Same as CLI search (flow 28) but invoked as an MCP tool. Returns structured resu
 
 MCP tool call:
 ```json
-{ "tool": "get", "identifier": "{docid_or_path}" }
+{ "tool": "get", "identifier": "{docid_or_path}", "space": "{name}" }
 ```
 
 **Parameters**:
 - **identifier** (required) — docid or collection-relative path
+- **space** (optional) — resolve collection name within this space. Not needed when using docid (globally unique), but required when using a collection-relative path and the collection name exists in multiple spaces.
 
 This is the primary reason `get` exists — the LLM has no file system access and needs this to read document content after finding it via search.
 
@@ -724,15 +764,16 @@ This is the primary reason `get` exists — the LLM has no file system access an
 
 MCP tool call:
 ```json
-{ "tool": "multi_get", "patterns": ["{pattern}"], "max_bytes": "{n}" }
+{ "tool": "multi_get", "locators": ["{path_or_docid}", ...], "space": "{name}", "max_files": "{n}", "max_bytes": "{n}" }
 ```
 
 **Parameters**:
-- **patterns** (required)
-- **max_bytes** (optional, default 10KB)
-- **limit** (optional) — max file count
+- **locators** (required) — array of paths (`collection/path`) and/or docids (`a1b2c3`), resolved in order given
+- **space** (optional) — resolve collection references within this space
+- **max_files** (optional, default 20)
+- **max_bytes** (optional, default 50KB)
 
-Lets the LLM pull several files in one call, respecting size/count caps.
+Lets the LLM pull several files in one call, respecting file count and byte budget caps. Locators are resolved in order, so the LLM can prioritize which files to read first. Response includes an `omitted` list with sizes for any files that didn't fit, so the LLM can fetch them individually via `get` if needed.
 
 ---
 
@@ -760,8 +801,11 @@ MCP tool call:
 
 MCP tool call:
 ```json
-{ "tool": "status" }
+{ "tool": "status", "space": "{name}" }
 ```
+
+**Parameters**:
+- **space** (optional) — scope to a specific space. If omitted, returns status for all spaces.
 
 Returns space list, collection list per space, document/chunk counts, embedding status.
 
@@ -775,6 +819,30 @@ Returns space list, collection list per space, document/chunk counts, embedding 
 **Goal**: Keep index fresh without human intervention
 
 The system runs `kbolt update` (or `kbolt update --no-embed`) on the schedule configured via flow 34. Same pipeline as flow 23, no human interaction. Output is logged to system log.
+
+---
+
+## Deferred Flows (V2+)
+
+The following flows are planned but deferred beyond V1. They are listed here so they don't get lost.
+
+### Evaluation Framework
+
+- **`kbolt eval add {query} {expected_paths}`** — Add a test case (query + expected relevant documents) to the eval dataset stored in `~/.config/kbolt/eval.toml`.
+- **`kbolt eval run`** — Run all test cases against the current index. Measures MRR@10, Recall@K (K=1,5,10), and latency (p50, p95, p99).
+- **`kbolt eval report`** — Show the most recent evaluation results. Useful for tracking retrieval quality over time as the index, models, or chunking strategy change.
+
+### HTTP + MCP Server
+
+- **`kbolt serve --port {n}`** — Start a long-running process that serves the HTTP API and MCP via streamable HTTP transport on a single port (default: 3777). Models are loaded into memory and shared across requests. The server keeps Tantivy and USearch indexes open for low-latency queries. Deferred because V1 uses `kbolt mcp` (stdio transport) for MCP and CLI for everything else.
+
+### Cleanup
+
+- **`kbolt cleanup`** — Remove orphaned content (content rows with no referencing documents), vacuum SQLite, and compact Tantivy segments. Returns a report: orphaned content removed, bytes reclaimed, vacuum duration. In V1, reaping of deactivated documents happens automatically during `kbolt update` (flow 23) based on the configured reaping period.
+
+### Resource URIs (MCP)
+
+- MCP clients can access documents via `kbolt://{space}/{collection}/{path}` resource URIs as an alternative to the `get` tool. Deferred until the MCP resource protocol stabilizes.
 
 ---
 
