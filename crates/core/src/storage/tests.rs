@@ -279,10 +279,12 @@ fn new_creates_expected_schema_objects() {
 #[test]
 fn delete_space_removes_non_default_space() {
     let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let cache_dir = tmp.path().join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
     storage
         .create_space("work", Some("work docs"))
         .expect("create space");
+    assert!(cache_dir.join("spaces/work/tantivy").is_dir());
 
     storage.delete_space("work").expect("delete space");
     let err = storage
@@ -293,12 +295,22 @@ fn delete_space_removes_non_default_space() {
         KboltError::SpaceNotFound { name } => assert_eq!(name, "work"),
         other => panic!("unexpected error: {other}"),
     }
+
+    assert!(!cache_dir.join("spaces/work").exists());
+    let spaces = storage.spaces.read().expect("lock spaces map");
+    assert!(!spaces.contains_key("work"));
 }
 
 #[test]
 fn delete_default_space_clears_contents_but_keeps_space() {
     let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let cache_dir = tmp.path().join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+    std::fs::write(
+        cache_dir.join("spaces/default/tantivy/marker.bin"),
+        vec![b'm'; 8],
+    )
+    .expect("write marker file");
     let conn = storage.db.lock().expect("lock db");
 
     let default_id: i64 = conn
@@ -332,6 +344,12 @@ fn delete_default_space_clears_contents_but_keeps_space() {
         )
         .expect("count collections");
     assert_eq!(count, 0, "default space collections should be cleared");
+
+    assert!(cache_dir.join("spaces/default/tantivy").is_dir());
+    assert!(cache_dir.join("spaces/default/vectors.usearch").is_file());
+    assert!(!cache_dir.join("spaces/default/tantivy/marker.bin").exists());
+    let spaces = storage.spaces.read().expect("lock spaces map");
+    assert!(spaces.contains_key("default"));
 }
 
 #[test]
