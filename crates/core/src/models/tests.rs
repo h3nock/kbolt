@@ -4,7 +4,8 @@ use tempfile::tempdir;
 
 use crate::config::ModelConfig;
 use crate::models::{
-    pull_with_downloader, pull_with_downloader_and_progress, status, ModelDownloader, ModelPullEvent,
+    pull_with_downloader, pull_with_downloader_and_progress, status, ModelArtifactProvider,
+    ModelPullEvent,
 };
 use crate::Result;
 
@@ -13,7 +14,7 @@ struct FakeDownloader {
     bytes_per_model: u64,
 }
 
-impl ModelDownloader for FakeDownloader {
+impl ModelArtifactProvider for FakeDownloader {
     fn download_model(&self, model_id: &str, target_dir: &Path) -> Result<u64> {
         std::fs::create_dir_all(target_dir)?;
         std::fs::write(target_dir.join("model.bin"), model_id.as_bytes())?;

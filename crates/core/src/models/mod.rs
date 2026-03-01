@@ -1,16 +1,20 @@
 use std::fs;
 use std::path::Path;
 
-use hf_hub::api::sync::ApiBuilder;
-use hf_hub::{Repo, RepoType};
-use kbolt_types::{KboltError, ModelInfo, ModelStatus, PullReport};
+use kbolt_types::{ModelInfo, ModelStatus, PullReport};
 
 use crate::config::ModelConfig;
 use crate::Result;
 
+mod provider;
+mod providers;
+
 const MODEL_DIRNAME_EMBEDDER: &str = "embedder";
 const MODEL_DIRNAME_RERANKER: &str = "reranker";
 const MODEL_DIRNAME_EXPANDER: &str = "expander";
+
+pub(crate) use provider::ModelArtifactProvider;
+use providers::hf::HfHubDownloader;
 
 #[derive(Debug, Clone)]
 struct ModelTarget {
@@ -36,42 +40,6 @@ pub enum ModelPullEvent {
     },
 }
 
-pub trait ModelDownloader {
-    fn download_model(&self, model_id: &str, target_dir: &Path) -> Result<u64>;
-}
-
-pub struct HfHubDownloader;
-
-impl ModelDownloader for HfHubDownloader {
-    fn download_model(&self, model_id: &str, target_dir: &Path) -> Result<u64> {
-        fs::create_dir_all(target_dir)?;
-        let api = ApiBuilder::new()
-            .with_cache_dir(target_dir.to_path_buf())
-            .build()
-            .map_err(|err| KboltError::ModelDownload(format!("{model_id}: {err}")))?;
-        let repo = api.repo(Repo::new(model_id.to_string(), RepoType::Model));
-        let info = repo
-            .info()
-            .map_err(|err| KboltError::ModelDownload(format!("{model_id}: {err}")))?;
-
-        let mut total_bytes = 0u64;
-        for sibling in info.siblings {
-            let file_path = repo
-                .get(&sibling.rfilename)
-                .map_err(|err| KboltError::ModelDownload(format!("{model_id}: {err}")))?;
-            total_bytes = total_bytes.saturating_add(file_size_bytes(&file_path)?);
-        }
-
-        if total_bytes == 0 {
-            return Err(
-                KboltError::ModelDownload(format!("{model_id}: no files were downloaded")).into(),
-            );
-        }
-
-        Ok(total_bytes)
-    }
-}
-
 pub fn pull(config: &ModelConfig, model_dir: &Path) -> Result<PullReport> {
     let downloader = HfHubDownloader;
     pull_with_downloader_and_progress(config, model_dir, &downloader, |_| {})
@@ -81,7 +49,7 @@ pub fn pull(config: &ModelConfig, model_dir: &Path) -> Result<PullReport> {
 pub(crate) fn pull_with_downloader(
     config: &ModelConfig,
     model_dir: &Path,
-    downloader: &dyn ModelDownloader,
+    downloader: &dyn ModelArtifactProvider,
 ) -> Result<PullReport> {
     pull_with_downloader_and_progress(config, model_dir, downloader, |_| {})
 }
@@ -97,7 +65,7 @@ where
 pub(crate) fn pull_with_downloader_and_progress<F>(
     config: &ModelConfig,
     model_dir: &Path,
-    downloader: &dyn ModelDownloader,
+    downloader: &dyn ModelArtifactProvider,
     mut on_event: F,
 ) -> Result<PullReport>
 where
@@ -181,10 +149,6 @@ fn info_for_target(model_dir: &Path, target: &ModelTarget) -> Result<ModelInfo> 
         size_bytes: if size > 0 { Some(size) } else { None },
         path: Some(target_dir),
     })
-}
-
-fn file_size_bytes(path: &Path) -> Result<u64> {
-    Ok(fs::metadata(path)?.len())
 }
 
 fn dir_size_bytes(path: &Path) -> Result<u64> {
