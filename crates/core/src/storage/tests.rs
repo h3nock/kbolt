@@ -954,3 +954,113 @@ fn reactivate_document_missing_id_returns_not_found() {
         other => panic!("unexpected error: {other}"),
     }
 }
+
+#[test]
+fn reap_documents_deletes_only_old_deactivated_rows() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    let old_doc_id = storage
+        .upsert_document(
+            collection_id,
+            "old.rs",
+            "old",
+            "hash-old",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert old doc");
+    let recent_doc_id = storage
+        .upsert_document(
+            collection_id,
+            "recent.rs",
+            "recent",
+            "hash-recent",
+            "2026-03-01T10:01:00Z",
+        )
+        .expect("insert recent doc");
+    let active_doc_id = storage
+        .upsert_document(
+            collection_id,
+            "active.rs",
+            "active",
+            "hash-active",
+            "2026-03-01T10:02:00Z",
+        )
+        .expect("insert active doc");
+
+    {
+        let conn = storage.db.lock().expect("lock db");
+        conn.execute(
+            "UPDATE documents
+             SET active = 0, deactivated_at = '2000-01-01T00:00:00Z'
+             WHERE id = ?1",
+            [old_doc_id],
+        )
+        .expect("mark old deactivated");
+        conn.execute(
+            "UPDATE documents
+             SET active = 0, deactivated_at = '2999-01-01T00:00:00Z'
+             WHERE id = ?1",
+            [recent_doc_id],
+        )
+        .expect("mark recent deactivated");
+    }
+
+    let reaped = storage.reap_documents(7).expect("reap docs");
+    assert_eq!(reaped, vec![old_doc_id]);
+
+    let old_doc = storage
+        .get_document_by_path(collection_id, "old.rs")
+        .expect("query old path");
+    assert!(old_doc.is_none(), "old document should be deleted");
+
+    let recent_doc = storage
+        .get_document_by_path(collection_id, "recent.rs")
+        .expect("query recent path")
+        .expect("recent document should remain");
+    assert!(!recent_doc.active);
+
+    let active_doc = storage
+        .get_document_by_path(collection_id, "active.rs")
+        .expect("query active path")
+        .expect("active document should remain");
+    assert!(active_doc.active);
+    assert!(active_doc_id > 0);
+}
+
+#[test]
+fn reap_documents_returns_empty_when_no_documents_qualify() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    storage
+        .upsert_document(collection_id, "a.rs", "a", "hash-a", "2026-03-01T10:00:00Z")
+        .expect("insert doc");
+
+    let reaped = storage.reap_documents(7).expect("reap docs");
+    assert!(reaped.is_empty());
+}
