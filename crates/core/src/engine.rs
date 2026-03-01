@@ -63,7 +63,7 @@ impl Engine {
             .into());
         }
 
-        let space = self.resolve_space(req.space.as_deref(), None)?;
+        let space = self.resolve_space_row(req.space.as_deref(), None)?;
         if !req.path.is_absolute() || !req.path.is_dir() {
             return Err(KboltError::InvalidPath(req.path).into());
         }
@@ -90,23 +90,23 @@ impl Engine {
     }
 
     pub fn remove_collection(&self, space: Option<&str>, name: &str) -> Result<()> {
-        let resolved = self.resolve_space(space, Some(name))?;
+        let resolved = self.resolve_space_row(space, Some(name))?;
         self.storage.delete_collection(resolved.id, name)
     }
 
     pub fn rename_collection(&self, space: Option<&str>, old: &str, new: &str) -> Result<()> {
-        let resolved = self.resolve_space(space, Some(old))?;
+        let resolved = self.resolve_space_row(space, Some(old))?;
         self.storage.rename_collection(resolved.id, old, new)
     }
 
     pub fn describe_collection(&self, space: Option<&str>, name: &str, desc: &str) -> Result<()> {
-        let resolved = self.resolve_space(space, Some(name))?;
+        let resolved = self.resolve_space_row(space, Some(name))?;
         self.storage.update_collection_description(resolved.id, name, desc)
     }
 
     pub fn list_collections(&self, space: Option<&str>) -> Result<Vec<CollectionInfo>> {
         let (space_id_filter, spaces_by_id) = if let Some(space_name) = space {
-            let resolved = self.resolve_space(Some(space_name), None)?;
+            let resolved = self.resolve_space_row(Some(space_name), None)?;
             let mut map = std::collections::HashMap::new();
             map.insert(resolved.id, resolved.name.clone());
             (Some(resolved.id), map)
@@ -137,9 +137,14 @@ impl Engine {
     }
 
     pub fn collection_info(&self, space: Option<&str>, name: &str) -> Result<CollectionInfo> {
-        let resolved = self.resolve_space(space, Some(name))?;
+        let resolved = self.resolve_space_row(space, Some(name))?;
         let collection = self.storage.get_collection(resolved.id, name)?;
         self.build_collection_info(&resolved.name, &collection)
+    }
+
+    pub fn resolve_space(&self, explicit: Option<&str>) -> Result<String> {
+        let resolved = self.resolve_space_row(explicit, None)?;
+        Ok(resolved.name)
     }
 
     pub fn config(&self) -> &Config {
@@ -190,7 +195,7 @@ impl Engine {
         })
     }
 
-    fn resolve_space(
+    fn resolve_space_row(
         &self,
         explicit: Option<&str>,
         collection_for_lookup: Option<&str>,
