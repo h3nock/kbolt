@@ -843,3 +843,227 @@ fn update_dry_run_reports_changes_without_writing() {
         assert!(docs.is_empty(), "dry run should not persist documents");
     });
 }
+
+#[test]
+fn status_reports_space_collection_and_model_counts() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine
+            .add_space("work", Some("work docs"))
+            .expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        let notes_path = root.path().join("notes-wiki");
+        std::fs::create_dir_all(&work_path).expect("create work collection dir");
+        std::fs::create_dir_all(&notes_path).expect("create notes collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+        add_collection_fixture(&engine, "notes", "wiki", notes_path.clone());
+
+        write_text_file(&work_path.join("src/lib.rs"), "fn alpha() {}\n");
+        write_text_file(&work_path.join("README.md"), "# docs\n");
+        write_text_file(&notes_path.join("notes.md"), "meeting notes\n");
+
+        engine
+            .update(update_options(None, &[]))
+            .expect("initial update");
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        let work_collection = engine
+            .storage()
+            .get_collection(work_space.id, "api")
+            .expect("get work collection");
+        let work_active_docs = engine
+            .storage()
+            .list_documents(work_collection.id, true)
+            .expect("list active work docs");
+        engine
+            .storage()
+            .deactivate_document(work_active_docs[0].id)
+            .expect("deactivate one work doc");
+
+        let status = engine.status(None).expect("get global status");
+
+        assert_eq!(status.cache_dir, engine.config().cache_dir);
+        assert_eq!(status.config_dir, engine.config().config_dir);
+        assert_eq!(status.total_documents, 3);
+        assert_eq!(status.total_documents, engine.storage().count_documents(None).unwrap());
+        assert_eq!(status.total_chunks, engine.storage().count_chunks(None).unwrap());
+        assert_eq!(
+            status.total_embedded,
+            engine.storage().count_embedded_chunks(None).unwrap()
+        );
+
+        assert_eq!(status.models.embedder.name, engine.config().models.embed);
+        assert_eq!(status.models.reranker.name, engine.config().models.reranker);
+        assert_eq!(status.models.expander.name, engine.config().models.expander);
+        assert!(!status.models.embedder.downloaded);
+        assert!(!status.models.reranker.downloaded);
+        assert!(!status.models.expander.downloaded);
+        assert_eq!(status.models.embedder.size_bytes, None);
+        assert_eq!(status.models.reranker.size_bytes, None);
+        assert_eq!(status.models.expander.size_bytes, None);
+        assert_eq!(status.models.embedder.path, None);
+        assert_eq!(status.models.reranker.path, None);
+        assert_eq!(status.models.expander.path, None);
+
+        let default_status = status
+            .spaces
+            .iter()
+            .find(|space| space.name == "default")
+            .expect("default space status should exist");
+        assert!(default_status.collections.is_empty());
+        assert_eq!(default_status.last_updated, None);
+
+        let work_status = status
+            .spaces
+            .iter()
+            .find(|space| space.name == "work")
+            .expect("work status should exist");
+        assert_eq!(work_status.description.as_deref(), Some("work docs"));
+        assert_eq!(work_status.collections.len(), 1);
+        assert!(work_status.last_updated.is_some());
+
+        let work_collection_status = &work_status.collections[0];
+        assert_eq!(work_collection_status.name, "api");
+        assert_eq!(work_collection_status.path, work_path);
+        assert_eq!(
+            work_collection_status.documents,
+            engine
+                .storage()
+                .count_documents_in_collection(work_collection.id, false)
+                .unwrap()
+        );
+        assert_eq!(
+            work_collection_status.active_documents,
+            engine
+                .storage()
+                .count_documents_in_collection(work_collection.id, true)
+                .unwrap()
+        );
+        assert_eq!(
+            work_collection_status.chunks,
+            engine
+                .storage()
+                .count_chunks_in_collection(work_collection.id)
+                .unwrap()
+        );
+        assert_eq!(
+            work_collection_status.embedded_chunks,
+            engine
+                .storage()
+                .count_embedded_chunks_in_collection(work_collection.id)
+                .unwrap()
+        );
+        assert_eq!(
+            work_status.last_updated.as_deref(),
+            Some(work_collection_status.last_updated.as_str())
+        );
+
+        let notes_space = engine.storage().get_space("notes").expect("get notes space");
+        let notes_collection = engine
+            .storage()
+            .get_collection(notes_space.id, "wiki")
+            .expect("get notes collection");
+        let notes_status = status
+            .spaces
+            .iter()
+            .find(|space| space.name == "notes")
+            .expect("notes status should exist");
+        assert_eq!(notes_status.collections.len(), 1);
+        assert!(notes_status.last_updated.is_some());
+
+        let notes_collection_status = &notes_status.collections[0];
+        assert_eq!(notes_collection_status.name, "wiki");
+        assert_eq!(notes_collection_status.path, notes_path);
+        assert_eq!(
+            notes_collection_status.documents,
+            engine
+                .storage()
+                .count_documents_in_collection(notes_collection.id, false)
+                .unwrap()
+        );
+        assert_eq!(
+            notes_collection_status.active_documents,
+            engine
+                .storage()
+                .count_documents_in_collection(notes_collection.id, true)
+                .unwrap()
+        );
+        assert_eq!(
+            notes_collection_status.chunks,
+            engine
+                .storage()
+                .count_chunks_in_collection(notes_collection.id)
+                .unwrap()
+        );
+        assert_eq!(
+            notes_collection_status.embedded_chunks,
+            engine
+                .storage()
+                .count_embedded_chunks_in_collection(notes_collection.id)
+                .unwrap()
+        );
+        assert_eq!(
+            notes_status.last_updated.as_deref(),
+            Some(notes_collection_status.last_updated.as_str())
+        );
+    });
+}
+
+#[test]
+fn status_scopes_to_requested_space() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        let notes_path = root.path().join("notes-wiki");
+        std::fs::create_dir_all(&work_path).expect("create work collection dir");
+        std::fs::create_dir_all(&notes_path).expect("create notes collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+        add_collection_fixture(&engine, "notes", "wiki", notes_path.clone());
+
+        write_text_file(&work_path.join("src/lib.rs"), "fn alpha() {}\n");
+        write_text_file(&notes_path.join("notes.md"), "meeting notes\n");
+        engine
+            .update(update_options(None, &[]))
+            .expect("initial update");
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        let scoped = engine.status(Some("work")).expect("get scoped status");
+
+        assert_eq!(scoped.spaces.len(), 1);
+        assert_eq!(scoped.spaces[0].name, "work");
+        assert_eq!(
+            scoped.total_documents,
+            engine.storage().count_documents(Some(work_space.id)).unwrap()
+        );
+        assert_eq!(
+            scoped.total_chunks,
+            engine.storage().count_chunks(Some(work_space.id)).unwrap()
+        );
+        assert_eq!(
+            scoped.total_embedded,
+            engine
+                .storage()
+                .count_embedded_chunks(Some(work_space.id))
+                .unwrap()
+        );
+    });
+}
+
+#[test]
+fn status_errors_for_missing_space_scope() {
+    let engine = test_engine_with_default_space(None);
+    let err = engine
+        .status(Some("missing"))
+        .expect_err("missing status scope should error");
+    match KboltError::from(err) {
+        KboltError::SpaceNotFound { name } => assert_eq!(name, "missing"),
+        other => panic!("unexpected error: {other}"),
+    }
+}

@@ -11,7 +11,8 @@ use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 use kbolt_types::{
     ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, KboltError, SpaceInfo,
-    FileError, UpdateOptions, UpdateReport,
+    CollectionStatus, FileError, ModelInfo, ModelStatus, SpaceStatus, StatusResponse,
+    UpdateOptions, UpdateReport,
 };
 
 pub struct Engine {
@@ -223,6 +224,90 @@ impl Engine {
 
         report.elapsed_ms = started.elapsed().as_millis() as u64;
         Ok(report)
+    }
+
+    pub fn status(&self, space: Option<&str>) -> Result<StatusResponse> {
+        let (spaces, totals_scope) = if let Some(space_name) = space {
+            let resolved = self.resolve_space_row(Some(space_name), None)?;
+            (vec![resolved.clone()], Some(resolved.id))
+        } else {
+            (self.storage.list_spaces()?, None)
+        };
+
+        let mut space_statuses = Vec::with_capacity(spaces.len());
+        for space_row in spaces {
+            let collections = self.storage.list_collections(Some(space_row.id))?;
+            let mut collection_statuses = Vec::with_capacity(collections.len());
+            let mut last_updated: Option<String> = None;
+
+            for collection in collections {
+                if last_updated
+                    .as_ref()
+                    .map(|existing| collection.updated > *existing)
+                    .unwrap_or(true)
+                {
+                    last_updated = Some(collection.updated.clone());
+                }
+
+                let documents = self
+                    .storage
+                    .count_documents_in_collection(collection.id, false)?;
+                let active_documents = self.storage.count_documents_in_collection(collection.id, true)?;
+                let chunks = self.storage.count_chunks_in_collection(collection.id)?;
+                let embedded_chunks = self
+                    .storage
+                    .count_embedded_chunks_in_collection(collection.id)?;
+
+                collection_statuses.push(CollectionStatus {
+                    name: collection.name,
+                    path: collection.path,
+                    documents,
+                    active_documents,
+                    chunks,
+                    embedded_chunks,
+                    last_updated: collection.updated,
+                });
+            }
+
+            space_statuses.push(SpaceStatus {
+                name: space_row.name,
+                description: space_row.description,
+                collections: collection_statuses,
+                last_updated,
+            });
+        }
+
+        let models = ModelStatus {
+            embedder: ModelInfo {
+                name: self.config.models.embed.clone(),
+                downloaded: false,
+                size_bytes: None,
+                path: None,
+            },
+            reranker: ModelInfo {
+                name: self.config.models.reranker.clone(),
+                downloaded: false,
+                size_bytes: None,
+                path: None,
+            },
+            expander: ModelInfo {
+                name: self.config.models.expander.clone(),
+                downloaded: false,
+                size_bytes: None,
+                path: None,
+            },
+        };
+
+        Ok(StatusResponse {
+            spaces: space_statuses,
+            models,
+            cache_dir: self.config.cache_dir.clone(),
+            config_dir: self.config.config_dir.clone(),
+            total_documents: self.storage.count_documents(totals_scope)?,
+            total_chunks: self.storage.count_chunks(totals_scope)?,
+            total_embedded: self.storage.count_embedded_chunks(totals_scope)?,
+            disk_usage: self.storage.disk_usage()?,
+        })
     }
 
     pub fn resolve_update_targets(&self, options: &UpdateOptions) -> Result<Vec<UpdateTarget>> {
