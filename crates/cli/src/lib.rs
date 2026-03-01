@@ -342,6 +342,30 @@ impl CliAdapter {
         ))
     }
 
+    pub fn ignore_list(&self, space: Option<&str>) -> Result<String> {
+        let entries = self.engine.list_collection_ignores(space)?;
+        let mut lines = Vec::new();
+        lines.push("ignore patterns:".to_string());
+        if entries.is_empty() {
+            lines.push("- none".to_string());
+            return Ok(lines.join("\n"));
+        }
+
+        let mut current_space: Option<String> = None;
+        for entry in entries {
+            if current_space.as_deref() != Some(entry.space.as_str()) {
+                lines.push(format!("{}:", entry.space));
+                current_space = Some(entry.space.clone());
+            }
+            lines.push(format!(
+                "- {} (patterns: {})",
+                entry.collection, entry.pattern_count
+            ));
+        }
+
+        Ok(lines.join("\n"))
+    }
+
     pub fn models_list(&self) -> Result<String> {
         let status = self.engine.model_status()?;
         let mut lines = Vec::new();
@@ -1615,6 +1639,124 @@ mod tests {
                 .ignore_remove(None, "api", "dist/")
                 .expect("remove missing pattern");
             assert_eq!(output, "ignore pattern not found for work/api: dist/");
+        });
+    }
+
+    #[test]
+    fn ignore_list_reports_none_when_no_ignore_files_exist() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: collection_path,
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add collection");
+            let adapter = CliAdapter::new(engine);
+
+            let output = adapter.ignore_list(None).expect("list ignores");
+            assert_eq!(output, "ignore patterns:\n- none");
+        });
+    }
+
+    #[test]
+    fn ignore_list_groups_entries_by_space_and_honors_scope() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+            engine.add_space("notes", None).expect("add notes");
+            let work_collection = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let notes_collection = new_collection_dir(&root.path().to_path_buf(), "notes-wiki");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: work_collection,
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add work collection");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: notes_collection,
+                    space: Some("notes".to_string()),
+                    name: Some("wiki".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add notes collection");
+
+            fs::create_dir_all(
+                engine
+                    .config()
+                    .config_dir
+                    .join("ignores")
+                    .join("work"),
+            )
+            .expect("create work ignore dir");
+            fs::write(
+                engine
+                    .config()
+                    .config_dir
+                    .join("ignores")
+                    .join("work")
+                    .join("api.ignore"),
+                "dist/\n*.tmp\n",
+            )
+            .expect("write work ignore file");
+
+            fs::create_dir_all(
+                engine
+                    .config()
+                    .config_dir
+                    .join("ignores")
+                    .join("notes"),
+            )
+            .expect("create notes ignore dir");
+            fs::write(
+                engine
+                    .config()
+                    .config_dir
+                    .join("ignores")
+                    .join("notes")
+                    .join("wiki.ignore"),
+                "# comment\nbuild/\n",
+            )
+            .expect("write notes ignore file");
+
+            let adapter = CliAdapter::new(engine);
+            let output = adapter.ignore_list(None).expect("list all ignores");
+            assert!(output.contains("ignore patterns:"), "unexpected output: {output}");
+            assert!(output.contains("notes:"), "unexpected output: {output}");
+            assert!(
+                output.contains("- wiki (patterns: 1)"),
+                "unexpected output: {output}"
+            );
+            assert!(output.contains("work:"), "unexpected output: {output}");
+            assert!(
+                output.contains("- api (patterns: 2)"),
+                "unexpected output: {output}"
+            );
+
+            let scoped = adapter
+                .ignore_list(Some("work"))
+                .expect("list scoped ignores");
+            assert!(scoped.contains("work:"), "unexpected output: {scoped}");
+            assert!(
+                scoped.contains("- api (patterns: 2)"),
+                "unexpected output: {scoped}"
+            );
+            assert!(!scoped.contains("notes:"), "unexpected output: {scoped}");
         });
     }
 

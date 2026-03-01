@@ -27,6 +27,13 @@ pub struct Engine {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgnoreListEntry {
+    pub space: String,
+    pub collection: String,
+    pub pattern_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateTarget {
     pub space: String,
     pub collection: CollectionRow,
@@ -830,6 +837,54 @@ impl Engine {
         Ok((resolved_space.name, removed_count))
     }
 
+    pub fn list_collection_ignores(&self, space: Option<&str>) -> Result<Vec<IgnoreListEntry>> {
+        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
+        let (space_id_filter, spaces_by_id) = if let Some(space_name) = space {
+            let resolved = self.resolve_space_row(Some(space_name), None)?;
+            let mut map = std::collections::HashMap::new();
+            map.insert(resolved.id, resolved.name.clone());
+            (Some(resolved.id), map)
+        } else {
+            let spaces = self.storage.list_spaces()?;
+            let map = spaces
+                .into_iter()
+                .map(|space| (space.id, space.name))
+                .collect::<std::collections::HashMap<_, _>>();
+            (None, map)
+        };
+
+        let collections = self.storage.list_collections(space_id_filter)?;
+        let mut entries = Vec::new();
+        for collection in collections {
+            let space_name = spaces_by_id
+                .get(&collection.space_id)
+                .ok_or_else(|| {
+                    KboltError::Internal(format!(
+                        "missing space mapping for collection '{}'",
+                        collection.name
+                    ))
+                })?
+                .clone();
+            let path = collection_ignore_file_path(&self.config.config_dir, &space_name, &collection.name);
+            if !path.is_file() {
+                continue;
+            }
+
+            let raw = std::fs::read_to_string(path)?;
+            entries.push(IgnoreListEntry {
+                space: space_name,
+                collection: collection.name,
+                pattern_count: count_ignore_patterns(&raw),
+            });
+        }
+        entries.sort_by(|left, right| {
+            left.space
+                .cmp(&right.space)
+                .then(left.collection.cmp(&right.collection))
+        });
+        Ok(entries)
+    }
+
     fn model_status_unlocked(&self) -> Result<ModelStatus> {
         models::status(&self.config.models, &self.model_dir())
     }
@@ -1425,6 +1480,16 @@ fn validate_ignore_pattern(pattern: &str) -> Result<String> {
     }
 
     Ok(pattern.to_string())
+}
+
+fn count_ignore_patterns(content: &str) -> usize {
+    content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.starts_with('#')
+        })
+        .count()
 }
 
 fn collection_relative_path(root: &Path, full_path: &Path) -> std::result::Result<String, KboltError> {

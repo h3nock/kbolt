@@ -813,6 +813,59 @@ fn remove_collection_ignore_pattern_returns_zero_when_pattern_or_file_is_missing
 }
 
 #[test]
+fn list_collection_ignores_returns_entries_with_pattern_counts_and_space_scope() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        let notes_path = root.path().join("notes-wiki");
+        std::fs::create_dir_all(&work_path).expect("create work dir");
+        std::fs::create_dir_all(&notes_path).expect("create notes dir");
+        add_collection_fixture(&engine, "work", "api", work_path);
+        add_collection_fixture(&engine, "notes", "wiki", notes_path);
+
+        write_text_file(
+            &engine
+                .config()
+                .config_dir
+                .join("ignores")
+                .join("work")
+                .join("api.ignore"),
+            "dist/\n*.tmp\n",
+        );
+        write_text_file(
+            &engine
+                .config()
+                .config_dir
+                .join("ignores")
+                .join("notes")
+                .join("wiki.ignore"),
+            "# comment\n\nbuild/\n",
+        );
+
+        let all = engine.list_collection_ignores(None).expect("list all ignores");
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].space, "notes");
+        assert_eq!(all[0].collection, "wiki");
+        assert_eq!(all[0].pattern_count, 1);
+        assert_eq!(all[1].space, "work");
+        assert_eq!(all[1].collection, "api");
+        assert_eq!(all[1].pattern_count, 2);
+
+        let scoped = engine
+            .list_collection_ignores(Some("work"))
+            .expect("list scoped ignores");
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].space, "work");
+        assert_eq!(scoped[0].collection, "api");
+        assert_eq!(scoped[0].pattern_count, 2);
+    });
+}
+
+#[test]
 fn list_files_returns_entries_and_applies_prefix_filter() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
