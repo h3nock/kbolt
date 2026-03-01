@@ -45,6 +45,26 @@ pub struct DocumentRow {
     pub fts_dirty: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkRow {
+    pub id: i64,
+    pub doc_id: i64,
+    pub seq: i32,
+    pub offset: usize,
+    pub length: usize,
+    pub heading: Option<String>,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkInsert {
+    pub seq: i32,
+    pub offset: usize,
+    pub length: usize,
+    pub heading: Option<String>,
+    pub kind: String,
+}
+
 impl Storage {
     pub fn new(cache_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(cache_dir)?;
@@ -668,6 +688,96 @@ CREATE TABLE IF NOT EXISTS llm_cache (
 
         Ok(doc_ids)
     }
+
+    pub fn insert_chunks(&self, doc_id: i64, chunks: &[ChunkInsert]) -> Result<Vec<i64>> {
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let _doc = lookup_document_id(&conn, doc_id)?;
+
+        let tx = conn.unchecked_transaction()?;
+        let mut stmt = tx.prepare(
+            "INSERT INTO chunks (doc_id, seq, offset, length, heading, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+
+        let mut ids = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            stmt.execute(params![
+                doc_id,
+                chunk.seq,
+                chunk.offset as i64,
+                chunk.length as i64,
+                chunk.heading,
+                chunk.kind,
+            ])?;
+            ids.push(tx.last_insert_rowid());
+        }
+        drop(stmt);
+        tx.commit()?;
+        Ok(ids)
+    }
+
+    pub fn delete_chunks_for_document(&self, doc_id: i64) -> Result<Vec<i64>> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let _doc = lookup_document_id(&conn, doc_id)?;
+
+        let mut stmt = conn.prepare("SELECT id FROM chunks WHERE doc_id = ?1 ORDER BY seq ASC")?;
+        let rows = stmt.query_map(params![doc_id], |row| row.get::<_, i64>(0))?;
+        let chunk_ids = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+
+        conn.execute("DELETE FROM chunks WHERE doc_id = ?1", params![doc_id])?;
+        Ok(chunk_ids)
+    }
+
+    pub fn get_chunks_for_document(&self, doc_id: i64) -> Result<Vec<ChunkRow>> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let _doc = lookup_document_id(&conn, doc_id)?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, doc_id, seq, offset, length, heading, kind
+             FROM chunks
+             WHERE doc_id = ?1
+             ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map(params![doc_id], decode_chunk_row)?;
+        let chunks = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(chunks)
+    }
+
+    pub fn get_chunks(&self, chunk_ids: &[i64]) -> Result<Vec<ChunkRow>> {
+        if chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let placeholders = vec!["?"; chunk_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT id, doc_id, seq, offset, length, heading, kind
+             FROM chunks
+             WHERE id IN ({placeholders})
+             ORDER BY id ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(chunk_ids.iter()), decode_chunk_row)?;
+        let chunks = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(chunks)
+    }
 }
 
 fn lookup_space_name(conn: &Connection, space_id: i64) -> Result<String> {
@@ -696,6 +806,22 @@ fn lookup_collection_name(conn: &Connection, collection_id: i64) -> Result<Strin
         Ok(name) => Ok(name),
         Err(Error::QueryReturnedNoRows) => Err(KboltError::CollectionNotFound {
             name: format!("id={collection_id}"),
+        }
+        .into()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn lookup_document_id(conn: &Connection, doc_id: i64) -> Result<i64> {
+    let result = conn.query_row(
+        "SELECT id FROM documents WHERE id = ?1",
+        params![doc_id],
+        |row| row.get::<_, i64>(0),
+    );
+    match result {
+        Ok(id) => Ok(id),
+        Err(Error::QueryReturnedNoRows) => Err(KboltError::DocumentNotFound {
+            path: format!("id={doc_id}"),
         }
         .into()),
         Err(err) => Err(err.into()),
@@ -748,6 +874,20 @@ fn decode_document_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentRow>
         active: active_value != 0,
         deactivated_at: row.get(7)?,
         fts_dirty: fts_dirty_value != 0,
+    })
+}
+
+fn decode_chunk_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRow> {
+    let offset_value: i64 = row.get(3)?;
+    let length_value: i64 = row.get(4)?;
+    Ok(ChunkRow {
+        id: row.get(0)?,
+        doc_id: row.get(1)?,
+        seq: row.get(2)?,
+        offset: offset_value as usize,
+        length: length_value as usize,
+        heading: row.get(5)?,
+        kind: row.get(6)?,
     })
 }
 
