@@ -127,6 +127,10 @@ fn run() -> Result<()> {
                 let line = adapter.ignore_list(cli.space.as_deref())?;
                 println!("{line}");
             }
+            IgnoreCommand::Edit { collection } => {
+                let line = adapter.ignore_edit(cli.space.as_deref(), &collection)?;
+                println!("{line}");
+            }
         },
         Command::Models(models) => match models.command {
             ModelsCommand::List => {

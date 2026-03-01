@@ -866,6 +866,32 @@ fn list_collection_ignores_returns_entries_with_pattern_counts_and_space_scope()
 }
 
 #[test]
+fn prepare_collection_ignore_edit_creates_missing_ignore_file() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path);
+
+        let (space, path) = engine
+            .prepare_collection_ignore_edit(None, "api")
+            .expect("prepare ignore file");
+        assert_eq!(space, "work");
+        assert!(
+            path.ends_with(std::path::Path::new("ignores/work/api.ignore")),
+            "unexpected ignore path: {}",
+            path.display()
+        );
+        assert!(path.exists(), "ignore file should be created");
+        let content = std::fs::read_to_string(path).expect("read ignore file");
+        assert_eq!(content, "");
+    });
+}
+
+#[test]
 fn list_files_returns_entries_and_applies_prefix_filter() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);

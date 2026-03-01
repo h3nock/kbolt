@@ -366,6 +366,32 @@ impl CliAdapter {
         Ok(lines.join("\n"))
     }
 
+    pub fn ignore_edit(&self, space: Option<&str>, collection: &str) -> Result<String> {
+        let (resolved_space, path) = self.engine.prepare_collection_ignore_edit(space, collection)?;
+        let editor_command = resolve_editor_command()?;
+
+        let mut process = std::process::Command::new(&editor_command[0]);
+        if editor_command.len() > 1 {
+            process.args(&editor_command[1..]);
+        }
+        process.arg(&path);
+
+        let status = process.status().map_err(|err| {
+            KboltError::Internal(format!(
+                "failed to launch editor '{}': {err}",
+                editor_command[0]
+            ))
+        })?;
+        if !status.success() {
+            return Err(KboltError::Internal(format!("editor exited with status: {status}")).into());
+        }
+
+        Ok(format!(
+            "ignore patterns updated for {resolved_space}/{collection}: {}",
+            path.display()
+        ))
+    }
+
     pub fn models_list(&self) -> Result<String> {
         let status = self.engine.model_status()?;
         let mut lines = Vec::new();
@@ -758,6 +784,29 @@ fn parse_cli_locator(raw: &str) -> Locator {
     Locator::DocId(docid)
 }
 
+fn resolve_editor_command() -> Result<Vec<String>> {
+    let raw = std::env::var("VISUAL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("EDITOR")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| "vi".to_string());
+
+    parse_editor_command(&raw)
+}
+
+fn parse_editor_command(raw: &str) -> Result<Vec<String>> {
+    let args = shell_words::split(raw)
+        .map_err(|err| KboltError::InvalidInput(format!("invalid editor command '{raw}': {err}")))?;
+    if args.is_empty() {
+        return Err(KboltError::InvalidInput("editor command cannot be empty".to_string()).into());
+    }
+    Ok(args)
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
@@ -766,7 +815,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::CliAdapter;
+    use super::{parse_editor_command, resolve_editor_command, CliAdapter};
     use kbolt_core::engine::Engine;
     use kbolt_types::AddCollectionRequest;
 
@@ -776,6 +825,8 @@ mod tests {
         home: Option<OsString>,
         config_home: Option<OsString>,
         cache_home: Option<OsString>,
+        visual: Option<OsString>,
+        editor: Option<OsString>,
     }
 
     impl EnvRestore {
@@ -784,6 +835,8 @@ mod tests {
                 home: std::env::var_os("HOME"),
                 config_home: std::env::var_os("XDG_CONFIG_HOME"),
                 cache_home: std::env::var_os("XDG_CACHE_HOME"),
+                visual: std::env::var_os("VISUAL"),
+                editor: std::env::var_os("EDITOR"),
             }
         }
     }
@@ -801,6 +854,14 @@ mod tests {
             match &self.cache_home {
                 Some(path) => std::env::set_var("XDG_CACHE_HOME", path),
                 None => std::env::remove_var("XDG_CACHE_HOME"),
+            }
+            match &self.visual {
+                Some(value) => std::env::set_var("VISUAL", value),
+                None => std::env::remove_var("VISUAL"),
+            }
+            match &self.editor {
+                Some(value) => std::env::set_var("EDITOR", value),
+                None => std::env::remove_var("EDITOR"),
             }
         }
     }
@@ -1757,6 +1818,70 @@ mod tests {
                 "unexpected output: {scoped}"
             );
             assert!(!scoped.contains("notes:"), "unexpected output: {scoped}");
+        });
+    }
+
+    #[test]
+    fn editor_command_resolution_prefers_visual_then_editor_then_vi() {
+        with_isolated_xdg_dirs(|| {
+            std::env::set_var("VISUAL", "nvim -f");
+            std::env::set_var("EDITOR", "vim");
+            let from_visual = resolve_editor_command().expect("resolve visual");
+            assert_eq!(from_visual, vec!["nvim".to_string(), "-f".to_string()]);
+
+            std::env::remove_var("VISUAL");
+            let from_editor = resolve_editor_command().expect("resolve editor");
+            assert_eq!(from_editor, vec!["vim".to_string()]);
+
+            std::env::remove_var("EDITOR");
+            let fallback = resolve_editor_command().expect("resolve fallback");
+            assert_eq!(fallback, vec!["vi".to_string()]);
+        });
+    }
+
+    #[test]
+    fn parse_editor_command_rejects_invalid_shell_words() {
+        let err = parse_editor_command("'").expect_err("invalid shell words should fail");
+        assert!(
+            err.to_string().contains("invalid editor command"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn ignore_edit_creates_file_and_runs_configured_editor_command() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: collection_path,
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add collection");
+
+            std::env::set_var("VISUAL", "true --wait");
+            let adapter = CliAdapter::new(engine);
+            let output = adapter.ignore_edit(None, "api").expect("run ignore edit");
+            assert!(
+                output.contains("ignore patterns updated for work/api:"),
+                "unexpected output: {output}"
+            );
+
+            let ignore_path = adapter
+                .engine
+                .config()
+                .config_dir
+                .join("ignores")
+                .join("work")
+                .join("api.ignore");
+            assert!(ignore_path.exists(), "ignore file should exist");
         });
     }
 

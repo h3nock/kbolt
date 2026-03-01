@@ -885,6 +885,28 @@ impl Engine {
         Ok(entries)
     }
 
+    pub fn prepare_collection_ignore_edit(
+        &self,
+        space: Option<&str>,
+        collection: &str,
+    ) -> Result<(String, std::path::PathBuf)> {
+        let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
+        let resolved_space = self.resolve_space_row(space, Some(collection))?;
+        self.storage.get_collection(resolved_space.id, collection)?;
+
+        let path = collection_ignore_file_path(&self.config.config_dir, &resolved_space.name, collection);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let _file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)?;
+
+        Ok((resolved_space.name, path))
+    }
+
     fn model_status_unlocked(&self) -> Result<ModelStatus> {
         models::status(&self.config.models, &self.model_dir())
     }

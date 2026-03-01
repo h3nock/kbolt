@@ -1266,7 +1266,7 @@ vendor/
 *.min.js
 ```
 
-Users interact with ignore patterns through a virtual path structure: `{space}/{collection}` maps to the internal ignore file. For example, `kbolt ignore show api` shows the ignore patterns for the `api` collection (resolved via space precedence), and `kbolt ignore edit api` opens the file in `$VISUAL` / `$EDITOR` / `vi`.
+Users interact with ignore patterns through a virtual path structure: `{space}/{collection}` maps to the internal ignore file. For example, `kbolt ignore show api` shows the ignore patterns for the `api` collection (resolved via space precedence), and `kbolt ignore edit api` opens the file in `$VISUAL` / `$EDITOR` / `vi` (`$VISUAL` / `$EDITOR` may include flags like `code --wait`).
 
 ### 3. Extractor Registry + Extensions Filter
 
@@ -1680,7 +1680,7 @@ COLLECTIONS
 
 IGNORE PATTERNS
   kbolt ignore show <collection>    Show ignore patterns for a collection
-  kbolt ignore edit <collection>    Open ignore file in $VISUAL / $EDITOR / vi
+  kbolt ignore edit <collection>    Open ignore file in $VISUAL / $EDITOR / vi (supports flags)
   kbolt ignore add <collection> <pattern>   Add a pattern
   kbolt ignore remove <collection> <pattern>  Remove a pattern
   kbolt ignore list                 List all collections that have ignore patterns

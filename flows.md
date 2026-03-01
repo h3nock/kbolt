@@ -343,7 +343,7 @@ kbolt ignore edit {collection}
 **Parameters**:
 - **collection** (required) — resolved via space precedence
 
-Opens `~/.config/kbolt/ignores/{space}/{collection}.ignore` in the user's preferred editor (`$VISUAL` > `$EDITOR` > `vi`). Creates the file if it doesn't exist.
+Opens `~/.config/kbolt/ignores/{space}/{collection}.ignore` in the user's preferred editor (`$VISUAL` > `$EDITOR` > `vi`). `$VISUAL` / `$EDITOR` may include command-line flags (for example: `code --wait`, `nvim -f`). Creates the file if it doesn't exist.
 
 ---
 
