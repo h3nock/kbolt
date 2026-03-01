@@ -1,8 +1,8 @@
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
 use kbolt_types::{
-    CollectionInfo, DocumentResponse, FileEntry, GetRequest, SpaceInfo, StatusResponse,
-    UpdateOptions, UpdateReport,
+    CollectionInfo, DocumentResponse, FileEntry, GetRequest, MultiGetRequest, MultiGetResponse,
+    SpaceInfo, StatusResponse, UpdateOptions, UpdateReport,
 };
 
 pub struct McpAdapter {
@@ -42,6 +42,10 @@ impl McpAdapter {
     pub fn get_document(&self, req: GetRequest) -> Result<DocumentResponse> {
         self.engine.get_document(req)
     }
+
+    pub fn multi_get(&self, req: MultiGetRequest) -> Result<MultiGetResponse> {
+        self.engine.multi_get(req)
+    }
 }
 
 #[cfg(test)]
@@ -52,7 +56,7 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use kbolt_core::engine::Engine;
-    use kbolt_types::{AddCollectionRequest, GetRequest, Locator, UpdateOptions};
+    use kbolt_types::{AddCollectionRequest, GetRequest, Locator, MultiGetRequest, UpdateOptions};
     use tempfile::tempdir;
 
     use super::McpAdapter;
@@ -257,6 +261,58 @@ mod tests {
             assert_eq!(document.path, "api/src/lib.rs");
             assert_eq!(document.content, "line-b");
             assert_eq!(document.returned_lines, 1);
+        });
+    }
+
+    #[test]
+    fn multi_get_wrapper_respects_budgets() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+
+            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: work_path.clone(),
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add work collection");
+
+            fs::write(work_path.join("a.md"), "alpha\n").expect("write a");
+            fs::write(work_path.join("b.md"), "beta\n").expect("write b");
+            fs::write(work_path.join("c.md"), "gamma\n").expect("write c");
+
+            let adapter = McpAdapter::new(engine);
+            adapter
+                .update(UpdateOptions {
+                    space: Some("work".to_string()),
+                    collections: vec!["api".to_string()],
+                    no_embed: true,
+                    dry_run: false,
+                    verbose: false,
+                })
+                .expect("run update");
+
+            let response = adapter
+                .multi_get(MultiGetRequest {
+                    locators: vec![
+                        Locator::Path("api/a.md".to_string()),
+                        Locator::Path("api/b.md".to_string()),
+                        Locator::Path("api/c.md".to_string()),
+                    ],
+                    space: Some("work".to_string()),
+                    max_files: 2,
+                    max_bytes: 51_200,
+                })
+                .expect("run multi_get");
+            assert_eq!(response.documents.len(), 2);
+            assert_eq!(response.omitted.len(), 1);
+            assert_eq!(response.resolved_count, 2);
         });
     }
 }
