@@ -7,7 +7,7 @@ use kbolt_types::{
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 const DEFAULT_SEARCH_LIMIT: usize = 10;
 const DEFAULT_MULTI_GET_MAX_FILES: usize = 20;
@@ -49,6 +49,13 @@ pub enum McpToolResponse {
     MultiGet(MultiGetResponse),
     ListFiles(Vec<FileEntry>),
     Status(StatusResponse),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
 }
 
 pub struct McpAdapter {
@@ -99,6 +106,86 @@ impl McpAdapter {
 
     pub fn search(&self, req: SearchRequest) -> Result<SearchResponse> {
         self.engine.search(req)
+    }
+
+    pub fn tool_definitions() -> Vec<McpToolDefinition> {
+        vec![
+            McpToolDefinition {
+                name: "search".to_string(),
+                description: "Search indexed content with optional space/collection filters."
+                    .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["query"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "query": { "type": "string" },
+                        "space": { "type": "string" },
+                        "collection": { "type": "string" },
+                        "limit": { "type": "integer", "minimum": 1 },
+                        "mode": { "type": "string", "enum": ["auto", "deep", "keyword", "semantic"] }
+                    }
+                }),
+            },
+            McpToolDefinition {
+                name: "get".to_string(),
+                description: "Read one document by docid or collection-relative path.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["identifier"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "identifier": { "type": "string" },
+                        "space": { "type": "string" }
+                    }
+                }),
+            },
+            McpToolDefinition {
+                name: "multi_get".to_string(),
+                description: "Read multiple documents with file-count and byte budgets."
+                    .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["locators"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "locators": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "space": { "type": "string" },
+                        "max_files": { "type": "integer", "minimum": 1 },
+                        "max_bytes": { "type": "integer", "minimum": 1 }
+                    }
+                }),
+            },
+            McpToolDefinition {
+                name: "list_files".to_string(),
+                description: "List indexed files in a collection, optionally filtered by prefix."
+                    .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["collection"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "space": { "type": "string" },
+                        "collection": { "type": "string" },
+                        "prefix": { "type": "string" }
+                    }
+                }),
+            },
+            McpToolDefinition {
+                name: "status".to_string(),
+                description: "Show index status and collection health.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "space": { "type": "string" }
+                    }
+                }),
+            },
+        ]
     }
 
     pub fn call_tool(&self, call: McpToolCall) -> Result<McpToolResponse> {
@@ -410,6 +497,7 @@ fn parse_tool_locator(raw: &str) -> Locator {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
@@ -1001,5 +1089,30 @@ mod tests {
             assert!(output.contains("search_guidance:"));
             assert!(output.contains("mode \"deep\""));
         });
+    }
+
+    #[test]
+    fn tool_definitions_match_spec_tools() {
+        let tools = McpAdapter::tool_definitions();
+        assert_eq!(tools.len(), 5);
+
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<HashSet<_>>();
+        assert!(names.contains("search"));
+        assert!(names.contains("get"));
+        assert!(names.contains("multi_get"));
+        assert!(names.contains("list_files"));
+        assert!(names.contains("status"));
+
+        let search_tool = tools
+            .iter()
+            .find(|tool| tool.name == "search")
+            .expect("search tool should exist");
+        let required = search_tool.input_schema["required"]
+            .as_array()
+            .expect("search required should be array");
+        assert_eq!(required[0], "query");
     }
 }
