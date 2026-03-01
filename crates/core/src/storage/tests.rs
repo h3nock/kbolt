@@ -108,6 +108,20 @@ fn create_and_list_spaces() {
 }
 
 #[test]
+fn create_space_provisions_index_paths() {
+    let tmp = tempdir().expect("create tempdir");
+    let cache_dir = tmp.path().join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+
+    storage.create_space("work", None).expect("create work space");
+    assert!(cache_dir.join("spaces/work/tantivy").is_dir());
+    assert!(cache_dir.join("spaces/work/vectors.usearch").is_file());
+
+    let spaces = storage.spaces.read().expect("lock spaces map");
+    assert!(spaces.contains_key("work"));
+}
+
+#[test]
 fn find_space_for_collection_returns_not_found_when_absent() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
