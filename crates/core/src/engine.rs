@@ -55,6 +55,16 @@ impl Engine {
         self.build_space_info(&space)
     }
 
+    pub fn set_default_space(&mut self, name: Option<&str>) -> Result<Option<String>> {
+        if let Some(space_name) = name {
+            self.storage.get_space(space_name)?;
+        }
+
+        self.config.default_space = name.map(ToString::to_string);
+        config::save(&self.config)?;
+        Ok(self.config.default_space.clone())
+    }
+
     pub fn add_collection(&self, req: AddCollectionRequest) -> Result<CollectionInfo> {
         if !req.no_index {
             return Err(KboltError::Internal(
