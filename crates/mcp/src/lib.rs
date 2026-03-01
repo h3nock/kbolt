@@ -1,10 +1,52 @@
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
 use kbolt_types::{
-    CollectionInfo, DocumentResponse, FileEntry, GetRequest, MultiGetRequest, MultiGetResponse,
-    ModelStatus, SearchRequest, SearchResponse, SpaceInfo, StatusResponse, UpdateOptions,
-    UpdateReport,
+    CollectionInfo, DocumentResponse, FileEntry, GetRequest, KboltError, Locator, ModelStatus,
+    MultiGetRequest, MultiGetResponse, SearchMode, SearchRequest, SearchResponse, SpaceInfo,
+    StatusResponse, UpdateOptions, UpdateReport,
 };
+
+const DEFAULT_SEARCH_LIMIT: usize = 10;
+const DEFAULT_MULTI_GET_MAX_FILES: usize = 20;
+const DEFAULT_MULTI_GET_MAX_BYTES: usize = 50 * 1024;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum McpToolCall {
+    Search {
+        query: String,
+        space: Option<String>,
+        collection: Option<String>,
+        limit: Option<usize>,
+        mode: Option<String>,
+    },
+    Get {
+        identifier: String,
+        space: Option<String>,
+    },
+    MultiGet {
+        locators: Vec<String>,
+        space: Option<String>,
+        max_files: Option<usize>,
+        max_bytes: Option<usize>,
+    },
+    ListFiles {
+        space: Option<String>,
+        collection: String,
+        prefix: Option<String>,
+    },
+    Status {
+        space: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum McpToolResponse {
+    Search(SearchResponse),
+    Get(DocumentResponse),
+    MultiGet(MultiGetResponse),
+    ListFiles(Vec<FileEntry>),
+    Status(StatusResponse),
+}
 
 pub struct McpAdapter {
     pub engine: Engine,
@@ -55,6 +97,127 @@ impl McpAdapter {
     pub fn search(&self, req: SearchRequest) -> Result<SearchResponse> {
         self.engine.search(req)
     }
+
+    pub fn call_tool(&self, call: McpToolCall) -> Result<McpToolResponse> {
+        match call {
+            McpToolCall::Search {
+                query,
+                space,
+                collection,
+                limit,
+                mode,
+            } => {
+                let mode = parse_tool_search_mode(mode.as_deref())?;
+                let collections = match collection {
+                    Some(name) => {
+                        let trimmed = name.trim();
+                        if trimmed.is_empty() {
+                            return Err(KboltError::InvalidInput(
+                                "collection cannot be empty".to_string(),
+                            )
+                            .into());
+                        }
+                        vec![trimmed.to_string()]
+                    }
+                    None => Vec::new(),
+                };
+
+                let response = self.search(SearchRequest {
+                    query,
+                    mode,
+                    space,
+                    collections,
+                    limit: limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
+                    min_score: 0.0,
+                    no_rerank: false,
+                    debug: false,
+                })?;
+                Ok(McpToolResponse::Search(response))
+            }
+            McpToolCall::Get { identifier, space } => {
+                let response = self.get_document(GetRequest {
+                    locator: parse_tool_locator(&identifier),
+                    space,
+                    offset: None,
+                    limit: None,
+                })?;
+                Ok(McpToolResponse::Get(response))
+            }
+            McpToolCall::MultiGet {
+                locators,
+                space,
+                max_files,
+                max_bytes,
+            } => {
+                if locators.is_empty() {
+                    return Err(
+                        KboltError::InvalidInput("locators cannot be empty".to_string()).into(),
+                    );
+                }
+
+                let response = self.multi_get(MultiGetRequest {
+                    locators: locators
+                        .iter()
+                        .map(|item| parse_tool_locator(item))
+                        .collect::<Vec<_>>(),
+                    space,
+                    max_files: max_files.unwrap_or(DEFAULT_MULTI_GET_MAX_FILES),
+                    max_bytes: max_bytes.unwrap_or(DEFAULT_MULTI_GET_MAX_BYTES),
+                })?;
+                Ok(McpToolResponse::MultiGet(response))
+            }
+            McpToolCall::ListFiles {
+                space,
+                collection,
+                prefix,
+            } => {
+                let collection = collection.trim();
+                if collection.is_empty() {
+                    return Err(
+                        KboltError::InvalidInput("collection cannot be empty".to_string()).into(),
+                    );
+                }
+
+                let response = self.list_files(space.as_deref(), collection, prefix.as_deref())?;
+                Ok(McpToolResponse::ListFiles(response))
+            }
+            McpToolCall::Status { space } => {
+                let response = self.status(space.as_deref())?;
+                Ok(McpToolResponse::Status(response))
+            }
+        }
+    }
+}
+
+fn parse_tool_search_mode(raw_mode: Option<&str>) -> Result<SearchMode> {
+    let Some(raw_mode) = raw_mode else {
+        return Ok(SearchMode::Auto);
+    };
+
+    let normalized = raw_mode.trim().to_ascii_lowercase();
+    let mode = match normalized.as_str() {
+        "auto" => SearchMode::Auto,
+        "deep" => SearchMode::Deep,
+        "keyword" => SearchMode::Keyword,
+        "semantic" => SearchMode::Semantic,
+        _ => {
+            return Err(KboltError::InvalidInput(
+                "mode must be one of: auto, deep, keyword, semantic".to_string(),
+            )
+            .into())
+        }
+    };
+
+    Ok(mode)
+}
+
+fn parse_tool_locator(raw: &str) -> Locator {
+    let trimmed = raw.trim();
+    if trimmed.contains('/') {
+        return Locator::Path(trimmed.to_string());
+    }
+
+    Locator::DocId(trimmed.trim_start_matches('#').to_string())
 }
 
 #[cfg(test)]
@@ -71,7 +234,7 @@ mod tests {
     };
     use tempfile::tempdir;
 
-    use super::McpAdapter;
+    use super::{McpAdapter, McpToolCall, McpToolResponse};
 
     struct EnvRestore {
         home: Option<OsString>,
@@ -391,6 +554,144 @@ mod tests {
             assert_eq!(response.query, "search-token");
             assert_eq!(response.results.len(), 1);
             assert_eq!(response.results[0].space, "work");
+        });
+    }
+
+    #[test]
+    fn call_tool_dispatches_search_with_defaults() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+
+            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: work_path.clone(),
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add work collection");
+            fs::write(work_path.join("a.md"), "search-token\n").expect("write file");
+
+            let adapter = McpAdapter::new(engine);
+            adapter
+                .update(UpdateOptions {
+                    space: Some("work".to_string()),
+                    collections: vec!["api".to_string()],
+                    no_embed: true,
+                    dry_run: false,
+                    verbose: false,
+                })
+                .expect("run update");
+
+            let response = adapter
+                .call_tool(McpToolCall::Search {
+                    query: "search-token".to_string(),
+                    space: Some("work".to_string()),
+                    collection: Some("api".to_string()),
+                    limit: None,
+                    mode: None,
+                })
+                .expect("run tool search");
+
+            match response {
+                McpToolResponse::Search(search) => {
+                    assert_eq!(search.mode, SearchMode::Keyword);
+                    assert_eq!(search.query, "search-token");
+                    assert_eq!(search.results.len(), 1);
+                    assert_eq!(search.results[0].space, "work");
+                }
+                other => panic!("unexpected response: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn call_tool_get_accepts_bare_docid() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+
+            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: work_path.clone(),
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add work collection");
+            fs::write(work_path.join("a.md"), "search-token\n").expect("write file");
+
+            let adapter = McpAdapter::new(engine);
+            adapter
+                .update(UpdateOptions {
+                    space: Some("work".to_string()),
+                    collections: vec!["api".to_string()],
+                    no_embed: true,
+                    dry_run: false,
+                    verbose: false,
+                })
+                .expect("run update");
+
+            let search = adapter
+                .search(SearchRequest {
+                    query: "search-token".to_string(),
+                    mode: SearchMode::Keyword,
+                    space: Some("work".to_string()),
+                    collections: vec!["api".to_string()],
+                    limit: 5,
+                    min_score: 0.0,
+                    no_rerank: false,
+                    debug: false,
+                })
+                .expect("run search");
+            let bare_docid = search.results[0].docid.trim_start_matches('#').to_string();
+
+            let response = adapter
+                .call_tool(McpToolCall::Get {
+                    identifier: bare_docid,
+                    space: Some("work".to_string()),
+                })
+                .expect("run tool get");
+
+            match response {
+                McpToolResponse::Get(document) => {
+                    assert_eq!(document.path, "api/a.md");
+                    assert_eq!(document.space, "work");
+                }
+                other => panic!("unexpected response: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn call_tool_rejects_invalid_search_mode() {
+        with_isolated_xdg_dirs(|| {
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = McpAdapter::new(engine);
+
+            let err = adapter
+                .call_tool(McpToolCall::Search {
+                    query: "alpha".to_string(),
+                    space: None,
+                    collection: None,
+                    limit: None,
+                    mode: Some("invalid".to_string()),
+                })
+                .expect_err("invalid mode should fail");
+            assert!(
+                err.to_string()
+                    .contains("mode must be one of: auto, deep, keyword, semantic"),
+                "unexpected error: {err}"
+            );
         });
     }
 }
