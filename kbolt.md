@@ -539,6 +539,7 @@ pub struct MultiGetResponse {
     pub documents: Vec<DocumentResponse>,  // files returned (whole, never truncated mid-file)
     pub omitted: Vec<OmittedFile>,         // files that matched but didn't fit within budget
     pub resolved_count: usize,             // total files matched before budget applied
+    pub warnings: Vec<String>,             // non-fatal issues (for example, files deleted since indexing)
 }
 
 pub struct OmittedFile {

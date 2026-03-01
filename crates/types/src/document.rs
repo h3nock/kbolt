@@ -40,6 +40,7 @@ pub struct MultiGetResponse {
     pub documents: Vec<DocumentResponse>,
     pub omitted: Vec<OmittedFile>,
     pub resolved_count: usize,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

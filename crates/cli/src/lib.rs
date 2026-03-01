@@ -664,6 +664,12 @@ impl CliAdapter {
             ));
         }
         lines.push(format!("resolved_count: {}", response.resolved_count));
+        if !response.warnings.is_empty() {
+            lines.push(format!("warnings: {}", response.warnings.len()));
+            for warning in response.warnings {
+                lines.push(format!("- {warning}"));
+            }
+        }
         Ok(lines.join("\n"))
     }
 }
@@ -1781,6 +1787,51 @@ mod tests {
                 output.contains("resolved_count: 3"),
                 "unexpected output: {output}"
             );
+        });
+    }
+
+    #[test]
+    fn multi_get_reports_deleted_files_as_warnings() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            adapter
+                .space_add("work", None, false, &[])
+                .expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            adapter
+                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .expect("add collection");
+
+            let existing = collection_path.join("a.md");
+            let deleted = collection_path.join("b.md");
+            fs::write(&existing, "alpha\n").expect("write a");
+            fs::write(&deleted, "beta\n").expect("write b");
+            adapter
+                .update(Some("work"), &["api".to_string()], true, false, false)
+                .expect("run update");
+
+            fs::remove_file(&deleted).expect("remove b");
+
+            let output = adapter
+                .multi_get(
+                    Some("work"),
+                    &["api/a.md".to_string(), "api/b.md".to_string()],
+                    10,
+                    51_200,
+                )
+                .expect("run multi-get");
+            assert!(output.contains("documents: 1"), "unexpected output: {output}");
+            assert!(output.contains("omitted: 0"), "unexpected output: {output}");
+            assert!(output.contains("resolved_count: 1"), "unexpected output: {output}");
+            assert!(output.contains("warnings: 1"), "unexpected output: {output}");
+            assert!(
+                output.contains("file deleted since indexing:"),
+                "unexpected output: {output}"
+            );
+            assert!(output.contains("b.md"), "unexpected output: {output}");
         });
     }
 

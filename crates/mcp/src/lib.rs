@@ -772,6 +772,63 @@ mod tests {
     }
 
     #[test]
+    fn multi_get_wrapper_reports_deleted_files_as_warnings() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+
+            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: work_path.clone(),
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add work collection");
+
+            let existing = work_path.join("a.md");
+            let deleted = work_path.join("b.md");
+            fs::write(&existing, "alpha\n").expect("write a");
+            fs::write(&deleted, "beta\n").expect("write b");
+
+            let adapter = McpAdapter::new(engine);
+            adapter
+                .update(UpdateOptions {
+                    space: Some("work".to_string()),
+                    collections: vec!["api".to_string()],
+                    no_embed: true,
+                    dry_run: false,
+                    verbose: false,
+                })
+                .expect("run update");
+
+            fs::remove_file(&deleted).expect("remove b");
+
+            let response = adapter
+                .multi_get(MultiGetRequest {
+                    locators: vec![
+                        Locator::Path("api/a.md".to_string()),
+                        Locator::Path("api/b.md".to_string()),
+                    ],
+                    space: Some("work".to_string()),
+                    max_files: 10,
+                    max_bytes: 51_200,
+                })
+                .expect("run multi_get");
+            assert_eq!(response.documents.len(), 1);
+            assert!(response.omitted.is_empty());
+            assert_eq!(response.resolved_count, 1);
+            assert_eq!(response.warnings.len(), 1);
+            assert!(response.warnings[0].contains("file deleted since indexing:"));
+            assert!(response.warnings[0].contains("b.md"));
+        });
+    }
+
+    #[test]
     fn model_status_wrapper_exposes_configured_models() {
         with_isolated_xdg_dirs(|| {
             let engine = Engine::new(None).expect("create engine");

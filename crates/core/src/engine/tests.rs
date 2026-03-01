@@ -998,6 +998,50 @@ fn multi_get_respects_max_bytes_and_supports_mixed_locators() {
         assert_eq!(result.omitted.len(), 1);
         assert_eq!(result.omitted[0].path, "api/b.md");
         assert_eq!(result.omitted[0].reason, OmitReason::MaxBytes);
+        assert!(result.warnings.is_empty());
+    });
+}
+
+#[test]
+fn multi_get_reports_deleted_files_as_warnings() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        let existing = work_path.join("a.md");
+        let deleted = work_path.join("b.md");
+        write_text_file(&existing, "alpha\n");
+        write_text_file(&deleted, "beta\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        std::fs::remove_file(&deleted).expect("remove b.md");
+
+        let result = engine
+            .multi_get(MultiGetRequest {
+                locators: vec![
+                    Locator::Path("api/a.md".to_string()),
+                    Locator::Path("api/b.md".to_string()),
+                ],
+                space: Some("work".to_string()),
+                max_files: 10,
+                max_bytes: 51_200,
+            })
+            .expect("run multi_get");
+
+        assert_eq!(result.resolved_count, 1);
+        assert_eq!(result.documents.len(), 1);
+        assert_eq!(result.documents[0].path, "api/a.md");
+        assert!(result.omitted.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("file deleted since indexing:"));
+        assert!(result.warnings[0].contains("b.md"));
     });
 }
 

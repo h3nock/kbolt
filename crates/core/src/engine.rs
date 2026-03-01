@@ -354,15 +354,28 @@ impl Engine {
         let mut documents = Vec::new();
         let mut omitted = Vec::new();
         let mut resolved_count = 0usize;
+        let mut warnings = Vec::new();
         let mut consumed_bytes = 0usize;
 
         for locator in req.locators {
-            let document = self.get_document_unlocked(GetRequest {
+            let document = match self.get_document_unlocked(GetRequest {
                 locator,
                 space: req.space.clone(),
                 offset: None,
                 limit: None,
-            })?;
+            }) {
+                Ok(document) => document,
+                Err(err) => match KboltError::from(err) {
+                    KboltError::FileDeleted(path) => {
+                        warnings.push(format!(
+                            "file deleted since indexing: {}. run `kbolt update` to refresh.",
+                            path.display()
+                        ));
+                        continue;
+                    }
+                    other => return Err(other.into()),
+                },
+            };
             resolved_count = resolved_count.saturating_add(1);
 
             let size_bytes = document.content.as_bytes().len();
@@ -394,6 +407,7 @@ impl Engine {
             resolved_count,
             documents,
             omitted,
+            warnings,
         })
     }
 
