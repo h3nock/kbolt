@@ -36,6 +36,9 @@ pub enum SpaceCommand {
         old: String,
         new: String,
     },
+    Remove {
+        name: String,
+    },
     Current,
     Default { name: Option<String> },
     List,
@@ -131,6 +134,21 @@ mod tests {
                 SpaceCommand::Rename {
                     old: "work".to_string(),
                     new: "team".to_string()
+                }
+            ),
+        }
+    }
+
+    #[test]
+    fn parses_space_remove() {
+        let parsed = Cli::try_parse_from(["kbolt", "space", "remove", "work"]).expect("parse cli");
+        assert_eq!(parsed.space, None);
+
+        match parsed.command {
+            Command::Space(space) => assert_eq!(
+                space.command,
+                SpaceCommand::Remove {
+                    name: "work".to_string()
                 }
             ),
         }

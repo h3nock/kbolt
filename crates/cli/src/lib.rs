@@ -34,6 +34,14 @@ impl CliAdapter {
         Ok(format!("space renamed: {old} -> {new}"))
     }
 
+    pub fn space_remove(&self, name: &str) -> Result<String> {
+        self.engine.remove_space(name)?;
+        if name == "default" {
+            return Ok("default space cleared".to_string());
+        }
+        Ok(format!("space removed: {name}"))
+    }
+
     pub fn space_default(&mut self, name: Option<&str>) -> Result<String> {
         if let Some(space_name) = name {
             let updated = self.engine.set_default_space(Some(space_name))?;
@@ -330,6 +338,43 @@ mod tests {
 
             let info = adapter.space_info("team").expect("team space info");
             assert!(info.contains("name: team"), "unexpected output: {info}");
+        });
+    }
+
+    #[test]
+    fn space_remove_deletes_non_default_space() {
+        with_isolated_xdg_dirs(|| {
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+            adapter.space_add("work", None).expect("add work");
+
+            let output = adapter.space_remove("work").expect("remove work");
+            assert_eq!(output, "space removed: work");
+
+            let err = adapter
+                .space_info("work")
+                .expect_err("work should be removed");
+            assert!(
+                err.to_string().contains("space not found"),
+                "unexpected error: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn space_remove_clears_default_space_without_deleting_it() {
+        with_isolated_xdg_dirs(|| {
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            let output = adapter.space_remove("default").expect("clear default");
+            assert_eq!(output, "default space cleared");
+
+            let info = adapter.space_info("default").expect("default should remain");
+            assert!(
+                info.contains("name: default"),
+                "unexpected output: {info}"
+            );
         });
     }
 }

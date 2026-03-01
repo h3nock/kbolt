@@ -30,6 +30,10 @@ fn run() -> Result<()> {
                 let line = adapter.space_rename(&old, &new)?;
                 println!("{line}");
             }
+            SpaceCommand::Remove { name } => {
+                let line = adapter.space_remove(&name)?;
+                println!("{line}");
+            }
             SpaceCommand::Current => {
                 let line = adapter.space_current(cli.space.as_deref())?;
                 println!("{line}");
