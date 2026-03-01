@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use kbolt_types::{KboltError, Result};
+use crate::error::{CoreError, Result};
+use kbolt_types::KboltError;
 use rusqlite::{params, Connection, Error, ErrorCode};
 
 const DB_FILE: &str = "meta.sqlite";
@@ -117,7 +118,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let conn = self
             .db
             .lock()
-            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+            .map_err(|_| CoreError::poisoned("database"))?;
 
         let result = conn.execute(
             "INSERT INTO spaces (name, description) VALUES (?1, ?2)",
@@ -132,7 +133,8 @@ CREATE TABLE IF NOT EXISTS llm_cache (
                 {
                     Err(KboltError::SpaceAlreadyExists {
                         name: name.to_string(),
-                    })
+                    }
+                    .into())
                 }
                 other => Err(other.into()),
             },
@@ -143,7 +145,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let conn = self
             .db
             .lock()
-            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+            .map_err(|_| CoreError::poisoned("database"))?;
         let mut stmt =
             conn.prepare("SELECT id, name, description, created FROM spaces WHERE name = ?1")?;
 
@@ -160,7 +162,8 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             Ok(space) => Ok(space),
             Err(Error::QueryReturnedNoRows) => Err(KboltError::SpaceNotFound {
                 name: name.to_string(),
-            }),
+            }
+            .into()),
             Err(err) => Err(err.into()),
         }
     }
@@ -169,7 +172,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let conn = self
             .db
             .lock()
-            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+            .map_err(|_| CoreError::poisoned("database"))?;
         let mut stmt = conn.prepare(
             "SELECT id, name, description, created
              FROM spaces
@@ -193,7 +196,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let conn = self
             .db
             .lock()
-            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+            .map_err(|_| CoreError::poisoned("database"))?;
 
         if name == DEFAULT_SPACE_NAME {
             let affected = conn.execute(
@@ -209,7 +212,8 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         if deleted == 0 {
             return Err(KboltError::SpaceNotFound {
                 name: name.to_string(),
-            });
+            }
+            .into());
         }
 
         Ok(())
@@ -219,13 +223,14 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         if old == DEFAULT_SPACE_NAME {
             return Err(KboltError::Config(
                 "cannot rename reserved space: default".to_string(),
-            ));
+            )
+            .into());
         }
 
         let conn = self
             .db
             .lock()
-            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+            .map_err(|_| CoreError::poisoned("database"))?;
 
         let result = conn.execute(
             "UPDATE spaces SET name = ?1 WHERE name = ?2",
@@ -235,14 +240,16 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         match result {
             Ok(0) => Err(KboltError::SpaceNotFound {
                 name: old.to_string(),
-            }),
+            }
+            .into()),
             Ok(_) => Ok(()),
             Err(Error::SqliteFailure(sqlite_err, _))
                 if sqlite_err.code == ErrorCode::ConstraintViolation =>
             {
                 Err(KboltError::SpaceAlreadyExists {
                     name: new.to_string(),
-                })
+                }
+                .into())
             }
             Err(err) => Err(err.into()),
         }
@@ -252,7 +259,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let conn = self
             .db
             .lock()
-            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+            .map_err(|_| CoreError::poisoned("database"))?;
 
         let updated = conn.execute(
             "UPDATE spaces SET description = ?1 WHERE name = ?2",
@@ -262,7 +269,8 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         if updated == 0 {
             return Err(KboltError::SpaceNotFound {
                 name: name.to_string(),
-            });
+            }
+            .into());
         }
 
         Ok(())
@@ -279,7 +287,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let conn = self
             .db
             .lock()
-            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+            .map_err(|_| CoreError::poisoned("database"))?;
 
         let space_name = lookup_space_name(&conn, space_id)?;
         let extensions_json = serialize_extensions(extensions)?;
@@ -297,7 +305,8 @@ CREATE TABLE IF NOT EXISTS llm_cache (
                 Err(KboltError::CollectionAlreadyExists {
                     name: name.to_string(),
                     space: space_name,
-                })
+                }
+                .into())
             }
             Err(err) => Err(err.into()),
         }
@@ -307,7 +316,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let conn = self
             .db
             .lock()
-            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+            .map_err(|_| CoreError::poisoned("database"))?;
         let mut stmt = conn.prepare(
             "SELECT id, space_id, name, path, description, extensions, created, updated
              FROM collections
@@ -319,7 +328,8 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             Ok(row) => Ok(row),
             Err(Error::QueryReturnedNoRows) => Err(KboltError::CollectionNotFound {
                 name: name.to_string(),
-            }),
+            }
+            .into()),
             Err(err) => Err(err.into()),
         }
     }
@@ -328,7 +338,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let conn = self
             .db
             .lock()
-            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+            .map_err(|_| CoreError::poisoned("database"))?;
 
         let (sql, params): (&str, Vec<i64>) = match space_id {
             Some(id) => (
@@ -360,7 +370,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let conn = self
             .db
             .lock()
-            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+            .map_err(|_| CoreError::poisoned("database"))?;
         let _space_name = lookup_space_name(&conn, space_id)?;
 
         let deleted = conn.execute(
@@ -371,7 +381,8 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         if deleted == 0 {
             return Err(KboltError::CollectionNotFound {
                 name: name.to_string(),
-            });
+            }
+            .into());
         }
 
         Ok(())
@@ -381,7 +392,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let conn = self
             .db
             .lock()
-            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+            .map_err(|_| CoreError::poisoned("database"))?;
         let space_name = lookup_space_name(&conn, space_id)?;
         let result = conn.execute(
             "UPDATE collections
@@ -393,7 +404,8 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         match result {
             Ok(0) => Err(KboltError::CollectionNotFound {
                 name: old.to_string(),
-            }),
+            }
+            .into()),
             Ok(_) => Ok(()),
             Err(Error::SqliteFailure(sqlite_err, _))
                 if sqlite_err.code == ErrorCode::ConstraintViolation =>
@@ -401,7 +413,8 @@ CREATE TABLE IF NOT EXISTS llm_cache (
                 Err(KboltError::CollectionAlreadyExists {
                     name: new.to_string(),
                     space: space_name,
-                })
+                }
+                .into())
             }
             Err(err) => Err(err.into()),
         }
@@ -416,7 +429,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let conn = self
             .db
             .lock()
-            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+            .map_err(|_| CoreError::poisoned("database"))?;
         let _space_name = lookup_space_name(&conn, space_id)?;
 
         let updated = conn.execute(
@@ -429,7 +442,8 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         if updated == 0 {
             return Err(KboltError::CollectionNotFound {
                 name: name.to_string(),
-            });
+            }
+            .into());
         }
 
         Ok(())
@@ -439,7 +453,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let conn = self
             .db
             .lock()
-            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+            .map_err(|_| CoreError::poisoned("database"))?;
 
         let updated = conn.execute(
             "UPDATE collections
@@ -451,7 +465,8 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         if updated == 0 {
             return Err(KboltError::CollectionNotFound {
                 name: format!("id={collection_id}"),
-            });
+            }
+            .into());
         }
 
         Ok(())
@@ -468,7 +483,8 @@ fn lookup_space_name(conn: &Connection, space_id: i64) -> Result<String> {
         Ok(name) => Ok(name),
         Err(Error::QueryReturnedNoRows) => Err(KboltError::SpaceNotFound {
             name: format!("id={space_id}"),
-        }),
+        }
+        .into()),
         Err(err) => Err(err.into()),
     }
 }
@@ -476,9 +492,7 @@ fn lookup_space_name(conn: &Connection, space_id: i64) -> Result<String> {
 fn serialize_extensions(extensions: Option<&[String]>) -> Result<Option<String>> {
     match extensions {
         None => Ok(None),
-        Some(values) => serde_json::to_string(values)
-            .map(Some)
-            .map_err(|err| KboltError::Config(format!("failed to encode extensions: {err}"))),
+        Some(values) => serde_json::to_string(values).map(Some).map_err(Into::into),
     }
 }
 
@@ -487,7 +501,7 @@ fn deserialize_extensions(raw: Option<String>) -> Result<Option<Vec<String>>> {
         None => Ok(None),
         Some(json) => serde_json::from_str::<Vec<String>>(&json)
             .map(Some)
-            .map_err(|err| KboltError::Config(format!("failed to decode extensions: {err}"))),
+            .map_err(Into::into),
     }
 }
 

@@ -51,7 +51,7 @@ fn create_space_duplicate_returns_space_already_exists() {
         .create_space("work", None)
         .expect_err("duplicate create should fail");
 
-    match err {
+    match KboltError::from(err) {
         KboltError::SpaceAlreadyExists { name } => assert_eq!(name, "work"),
         other => panic!("unexpected error: {other}"),
     }
@@ -66,7 +66,7 @@ fn get_space_returns_not_found_for_missing_name() {
         .get_space("missing")
         .expect_err("missing space should fail");
 
-    match err {
+    match KboltError::from(err) {
         KboltError::SpaceNotFound { name } => assert_eq!(name, "missing"),
         other => panic!("unexpected error: {other}"),
     }
@@ -130,7 +130,7 @@ fn delete_space_removes_non_default_space() {
         .get_space("work")
         .expect_err("deleted space should not exist");
 
-    match err {
+    match KboltError::from(err) {
         KboltError::SpaceNotFound { name } => assert_eq!(name, "work"),
         other => panic!("unexpected error: {other}"),
     }
@@ -205,7 +205,7 @@ fn rename_space_updates_name_for_non_default_space() {
     let err = storage
         .get_space("work")
         .expect_err("old name should not resolve");
-    match err {
+    match KboltError::from(err) {
         KboltError::SpaceNotFound { name } => assert_eq!(name, "work"),
         other => panic!("unexpected error: {other}"),
     }
@@ -221,7 +221,7 @@ fn rename_space_to_existing_name_returns_space_already_exists() {
     let err = storage
         .rename_space("work", "notes")
         .expect_err("duplicate name should fail");
-    match err {
+    match KboltError::from(err) {
         KboltError::SpaceAlreadyExists { name } => assert_eq!(name, "notes"),
         other => panic!("unexpected error: {other}"),
     }
@@ -249,7 +249,7 @@ fn update_space_description_missing_space_returns_not_found() {
     let err = storage
         .update_space_description("missing", "desc")
         .expect_err("missing space should fail");
-    match err {
+    match KboltError::from(err) {
         KboltError::SpaceNotFound { name } => assert_eq!(name, "missing"),
         other => panic!("unexpected error: {other}"),
     }
@@ -324,7 +324,7 @@ fn create_collection_duplicate_name_in_space_returns_collection_already_exists()
             None,
         )
         .expect_err("duplicate collection should fail");
-    match err {
+    match KboltError::from(err) {
         KboltError::CollectionAlreadyExists { name, space } => {
             assert_eq!(name, "api");
             assert_eq!(space, "work");
@@ -342,7 +342,7 @@ fn create_collection_in_missing_space_returns_space_not_found() {
         .create_collection(99999, "api", std::path::Path::new("/tmp/api"), None, None)
         .expect_err("missing space should fail");
 
-    match err {
+    match KboltError::from(err) {
         KboltError::SpaceNotFound { name } => assert_eq!(name, "id=99999"),
         other => panic!("unexpected error: {other}"),
     }
@@ -359,7 +359,7 @@ fn get_collection_missing_name_returns_not_found() {
     let err = storage
         .get_collection(work_space_id, "missing")
         .expect_err("missing collection should fail");
-    match err {
+    match KboltError::from(err) {
         KboltError::CollectionNotFound { name } => assert_eq!(name, "missing"),
         other => panic!("unexpected error: {other}"),
     }
@@ -389,7 +389,7 @@ fn delete_collection_removes_entry() {
     let err = storage
         .get_collection(space_id, "api")
         .expect_err("collection should not exist");
-    match err {
+    match KboltError::from(err) {
         KboltError::CollectionNotFound { name } => assert_eq!(name, "api"),
         other => panic!("unexpected error: {other}"),
     }
@@ -406,7 +406,7 @@ fn delete_collection_missing_name_returns_not_found() {
     let err = storage
         .delete_collection(space_id, "missing")
         .expect_err("missing collection should fail");
-    match err {
+    match KboltError::from(err) {
         KboltError::CollectionNotFound { name } => assert_eq!(name, "missing"),
         other => panic!("unexpected error: {other}"),
     }
@@ -440,7 +440,7 @@ fn rename_collection_updates_name() {
     let err = storage
         .get_collection(space_id, "api")
         .expect_err("old name should not exist");
-    match err {
+    match KboltError::from(err) {
         KboltError::CollectionNotFound { name } => assert_eq!(name, "api"),
         other => panic!("unexpected error: {other}"),
     }
@@ -475,7 +475,7 @@ fn rename_collection_to_existing_name_returns_already_exists() {
     let err = storage
         .rename_collection(space_id, "api", "backend")
         .expect_err("rename duplicate should fail");
-    match err {
+    match KboltError::from(err) {
         KboltError::CollectionAlreadyExists { name, space } => {
             assert_eq!(name, "backend");
             assert_eq!(space, "work");
@@ -522,7 +522,7 @@ fn update_collection_description_missing_name_returns_not_found() {
     let err = storage
         .update_collection_description(space_id, "missing", "desc")
         .expect_err("missing collection should fail");
-    match err {
+    match KboltError::from(err) {
         KboltError::CollectionNotFound { name } => assert_eq!(name, "missing"),
         other => panic!("unexpected error: {other}"),
     }
@@ -572,7 +572,7 @@ fn update_collection_timestamp_missing_collection_returns_not_found() {
     let err = storage
         .update_collection_timestamp(99999)
         .expect_err("missing collection should fail");
-    match err {
+    match KboltError::from(err) {
         KboltError::CollectionNotFound { name } => assert_eq!(name, "id=99999"),
         other => panic!("unexpected error: {other}"),
     }
