@@ -931,6 +931,9 @@ impl Engine {
         for entry in WalkDir::new(&target.collection.path)
             .follow_links(false)
             .into_iter()
+            .filter_entry(|entry| {
+                !entry.file_type().is_dir() || !is_hard_ignored_dir_name(entry.file_name())
+            })
         {
             let entry = match entry {
                 Ok(item) => item,
@@ -944,6 +947,10 @@ impl Engine {
             };
 
             if !entry.file_type().is_file() {
+                continue;
+            }
+
+            if is_hard_ignored_file(entry.path()) {
                 continue;
             }
 
@@ -1225,6 +1232,20 @@ fn extension_allowed(path: &Path, filter: Option<&HashSet<String>>) -> bool {
             .map(|ext| allowed.contains(&ext.to_ascii_lowercase()))
             .unwrap_or(false),
     }
+}
+
+fn is_hard_ignored_dir_name(name: &std::ffi::OsStr) -> bool {
+    matches!(name.to_str(), Some(".git") | Some("node_modules"))
+}
+
+fn is_hard_ignored_file(path: &Path) -> bool {
+    if path.file_name().and_then(|name| name.to_str()) == Some(".DS_Store") {
+        return true;
+    }
+
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("lock"))
 }
 
 fn collection_relative_path(root: &Path, full_path: &Path) -> std::result::Result<String, KboltError> {
