@@ -232,30 +232,52 @@ CREATE TABLE IF NOT EXISTS llm_cache (
     }
 
     pub fn create_space(&self, name: &str, description: Option<&str>) -> Result<i64> {
-        let conn = self
-            .db
-            .lock()
-            .map_err(|_| CoreError::poisoned("database"))?;
+        let space_id = {
+            let conn = self
+                .db
+                .lock()
+                .map_err(|_| CoreError::poisoned("database"))?;
 
-        let result = conn.execute(
-            "INSERT INTO spaces (name, description) VALUES (?1, ?2)",
-            params![name, description],
-        );
+            let result = conn.execute(
+                "INSERT INTO spaces (name, description) VALUES (?1, ?2)",
+                params![name, description],
+            );
 
-        match result {
-            Ok(_) => Ok(conn.last_insert_rowid()),
-            Err(err) => match err {
-                Error::SqliteFailure(sqlite_err, _)
-                    if sqlite_err.code == ErrorCode::ConstraintViolation =>
-                {
-                    Err(KboltError::SpaceAlreadyExists {
-                        name: name.to_string(),
-                    }
-                    .into())
+            match result {
+                Ok(_) => conn.last_insert_rowid(),
+                Err(err) => {
+                    return match err {
+                        Error::SqliteFailure(sqlite_err, _)
+                            if sqlite_err.code == ErrorCode::ConstraintViolation =>
+                        {
+                            Err(KboltError::SpaceAlreadyExists {
+                                name: name.to_string(),
+                            }
+                            .into())
+                        }
+                        other => Err(other.into()),
+                    };
                 }
-                other => Err(other.into()),
-            },
+            }
+        };
+
+        if let Err(open_err) = self.open_space(name) {
+            let rollback_result = self
+                .db
+                .lock()
+                .map_err(|_| CoreError::poisoned("database"))?
+                .execute("DELETE FROM spaces WHERE id = ?1", params![space_id]);
+
+            if let Err(rollback_err) = rollback_result {
+                return Err(CoreError::Internal(format!(
+                    "failed to provision indexes for space '{name}': {open_err}; rollback failed: {rollback_err}"
+                )));
+            }
+
+            return Err(open_err);
         }
+
+        Ok(space_id)
     }
 
     pub fn get_space(&self, name: &str) -> Result<SpaceRow> {
