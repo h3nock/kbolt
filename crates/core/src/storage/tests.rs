@@ -2388,6 +2388,137 @@ fn count_embedded_chunks_scopes_by_space_and_deduplicates_models() {
 }
 
 #[test]
+fn per_collection_count_methods_return_expected_values() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/work-api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let doc_a = storage
+        .upsert_document(
+            collection_id,
+            "a.rs",
+            "a",
+            "hash-a",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc a");
+    let doc_b = storage
+        .upsert_document(
+            collection_id,
+            "b.rs",
+            "b",
+            "hash-b",
+            "2026-03-01T10:01:00Z",
+        )
+        .expect("insert doc b");
+
+    let chunk_ids = storage
+        .insert_chunks(
+            doc_a,
+            &[
+                super::ChunkInsert {
+                    seq: 0,
+                    offset: 0,
+                    length: 10,
+                    heading: None,
+                    kind: "section".to_string(),
+                },
+                super::ChunkInsert {
+                    seq: 1,
+                    offset: 10,
+                    length: 12,
+                    heading: None,
+                    kind: "section".to_string(),
+                },
+            ],
+        )
+        .expect("insert chunks for doc a");
+    storage
+        .insert_chunks(
+            doc_b,
+            &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 9,
+                heading: None,
+                kind: "section".to_string(),
+            }],
+        )
+        .expect("insert chunks for doc b");
+    storage
+        .insert_embeddings(&[(chunk_ids[0], "model-a"), (chunk_ids[0], "model-b")])
+        .expect("insert embeddings");
+    storage
+        .deactivate_document(doc_b)
+        .expect("deactivate second doc");
+
+    assert_eq!(
+        storage
+            .count_documents_in_collection(collection_id, false)
+            .expect("count all docs"),
+        2
+    );
+    assert_eq!(
+        storage
+            .count_documents_in_collection(collection_id, true)
+            .expect("count active docs"),
+        1
+    );
+    assert_eq!(
+        storage
+            .count_chunks_in_collection(collection_id)
+            .expect("count chunks"),
+        3
+    );
+    assert_eq!(
+        storage
+            .count_embedded_chunks_in_collection(collection_id)
+            .expect("count embedded chunks"),
+        1
+    );
+}
+
+#[test]
+fn per_collection_count_methods_return_collection_not_found_for_missing_id() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+
+    let err_docs = storage
+        .count_documents_in_collection(99999, false)
+        .expect_err("missing collection should fail");
+    match KboltError::from(err_docs) {
+        KboltError::CollectionNotFound { name } => assert_eq!(name, "id=99999"),
+        other => panic!("unexpected error: {other}"),
+    }
+
+    let err_chunks = storage
+        .count_chunks_in_collection(99999)
+        .expect_err("missing collection should fail");
+    match KboltError::from(err_chunks) {
+        KboltError::CollectionNotFound { name } => assert_eq!(name, "id=99999"),
+        other => panic!("unexpected error: {other}"),
+    }
+
+    let err_embedded = storage
+        .count_embedded_chunks_in_collection(99999)
+        .expect_err("missing collection should fail");
+    match KboltError::from(err_embedded) {
+        KboltError::CollectionNotFound { name } => assert_eq!(name, "id=99999"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
 fn disk_usage_sums_sqlite_indexes_and_models() {
     let tmp = tempdir().expect("create tempdir");
     let cache_dir = tmp.path().join("cache");
