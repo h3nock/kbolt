@@ -254,3 +254,113 @@ fn update_space_description_missing_space_returns_not_found() {
         other => panic!("unexpected error: {other}"),
     }
 }
+
+#[test]
+fn create_get_and_list_collections_in_space() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let work_space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let extensions = vec!["rs".to_string(), "md".to_string()];
+
+    let collection_id = storage
+        .create_collection(
+            work_space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            Some("API docs"),
+            Some(&extensions),
+        )
+        .expect("create collection");
+    assert!(collection_id > 0);
+
+    let collection = storage
+        .get_collection(work_space_id, "api")
+        .expect("get collection");
+    assert_eq!(collection.name, "api");
+    assert_eq!(collection.space_id, work_space_id);
+    assert_eq!(collection.path, std::path::PathBuf::from("/tmp/api"));
+    assert_eq!(collection.description.as_deref(), Some("API docs"));
+    assert_eq!(collection.extensions, Some(extensions.clone()));
+
+    let in_space = storage
+        .list_collections(Some(work_space_id))
+        .expect("list collections in space");
+    assert_eq!(in_space.len(), 1);
+    assert_eq!(in_space[0].name, "api");
+
+    let across_all = storage
+        .list_collections(None)
+        .expect("list collections across all spaces");
+    assert_eq!(across_all.len(), 1);
+    assert_eq!(across_all[0].name, "api");
+}
+
+#[test]
+fn create_collection_duplicate_name_in_space_returns_collection_already_exists() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let work_space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+
+    storage
+        .create_collection(
+            work_space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create first collection");
+
+    let err = storage
+        .create_collection(
+            work_space_id,
+            "api",
+            std::path::Path::new("/tmp/api-v2"),
+            None,
+            None,
+        )
+        .expect_err("duplicate collection should fail");
+    match err {
+        KboltError::CollectionAlreadyExists { name, space } => {
+            assert_eq!(name, "api");
+            assert_eq!(space, "work");
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn create_collection_in_missing_space_returns_space_not_found() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+
+    let err = storage
+        .create_collection(99999, "api", std::path::Path::new("/tmp/api"), None, None)
+        .expect_err("missing space should fail");
+
+    match err {
+        KboltError::SpaceNotFound { name } => assert_eq!(name, "id=99999"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn get_collection_missing_name_returns_not_found() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let work_space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+
+    let err = storage
+        .get_collection(work_space_id, "missing")
+        .expect_err("missing collection should fail");
+    match err {
+        KboltError::CollectionNotFound { name } => assert_eq!(name, "missing"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
