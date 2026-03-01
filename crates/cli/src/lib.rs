@@ -301,6 +301,18 @@ impl CliAdapter {
         Ok(format!("collection removed: {name}"))
     }
 
+    pub fn ignore_show(&self, space: Option<&str>, collection: &str) -> Result<String> {
+        let (resolved_space, content) = self.engine.read_collection_ignore(space, collection)?;
+        if let Some(content) = content {
+            return Ok(format!(
+                "ignore patterns for {resolved_space}/{collection}:\n{content}"
+            ));
+        }
+        Ok(format!(
+            "no ignore patterns configured for {resolved_space}/{collection}"
+        ))
+    }
+
     pub fn models_list(&self) -> Result<String> {
         let status = self.engine.model_status()?;
         let mut lines = Vec::new();
@@ -1344,6 +1356,78 @@ mod tests {
             assert!(
                 info.contains("documents: 1"),
                 "expected indexed document count in output: {info}"
+            );
+        });
+    }
+
+    #[test]
+    fn ignore_show_reports_when_no_patterns_are_configured() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: collection_path,
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add collection");
+            let adapter = CliAdapter::new(engine);
+
+            let output = adapter
+                .ignore_show(Some("work"), "api")
+                .expect("show ignore patterns");
+            assert_eq!(output, "no ignore patterns configured for work/api");
+        });
+    }
+
+    #[test]
+    fn ignore_show_prints_collection_patterns() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: collection_path,
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add collection");
+
+            fs::create_dir_all(
+                engine
+                    .config()
+                    .config_dir
+                    .join("ignores")
+                    .join("work"),
+            )
+            .expect("create ignore dir");
+            fs::write(
+                engine
+                    .config()
+                    .config_dir
+                    .join("ignores")
+                    .join("work")
+                    .join("api.ignore"),
+                "dist/\n*.tmp\n",
+            )
+            .expect("write ignore file");
+
+            let adapter = CliAdapter::new(engine);
+            let output = adapter.ignore_show(None, "api").expect("show ignore patterns");
+            assert_eq!(
+                output,
+                "ignore patterns for work/api:\ndist/\n*.tmp"
             );
         });
     }

@@ -1,5 +1,5 @@
 use clap::Parser;
-use kbolt_cli::args::{Cli, CollectionCommand, Command, ModelsCommand, SpaceCommand};
+use kbolt_cli::args::{Cli, CollectionCommand, Command, IgnoreCommand, ModelsCommand, SpaceCommand};
 use kbolt_cli::CliAdapter;
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
@@ -101,6 +101,12 @@ fn run() -> Result<()> {
             }
             CollectionCommand::Remove { name } => {
                 let line = adapter.collection_remove(cli.space.as_deref(), &name)?;
+                println!("{line}");
+            }
+        },
+        Command::Ignore(ignore) => match ignore.command {
+            IgnoreCommand::Show { collection } => {
+                let line = adapter.ignore_show(cli.space.as_deref(), &collection)?;
                 println!("{line}");
             }
         },

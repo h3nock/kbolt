@@ -16,6 +16,7 @@ pub struct Cli {
 pub enum Command {
     Space(SpaceArgs),
     Collection(CollectionArgs),
+    Ignore(IgnoreArgs),
     Models(ModelsArgs),
     Mcp,
     Search(SearchArgs),
@@ -36,6 +37,12 @@ pub struct SpaceArgs {
 pub struct CollectionArgs {
     #[command(subcommand)]
     pub command: CollectionCommand,
+}
+
+#[derive(Debug, Args)]
+pub struct IgnoreArgs {
+    #[command(subcommand)]
+    pub command: IgnoreCommand,
 }
 
 #[derive(Debug, Args)]
@@ -152,6 +159,11 @@ pub enum CollectionCommand {
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum IgnoreCommand {
+    Show { collection: String },
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum ModelsCommand {
     List,
     Pull,
@@ -164,7 +176,8 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        Cli, CollectionCommand, Command, GetArgs, LsArgs, ModelsCommand, MultiGetArgs, SearchArgs,
+        Cli, CollectionCommand, Command, GetArgs, IgnoreCommand, LsArgs, ModelsCommand,
+        MultiGetArgs, SearchArgs,
         SpaceCommand, UpdateArgs,
     };
 
@@ -183,6 +196,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -212,6 +226,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -250,6 +265,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -278,6 +294,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -297,6 +314,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -323,6 +341,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -348,6 +367,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -374,6 +394,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -398,6 +419,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -417,6 +439,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -441,6 +464,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -461,6 +485,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -482,6 +507,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -523,6 +549,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -548,6 +575,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -575,6 +603,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -601,6 +630,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -619,6 +649,32 @@ mod tests {
                 }
             ),
             Command::Space(_) => panic!("unexpected space command"),
+            Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
+            Command::Get(_) => panic!("unexpected get command"),
+            Command::MultiGet(_) => panic!("unexpected multi-get command"),
+            Command::Models(_) => panic!("unexpected models command"),
+            Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Search(_) => panic!("unexpected search command"),
+        }
+    }
+
+    #[test]
+    fn parses_ignore_show() {
+        let parsed = Cli::try_parse_from(["kbolt", "ignore", "show", "api"]).expect("parse cli");
+        assert_eq!(parsed.space, None);
+
+        match parsed.command {
+            Command::Ignore(ignore) => assert_eq!(
+                ignore.command,
+                IgnoreCommand::Show {
+                    collection: "api".to_string()
+                }
+            ),
+            Command::Space(_) => panic!("unexpected space command"),
+            Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
             Command::Ls(_) => panic!("unexpected ls command"),
@@ -653,6 +709,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -691,6 +748,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -709,6 +767,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
 
@@ -725,6 +784,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -750,6 +810,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
 
@@ -773,6 +834,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -798,6 +860,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
 
@@ -831,6 +894,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -857,6 +921,7 @@ mod tests {
             Command::Get(_) => panic!("unexpected get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
 
@@ -890,6 +955,7 @@ mod tests {
             Command::Get(_) => panic!("unexpected get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -909,6 +975,7 @@ mod tests {
             Command::Get(_) => panic!("unexpected get command"),
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -928,6 +995,7 @@ mod tests {
             Command::Get(_) => panic!("unexpected get command"),
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -956,6 +1024,7 @@ mod tests {
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
             Command::Ls(_) => panic!("unexpected ls command"),
@@ -1001,6 +1070,7 @@ mod tests {
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
             Command::Ls(_) => panic!("unexpected ls command"),
@@ -1024,6 +1094,7 @@ mod tests {
             Command::Ls(_) => panic!("unexpected ls command"),
             Command::Get(_) => panic!("unexpected get command"),
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
