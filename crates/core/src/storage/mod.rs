@@ -366,28 +366,40 @@ CREATE TABLE IF NOT EXISTS llm_cache (
     }
 
     pub fn delete_space(&self, name: &str) -> Result<()> {
-        let conn = self
-            .db
-            .lock()
-            .map_err(|_| CoreError::poisoned("database"))?;
-
         if name == DEFAULT_SPACE_NAME {
-            let affected = conn.execute(
+            let conn = self
+                .db
+                .lock()
+                .map_err(|_| CoreError::poisoned("database"))?;
+            conn.execute(
                 "DELETE FROM collections
                  WHERE space_id = (SELECT id FROM spaces WHERE name = ?1)",
                 params![name],
             )?;
-            let _ = affected;
+            drop(conn);
+
+            self.unload_space(name)?;
+            self.remove_space_artifacts(name)?;
+            self.open_space(name)?;
             return Ok(());
         }
 
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
         let deleted = conn.execute("DELETE FROM spaces WHERE name = ?1", params![name])?;
+        drop(conn);
+
         if deleted == 0 {
             return Err(KboltError::SpaceNotFound {
                 name: name.to_string(),
             }
             .into());
         }
+
+        self.unload_space(name)?;
+        self.remove_space_artifacts(name)?;
 
         Ok(())
     }
@@ -1180,7 +1192,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
 
         let mut tantivy_bytes = 0_u64;
         let mut usearch_bytes = 0_u64;
-        let spaces_dir = self.cache_dir.join("spaces");
+        let spaces_dir = self.cache_dir.join(SPACES_DIR);
         if spaces_dir.exists() {
             for entry in std::fs::read_dir(&spaces_dir)? {
                 let space_dir = entry?.path();
@@ -1188,8 +1200,8 @@ CREATE TABLE IF NOT EXISTS llm_cache (
                     continue;
                 }
 
-                tantivy_bytes += dir_size_or_zero(&space_dir.join("tantivy"))?;
-                usearch_bytes += file_size_or_zero(&space_dir.join("vectors.usearch"))?;
+                tantivy_bytes += dir_size_or_zero(&space_dir.join(TANTIVY_DIR_NAME))?;
+                usearch_bytes += file_size_or_zero(&space_dir.join(USEARCH_FILENAME))?;
             }
         }
 
@@ -1205,8 +1217,29 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         })
     }
 
+    fn unload_space(&self, name: &str) -> Result<()> {
+        let mut spaces = self
+            .spaces
+            .write()
+            .map_err(|_| CoreError::poisoned("spaces"))?;
+        spaces.remove(name);
+        Ok(())
+    }
+
+    fn remove_space_artifacts(&self, name: &str) -> Result<()> {
+        let space_root = self.space_root_path(name);
+        if space_root.exists() {
+            std::fs::remove_dir_all(space_root)?;
+        }
+        Ok(())
+    }
+
+    fn space_root_path(&self, name: &str) -> PathBuf {
+        self.cache_dir.join(SPACES_DIR).join(name)
+    }
+
     fn space_paths(&self, name: &str) -> (PathBuf, PathBuf) {
-        let space_root = self.cache_dir.join(SPACES_DIR).join(name);
+        let space_root = self.space_root_path(name);
         let tantivy_dir = space_root.join(TANTIVY_DIR_NAME);
         let usearch_path = space_root.join(USEARCH_FILENAME);
         (tantivy_dir, usearch_path)
