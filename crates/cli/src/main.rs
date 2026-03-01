@@ -22,6 +22,10 @@ fn run() -> Result<()> {
                 let line = adapter.space_add(&name, description.as_deref())?;
                 println!("{line}");
             }
+            SpaceCommand::Describe { name, text } => {
+                let line = adapter.space_describe(&name, &text)?;
+                println!("{line}");
+            }
             SpaceCommand::Current => {
                 let line = adapter.space_current(cli.space.as_deref())?;
                 println!("{line}");

@@ -28,6 +28,10 @@ pub enum SpaceCommand {
         #[arg(long)]
         description: Option<String>,
     },
+    Describe {
+        name: String,
+        text: String,
+    },
     Current,
     Default { name: Option<String> },
     List,
@@ -75,6 +79,23 @@ mod tests {
 
         match parsed.command {
             Command::Space(space) => assert_eq!(space.command, SpaceCommand::Default { name: None }),
+        }
+    }
+
+    #[test]
+    fn parses_space_describe() {
+        let parsed = Cli::try_parse_from(["kbolt", "space", "describe", "work", "updated docs"])
+            .expect("parse cli");
+        assert_eq!(parsed.space, None);
+
+        match parsed.command {
+            Command::Space(space) => assert_eq!(
+                space.command,
+                SpaceCommand::Describe {
+                    name: "work".to_string(),
+                    text: "updated docs".to_string()
+                }
+            ),
         }
     }
 

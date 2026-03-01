@@ -24,6 +24,11 @@ impl CliAdapter {
         Ok(format!("space added: {}{suffix}", added.name))
     }
 
+    pub fn space_describe(&self, name: &str, text: &str) -> Result<String> {
+        self.engine.describe_space(name, text)?;
+        Ok(format!("space description updated: {name}"))
+    }
+
     pub fn space_default(&mut self, name: Option<&str>) -> Result<String> {
         if let Some(space_name) = name {
             let updated = self.engine.set_default_space(Some(space_name))?;
@@ -281,6 +286,28 @@ mod tests {
                 .space_add("work", Some("work docs"))
                 .expect("add space");
             assert_eq!(output, "space added: work - work docs");
+        });
+    }
+
+    #[test]
+    fn space_describe_updates_space_description() {
+        with_isolated_xdg_dirs(|| {
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+            adapter
+                .space_add("work", Some("old docs"))
+                .expect("add work space");
+
+            let output = adapter
+                .space_describe("work", "updated docs")
+                .expect("describe space");
+            assert_eq!(output, "space description updated: work");
+
+            let info = adapter.space_info("work").expect("space info");
+            assert!(
+                info.contains("description: updated docs"),
+                "unexpected output: {info}"
+            );
         });
     }
 }
