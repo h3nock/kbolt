@@ -2,7 +2,7 @@ pub mod args;
 
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
-use kbolt_types::{ActiveSpaceSource, AddCollectionRequest, GetRequest, Locator, UpdateOptions};
+use kbolt_types::{ActiveSpaceSource, AddCollectionRequest, GetRequest, Locator, MultiGetRequest, OmitReason, UpdateOptions};
 
 pub struct CliAdapter {
     pub engine: Engine,
@@ -479,6 +479,60 @@ impl CliAdapter {
             document.returned_lines,
             document.content
         ))
+    }
+
+    pub fn multi_get(
+        &self,
+        space: Option<&str>,
+        locators: &[String],
+        max_files: usize,
+        max_bytes: usize,
+    ) -> Result<String> {
+        let locators = locators
+            .iter()
+            .map(|item| {
+                if item.trim_start().starts_with('#') {
+                    Locator::DocId(item.to_string())
+                } else {
+                    Locator::Path(item.to_string())
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let response = self.engine.multi_get(MultiGetRequest {
+            locators,
+            space: space.map(ToString::to_string),
+            max_files,
+            max_bytes,
+        })?;
+
+        let mut lines = Vec::new();
+        lines.push(format!("documents: {}", response.documents.len()));
+        for document in response.documents {
+            lines.push(format!(
+                "--- {} {} (stale: {}, lines: {}/{}) ---",
+                document.docid,
+                document.path,
+                document.stale,
+                document.returned_lines,
+                document.total_lines
+            ));
+            lines.push(document.content);
+        }
+
+        lines.push(format!("omitted: {}", response.omitted.len()));
+        for omitted in response.omitted {
+            let reason = match omitted.reason {
+                OmitReason::MaxFiles => "max_files",
+                OmitReason::MaxBytes => "max_bytes",
+            };
+            lines.push(format!(
+                "- {} {} ({} bytes, reason: {reason})",
+                omitted.docid, omitted.path, omitted.size_bytes
+            ));
+        }
+        lines.push(format!("resolved_count: {}", response.resolved_count));
+        Ok(lines.join("\n"))
     }
 }
 
@@ -1367,6 +1421,53 @@ mod tests {
                 .expect("get by docid");
             assert!(output.contains("stale: true"), "unexpected output: {output}");
             assert!(output.contains("content:\nfn beta() {}"), "unexpected output: {output}");
+        });
+    }
+
+    #[test]
+    fn multi_get_formats_documents_and_omissions() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            adapter
+                .space_add("work", None, false, &[])
+                .expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            adapter
+                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .expect("add collection");
+
+            fs::write(collection_path.join("a.md"), "alpha\n").expect("write a");
+            fs::write(collection_path.join("b.md"), "beta\n").expect("write b");
+            fs::write(collection_path.join("c.md"), "gamma\n").expect("write c");
+            adapter
+                .update(Some("work"), &["api".to_string()], true, false, false)
+                .expect("run update");
+
+            let output = adapter
+                .multi_get(
+                    Some("work"),
+                    &[
+                        "api/a.md".to_string(),
+                        "api/b.md".to_string(),
+                        "api/c.md".to_string(),
+                    ],
+                    2,
+                    51_200,
+                )
+                .expect("run multi-get");
+            assert!(output.contains("documents: 2"), "unexpected output: {output}");
+            assert!(output.contains("omitted: 1"), "unexpected output: {output}");
+            assert!(
+                output.contains("reason: max_files"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("resolved_count: 2"),
+                "unexpected output: {output}"
+            );
         });
     }
 

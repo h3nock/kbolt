@@ -127,6 +127,15 @@ fn run() -> Result<()> {
             )?;
             println!("{line}");
         }
+        Command::MultiGet(get) => {
+            let line = adapter.multi_get(
+                cli.space.as_deref(),
+                &get.locators,
+                get.max_files,
+                get.max_bytes,
+            )?;
+            println!("{line}");
+        }
     }
 
     Ok(())
