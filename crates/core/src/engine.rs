@@ -72,6 +72,7 @@ impl Engine {
     }
 
     pub fn list_spaces(&self) -> Result<Vec<SpaceInfo>> {
+        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let spaces = self.storage.list_spaces()?;
         let mut infos = Vec::with_capacity(spaces.len());
         for space in spaces {
@@ -81,6 +82,7 @@ impl Engine {
     }
 
     pub fn space_info(&self, name: &str) -> Result<SpaceInfo> {
+        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let space = self.storage.get_space(name)?;
         self.build_space_info(&space)
     }
@@ -148,6 +150,7 @@ impl Engine {
     }
 
     pub fn list_collections(&self, space: Option<&str>) -> Result<Vec<CollectionInfo>> {
+        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let (space_id_filter, spaces_by_id) = if let Some(space_name) = space {
             let resolved = self.resolve_space_row(Some(space_name), None)?;
             let mut map = std::collections::HashMap::new();
@@ -180,6 +183,7 @@ impl Engine {
     }
 
     pub fn collection_info(&self, space: Option<&str>, name: &str) -> Result<CollectionInfo> {
+        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let resolved = self.resolve_space_row(space, Some(name))?;
         let collection = self.storage.get_collection(resolved.id, name)?;
         self.build_collection_info(&resolved.name, &collection)
@@ -191,6 +195,7 @@ impl Engine {
         collection: &str,
         prefix: Option<&str>,
     ) -> Result<Vec<FileEntry>> {
+        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let resolved_space = self.resolve_space_row(space, Some(collection))?;
         let collection_row = self
             .storage
@@ -223,6 +228,7 @@ impl Engine {
     }
 
     pub fn get_document(&self, req: GetRequest) -> Result<DocumentResponse> {
+        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let GetRequest {
             locator,
             space,
@@ -373,6 +379,7 @@ impl Engine {
     }
 
     pub fn search(&self, req: SearchRequest) -> Result<SearchResponse> {
+        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let started = Instant::now();
         let query = req.query.trim();
         if query.is_empty() {
