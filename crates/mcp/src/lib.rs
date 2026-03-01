@@ -196,6 +196,54 @@ impl McpAdapter {
         let response = self.call_tool(call)?;
         serialize_tool_response(response)
     }
+
+    pub fn dynamic_instructions(&self) -> Result<String> {
+        let status = self.status(None)?;
+        let spaces = self.list_spaces()?;
+        let mut total_collections = 0usize;
+        let mut lines = Vec::new();
+
+        lines.push("kbolt context:".to_string());
+        lines.push(format!("- indexed_documents: {}", status.total_documents));
+        lines.push(format!("- spaces: {}", spaces.len()));
+
+        lines.push("spaces:".to_string());
+        for space in spaces {
+            let space_description = space
+                .description
+                .clone()
+                .unwrap_or_else(|| "no description".to_string());
+            lines.push(format!("- {}: {}", space.name, space_description));
+
+            let collections = self.list_collections(Some(&space.name))?;
+            total_collections += collections.len();
+            if collections.is_empty() {
+                lines.push("  - no collections".to_string());
+                continue;
+            }
+
+            for collection in collections {
+                let collection_description = collection
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| "no description".to_string());
+                lines.push(format!(
+                    "  - {}: {}",
+                    collection.name, collection_description
+                ));
+            }
+        }
+        lines.insert(3, format!("- collections: {total_collections}"));
+
+        lines.push("search_guidance:".to_string());
+        lines.push("- Use mode \"auto\" first for most queries.".to_string());
+        lines.push(
+            "- Use mode \"deep\" when results are sparse or the query is broad/ambiguous."
+                .to_string(),
+        );
+
+        Ok(lines.join("\n"))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -918,6 +966,40 @@ mod tests {
                 err.to_string().contains("invalid arguments for 'search'"),
                 "unexpected error: {err}"
             );
+        });
+    }
+
+    #[test]
+    fn dynamic_instructions_include_space_and_collection_descriptions() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine
+                .add_space("work", Some("work documents"))
+                .expect("add work");
+
+            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: work_path,
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: Some("api reference".to_string()),
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add work collection");
+
+            let adapter = McpAdapter::new(engine);
+            let output = adapter
+                .dynamic_instructions()
+                .expect("build dynamic instructions");
+
+            assert!(output.contains("kbolt context:"));
+            assert!(output.contains("work documents"));
+            assert!(output.contains("api reference"));
+            assert!(output.contains("search_guidance:"));
+            assert!(output.contains("mode \"deep\""));
         });
     }
 }
