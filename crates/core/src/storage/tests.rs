@@ -1684,3 +1684,298 @@ fn cache_set_upserts_value_by_key() {
         .expect("count cache rows");
     assert_eq!(rows, 1);
 }
+
+#[test]
+fn count_documents_scopes_by_space_and_counts_inactive_rows() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let work_space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let notes_space_id = storage
+        .create_space("notes", None)
+        .expect("create notes space");
+
+    let work_collection_id = storage
+        .create_collection(
+            work_space_id,
+            "api",
+            std::path::Path::new("/tmp/work-api"),
+            None,
+            None,
+        )
+        .expect("create work collection");
+    let notes_collection_id = storage
+        .create_collection(
+            notes_space_id,
+            "wiki",
+            std::path::Path::new("/tmp/notes-wiki"),
+            None,
+            None,
+        )
+        .expect("create notes collection");
+
+    let work_doc_a = storage
+        .upsert_document(
+            work_collection_id,
+            "src/a.rs",
+            "a",
+            "hash-a",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert work doc a");
+    storage
+        .upsert_document(
+            work_collection_id,
+            "src/b.rs",
+            "b",
+            "hash-b",
+            "2026-03-01T10:01:00Z",
+        )
+        .expect("insert work doc b");
+    storage
+        .upsert_document(
+            notes_collection_id,
+            "README.md",
+            "readme",
+            "hash-readme",
+            "2026-03-01T10:02:00Z",
+        )
+        .expect("insert notes doc");
+
+    storage
+        .deactivate_document(work_doc_a)
+        .expect("deactivate one work doc");
+
+    assert_eq!(storage.count_documents(None).expect("count all docs"), 3);
+    assert_eq!(
+        storage
+            .count_documents(Some(work_space_id))
+            .expect("count work docs"),
+        2
+    );
+    assert_eq!(
+        storage
+            .count_documents(Some(notes_space_id))
+            .expect("count notes docs"),
+        1
+    );
+
+    let err = storage
+        .count_documents(Some(99999))
+        .expect_err("missing space should fail");
+    match KboltError::from(err) {
+        KboltError::SpaceNotFound { name } => assert_eq!(name, "id=99999"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn count_chunks_scopes_by_space() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let work_space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let notes_space_id = storage
+        .create_space("notes", None)
+        .expect("create notes space");
+
+    let work_collection_id = storage
+        .create_collection(
+            work_space_id,
+            "api",
+            std::path::Path::new("/tmp/work-api"),
+            None,
+            None,
+        )
+        .expect("create work collection");
+    let notes_collection_id = storage
+        .create_collection(
+            notes_space_id,
+            "wiki",
+            std::path::Path::new("/tmp/notes-wiki"),
+            None,
+            None,
+        )
+        .expect("create notes collection");
+
+    let work_doc = storage
+        .upsert_document(
+            work_collection_id,
+            "src/lib.rs",
+            "lib",
+            "hash-lib",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert work doc");
+    let notes_doc = storage
+        .upsert_document(
+            notes_collection_id,
+            "README.md",
+            "readme",
+            "hash-readme",
+            "2026-03-01T10:01:00Z",
+        )
+        .expect("insert notes doc");
+
+    storage
+        .insert_chunks(
+            work_doc,
+            &[
+                super::ChunkInsert {
+                    seq: 0,
+                    offset: 0,
+                    length: 10,
+                    heading: None,
+                    kind: "section".to_string(),
+                },
+                super::ChunkInsert {
+                    seq: 1,
+                    offset: 10,
+                    length: 12,
+                    heading: None,
+                    kind: "section".to_string(),
+                },
+            ],
+        )
+        .expect("insert work chunks");
+    storage
+        .insert_chunks(
+            notes_doc,
+            &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 7,
+                heading: None,
+                kind: "section".to_string(),
+            }],
+        )
+        .expect("insert notes chunk");
+
+    assert_eq!(storage.count_chunks(None).expect("count all chunks"), 3);
+    assert_eq!(
+        storage
+            .count_chunks(Some(work_space_id))
+            .expect("count work chunks"),
+        2
+    );
+    assert_eq!(
+        storage
+            .count_chunks(Some(notes_space_id))
+            .expect("count notes chunks"),
+        1
+    );
+}
+
+#[test]
+fn count_embedded_chunks_scopes_by_space_and_deduplicates_models() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let work_space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let notes_space_id = storage
+        .create_space("notes", None)
+        .expect("create notes space");
+
+    let work_collection_id = storage
+        .create_collection(
+            work_space_id,
+            "api",
+            std::path::Path::new("/tmp/work-api"),
+            None,
+            None,
+        )
+        .expect("create work collection");
+    let notes_collection_id = storage
+        .create_collection(
+            notes_space_id,
+            "wiki",
+            std::path::Path::new("/tmp/notes-wiki"),
+            None,
+            None,
+        )
+        .expect("create notes collection");
+
+    let work_doc = storage
+        .upsert_document(
+            work_collection_id,
+            "src/lib.rs",
+            "lib",
+            "hash-lib",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert work doc");
+    let notes_doc = storage
+        .upsert_document(
+            notes_collection_id,
+            "README.md",
+            "readme",
+            "hash-readme",
+            "2026-03-01T10:01:00Z",
+        )
+        .expect("insert notes doc");
+
+    let work_chunk_ids = storage
+        .insert_chunks(
+            work_doc,
+            &[
+                super::ChunkInsert {
+                    seq: 0,
+                    offset: 0,
+                    length: 10,
+                    heading: None,
+                    kind: "section".to_string(),
+                },
+                super::ChunkInsert {
+                    seq: 1,
+                    offset: 10,
+                    length: 12,
+                    heading: None,
+                    kind: "section".to_string(),
+                },
+            ],
+        )
+        .expect("insert work chunks");
+    let notes_chunk_ids = storage
+        .insert_chunks(
+            notes_doc,
+            &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 7,
+                heading: None,
+                kind: "section".to_string(),
+            }],
+        )
+        .expect("insert notes chunk");
+
+    storage
+        .insert_embeddings(&[
+            (work_chunk_ids[0], "model-a"),
+            (work_chunk_ids[0], "model-b"),
+            (work_chunk_ids[1], "model-a"),
+            (notes_chunk_ids[0], "model-a"),
+        ])
+        .expect("insert embeddings");
+
+    assert_eq!(
+        storage
+            .count_embedded_chunks(None)
+            .expect("count embedded chunks"),
+        3
+    );
+    assert_eq!(
+        storage
+            .count_embedded_chunks(Some(work_space_id))
+            .expect("count work embedded chunks"),
+        2
+    );
+    assert_eq!(
+        storage
+            .count_embedded_chunks(Some(notes_space_id))
+            .expect("count notes embedded chunks"),
+        1
+    );
+}
