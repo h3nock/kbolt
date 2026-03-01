@@ -690,6 +690,8 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "kbolt-core",
+ "kbolt-types",
+ "tempfile",
 ]
 
 [[package]]
