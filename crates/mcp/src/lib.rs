@@ -1,4 +1,5 @@
 pub mod protocol;
+pub mod stdio;
 
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
