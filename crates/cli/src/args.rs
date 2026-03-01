@@ -161,6 +161,7 @@ pub enum CollectionCommand {
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum IgnoreCommand {
     Show { collection: String },
+    Add { collection: String, pattern: String },
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -671,6 +672,33 @@ mod tests {
                 ignore.command,
                 IgnoreCommand::Show {
                     collection: "api".to_string()
+                }
+            ),
+            Command::Space(_) => panic!("unexpected space command"),
+            Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
+            Command::Get(_) => panic!("unexpected get command"),
+            Command::MultiGet(_) => panic!("unexpected multi-get command"),
+            Command::Models(_) => panic!("unexpected models command"),
+            Command::Mcp => panic!("unexpected mcp command"),
+            Command::Search(_) => panic!("unexpected search command"),
+        }
+    }
+
+    #[test]
+    fn parses_ignore_add() {
+        let parsed =
+            Cli::try_parse_from(["kbolt", "ignore", "add", "api", "dist/"]).expect("parse cli");
+        assert_eq!(parsed.space, None);
+
+        match parsed.command {
+            Command::Ignore(ignore) => assert_eq!(
+                ignore.command,
+                IgnoreCommand::Add {
+                    collection: "api".to_string(),
+                    pattern: "dist/".to_string()
                 }
             ),
             Command::Space(_) => panic!("unexpected space command"),

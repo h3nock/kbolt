@@ -669,6 +669,79 @@ fn read_collection_ignore_returns_file_contents() {
 }
 
 #[test]
+fn add_collection_ignore_pattern_creates_file_and_appends_patterns() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path);
+
+        let (space, first) = engine
+            .add_collection_ignore_pattern(Some("work"), "api", "dist/")
+            .expect("add first pattern");
+        assert_eq!(space, "work");
+        assert_eq!(first, "dist/");
+
+        let (space, second) = engine
+            .add_collection_ignore_pattern(None, "api", "*.tmp")
+            .expect("add second pattern");
+        assert_eq!(space, "work");
+        assert_eq!(second, "*.tmp");
+
+        let ignore_path = engine
+            .config()
+            .config_dir
+            .join("ignores")
+            .join("work")
+            .join("api.ignore");
+        let saved = std::fs::read_to_string(ignore_path).expect("read ignore file");
+        assert_eq!(saved, "dist/\n*.tmp\n");
+    });
+}
+
+#[test]
+fn add_collection_ignore_pattern_rejects_empty_or_multiline_input() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path);
+
+        let empty = engine
+            .add_collection_ignore_pattern(Some("work"), "api", "   ")
+            .expect_err("empty pattern should fail");
+        match KboltError::from(empty) {
+            KboltError::InvalidInput(message) => {
+                assert!(
+                    message.contains("cannot be empty"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+
+        let multiline = engine
+            .add_collection_ignore_pattern(Some("work"), "api", "dist/\n*.tmp")
+            .expect_err("multiline pattern should fail");
+        match KboltError::from(multiline) {
+            KboltError::InvalidInput(message) => {
+                assert!(
+                    message.contains("single line"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    });
+}
+
+#[test]
 fn list_files_returns_entries_and_applies_prefix_filter() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);

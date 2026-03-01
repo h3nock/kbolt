@@ -313,6 +313,15 @@ impl CliAdapter {
         ))
     }
 
+    pub fn ignore_add(&self, space: Option<&str>, collection: &str, pattern: &str) -> Result<String> {
+        let (resolved_space, normalized_pattern) = self
+            .engine
+            .add_collection_ignore_pattern(space, collection, pattern)?;
+        Ok(format!(
+            "ignore pattern added for {resolved_space}/{collection}: {normalized_pattern}"
+        ))
+    }
+
     pub fn models_list(&self) -> Result<String> {
         let status = self.engine.model_status()?;
         let mut lines = Vec::new();
@@ -1428,6 +1437,78 @@ mod tests {
             assert_eq!(
                 output,
                 "ignore patterns for work/api:\ndist/\n*.tmp"
+            );
+        });
+    }
+
+    #[test]
+    fn ignore_add_appends_pattern_to_collection_file() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: collection_path,
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add collection");
+            let adapter = CliAdapter::new(engine);
+
+            let first = adapter
+                .ignore_add(None, "api", "dist/")
+                .expect("add first ignore pattern");
+            assert_eq!(first, "ignore pattern added for work/api: dist/");
+
+            let second = adapter
+                .ignore_add(Some("work"), "api", "*.tmp")
+                .expect("add second ignore pattern");
+            assert_eq!(second, "ignore pattern added for work/api: *.tmp");
+
+            let saved = fs::read_to_string(
+                adapter
+                    .engine
+                    .config()
+                    .config_dir
+                    .join("ignores")
+                    .join("work")
+                    .join("api.ignore"),
+            )
+            .expect("read ignore file");
+            assert_eq!(saved, "dist/\n*.tmp\n");
+        });
+    }
+
+    #[test]
+    fn ignore_add_rejects_empty_pattern() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: collection_path,
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add collection");
+            let adapter = CliAdapter::new(engine);
+
+            let err = adapter
+                .ignore_add(Some("work"), "api", "   ")
+                .expect_err("empty pattern should fail");
+            assert!(
+                err.to_string().contains("ignore pattern cannot be empty"),
+                "unexpected error: {err}"
             );
         });
     }

@@ -757,6 +757,33 @@ impl Engine {
         Ok((resolved_space.name, Some(trimmed)))
     }
 
+    pub fn add_collection_ignore_pattern(
+        &self,
+        space: Option<&str>,
+        collection: &str,
+        pattern: &str,
+    ) -> Result<(String, String)> {
+        let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
+        let resolved_space = self.resolve_space_row(space, Some(collection))?;
+        self.storage
+            .get_collection(resolved_space.id, collection)?;
+
+        let normalized_pattern = validate_ignore_pattern(pattern)?;
+        let path = collection_ignore_file_path(&self.config.config_dir, &resolved_space.name, collection);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        use std::io::Write;
+        writeln!(file, "{normalized_pattern}")?;
+
+        Ok((resolved_space.name, normalized_pattern))
+    }
+
     fn model_status_unlocked(&self) -> Result<ModelStatus> {
         models::status(&self.config.models, &self.model_dir())
     }
@@ -1336,6 +1363,22 @@ fn collection_ignore_file_path(config_dir: &Path, space: &str, collection: &str)
         .join("ignores")
         .join(space)
         .join(format!("{collection}.ignore"))
+}
+
+fn validate_ignore_pattern(pattern: &str) -> Result<String> {
+    if pattern.trim().is_empty() {
+        return Err(
+            KboltError::InvalidInput("ignore pattern cannot be empty".to_string()).into(),
+        );
+    }
+
+    if pattern.contains('\n') || pattern.contains('\r') {
+        return Err(
+            KboltError::InvalidInput("ignore pattern must be a single line".to_string()).into(),
+        );
+    }
+
+    Ok(pattern.to_string())
 }
 
 fn collection_relative_path(root: &Path, full_path: &Path) -> std::result::Result<String, KboltError> {
