@@ -5,20 +5,9 @@ use crate::config::Config;
 use crate::storage::{CollectionRow, SpaceResolution};
 use crate::storage::Storage;
 use crate::Result;
-use kbolt_types::{AddCollectionRequest, CollectionInfo, KboltError, SpaceInfo};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActiveSpaceSource {
-    Flag,
-    EnvVar,
-    ConfigDefault,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActiveSpace {
-    pub name: String,
-    pub source: ActiveSpaceSource,
-}
+use kbolt_types::{
+    ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, KboltError, SpaceInfo,
+};
 
 pub struct Engine {
     storage: Storage,

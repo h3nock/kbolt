@@ -3,9 +3,9 @@ use std::ffi::OsString;
 use std::sync::{Mutex, OnceLock};
 
 use crate::config::{Config, ModelConfig, ReapingConfig};
-use crate::engine::{ActiveSpaceSource, Engine};
+use crate::engine::Engine;
 use crate::storage::Storage;
-use kbolt_types::{AddCollectionRequest, KboltError};
+use kbolt_types::{ActiveSpaceSource, AddCollectionRequest, KboltError};
 
 fn test_engine() -> Engine {
     let root = tempdir().expect("create temp root");

@@ -14,7 +14,7 @@ pub use error::{KboltError, Result};
 pub use indexing::{FileError, UpdateOptions, UpdateReport};
 pub use model::PullReport;
 pub use search::{SearchMode, SearchRequest, SearchResponse, SearchResult, SearchSignals};
-pub use space::{AddCollectionRequest, CollectionInfo, SpaceInfo};
+pub use space::{ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, SpaceInfo};
 pub use status::{
     CollectionStatus, DiskUsage, ModelInfo, ModelStatus, SpaceStatus, StatusResponse,
 };

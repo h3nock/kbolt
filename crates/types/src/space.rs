@@ -2,6 +2,19 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ActiveSpaceSource {
+    Flag,
+    EnvVar,
+    ConfigDefault,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveSpace {
+    pub name: String,
+    pub source: ActiveSpaceSource,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SpaceInfo {
     pub name: String,
