@@ -1449,3 +1449,22 @@ fn status_errors_for_missing_space_scope() {
         other => panic!("unexpected error: {other}"),
     }
 }
+
+#[test]
+fn model_status_reflects_configured_model_names() {
+    let engine = test_engine_with_default_space(None);
+    let status = engine.model_status().expect("read model status");
+
+    assert_eq!(status.embedder.name, "embed-model");
+    assert_eq!(status.reranker.name, "reranker-model");
+    assert_eq!(status.expander.name, "expander-model");
+    assert!(!status.embedder.downloaded);
+    assert!(!status.reranker.downloaded);
+    assert!(!status.expander.downloaded);
+    assert_eq!(status.embedder.size_bytes, None);
+    assert_eq!(status.reranker.size_bytes, None);
+    assert_eq!(status.expander.size_bytes, None);
+    assert_eq!(status.embedder.path, None);
+    assert_eq!(status.reranker.path, None);
+    assert_eq!(status.expander.path, None);
+}

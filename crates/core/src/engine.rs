@@ -465,7 +465,22 @@ impl Engine {
             });
         }
 
-        let models = ModelStatus {
+        let models = self.model_status()?;
+
+        Ok(StatusResponse {
+            spaces: space_statuses,
+            models,
+            cache_dir: self.config.cache_dir.clone(),
+            config_dir: self.config.config_dir.clone(),
+            total_documents: self.storage.count_documents(totals_scope)?,
+            total_chunks: self.storage.count_chunks(totals_scope)?,
+            total_embedded: self.storage.count_embedded_chunks(totals_scope)?,
+            disk_usage: self.storage.disk_usage()?,
+        })
+    }
+
+    pub fn model_status(&self) -> Result<ModelStatus> {
+        Ok(ModelStatus {
             embedder: ModelInfo {
                 name: self.config.models.embed.clone(),
                 downloaded: false,
@@ -484,17 +499,6 @@ impl Engine {
                 size_bytes: None,
                 path: None,
             },
-        };
-
-        Ok(StatusResponse {
-            spaces: space_statuses,
-            models,
-            cache_dir: self.config.cache_dir.clone(),
-            config_dir: self.config.config_dir.clone(),
-            total_documents: self.storage.count_documents(totals_scope)?,
-            total_chunks: self.storage.count_chunks(totals_scope)?,
-            total_embedded: self.storage.count_embedded_chunks(totals_scope)?,
-            disk_usage: self.storage.disk_usage()?,
         })
     }
 
