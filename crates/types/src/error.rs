@@ -55,6 +55,9 @@ pub enum KboltError {
     #[error("config error: {0}")]
     Config(String),
 
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+
     #[error("invalid path: {0}")]
     InvalidPath(PathBuf),
 

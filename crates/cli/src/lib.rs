@@ -54,7 +54,7 @@ impl CliAdapter {
                     "strict mode aborted: one or more directories are invalid".to_string(),
                 );
                 lines.extend(validation_errors);
-                return Err(kbolt_types::KboltError::Internal(lines.join("\n")).into());
+                return Err(kbolt_types::KboltError::InvalidInput(lines.join("\n")).into());
             }
         }
 
