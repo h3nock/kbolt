@@ -3,7 +3,9 @@ use std::path::Path;
 use tempfile::tempdir;
 
 use crate::config::ModelConfig;
-use crate::models::{pull_with_downloader, status, ModelDownloader};
+use crate::models::{
+    pull_with_downloader, pull_with_downloader_and_progress, status, ModelDownloader, ModelPullEvent,
+};
 use crate::Result;
 
 #[derive(Default)]
@@ -87,4 +89,53 @@ fn pull_skips_models_that_are_already_present() {
     assert_eq!(report.downloaded.len(), 2);
     assert_eq!(report.already_present, vec!["embed-model".to_string()]);
     assert_eq!(report.total_bytes, 10);
+}
+
+#[test]
+fn pull_emits_progress_events_for_downloaded_and_present_models() {
+    let root = tempdir().expect("create temp root");
+    let config = test_config();
+    let downloader = FakeDownloader { bytes_per_model: 7 };
+
+    std::fs::create_dir_all(root.path().join("embedder")).expect("create embedder dir");
+    std::fs::write(root.path().join("embedder/model.bin"), b"existing").expect("seed existing");
+
+    let mut events = Vec::new();
+    let report = pull_with_downloader_and_progress(&config, root.path(), &downloader, |event| {
+        events.push(event);
+    })
+    .expect("pull models");
+
+    assert_eq!(report.downloaded, vec!["rerank-model", "expand-model"]);
+    assert_eq!(report.already_present, vec!["embed-model"]);
+    assert_eq!(report.total_bytes, 14);
+
+    assert_eq!(
+        events,
+        vec![
+            ModelPullEvent::AlreadyPresent {
+                role: "embedder".to_string(),
+                model: "embed-model".to_string(),
+                bytes: 8,
+            },
+            ModelPullEvent::DownloadStarted {
+                role: "reranker".to_string(),
+                model: "rerank-model".to_string(),
+            },
+            ModelPullEvent::DownloadCompleted {
+                role: "reranker".to_string(),
+                model: "rerank-model".to_string(),
+                bytes: 7,
+            },
+            ModelPullEvent::DownloadStarted {
+                role: "expander".to_string(),
+                model: "expand-model".to_string(),
+            },
+            ModelPullEvent::DownloadCompleted {
+                role: "expander".to_string(),
+                model: "expand-model".to_string(),
+                bytes: 7,
+            },
+        ]
+    );
 }

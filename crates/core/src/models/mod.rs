@@ -18,6 +18,24 @@ struct ModelTarget {
     model_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelPullEvent {
+    DownloadStarted {
+        role: String,
+        model: String,
+    },
+    DownloadCompleted {
+        role: String,
+        model: String,
+        bytes: u64,
+    },
+    AlreadyPresent {
+        role: String,
+        model: String,
+        bytes: u64,
+    },
+}
+
 pub trait ModelDownloader {
     fn download_model(&self, model_id: &str, target_dir: &Path) -> Result<u64>;
 }
@@ -56,14 +74,35 @@ impl ModelDownloader for HfHubDownloader {
 
 pub fn pull(config: &ModelConfig, model_dir: &Path) -> Result<PullReport> {
     let downloader = HfHubDownloader;
-    pull_with_downloader(config, model_dir, &downloader)
+    pull_with_downloader_and_progress(config, model_dir, &downloader, |_| {})
 }
 
+#[cfg(test)]
 pub(crate) fn pull_with_downloader(
     config: &ModelConfig,
     model_dir: &Path,
     downloader: &dyn ModelDownloader,
 ) -> Result<PullReport> {
+    pull_with_downloader_and_progress(config, model_dir, downloader, |_| {})
+}
+
+pub fn pull_with_progress<F>(config: &ModelConfig, model_dir: &Path, on_event: F) -> Result<PullReport>
+where
+    F: FnMut(ModelPullEvent),
+{
+    let downloader = HfHubDownloader;
+    pull_with_downloader_and_progress(config, model_dir, &downloader, on_event)
+}
+
+pub(crate) fn pull_with_downloader_and_progress<F>(
+    config: &ModelConfig,
+    model_dir: &Path,
+    downloader: &dyn ModelDownloader,
+    mut on_event: F,
+) -> Result<PullReport>
+where
+    F: FnMut(ModelPullEvent),
+{
     fs::create_dir_all(model_dir)?;
     let mut report = PullReport {
         downloaded: Vec::new(),
@@ -72,15 +111,31 @@ pub(crate) fn pull_with_downloader(
     };
 
     for target in model_targets(config) {
+        let role = target.role_dir.to_string();
+        let model = target.model_id.clone();
         let target_dir = model_dir.join(target.role_dir);
-        let has_existing_files = dir_size_bytes(&target_dir).unwrap_or(0) > 0;
-        if has_existing_files {
-            report.already_present.push(target.model_id.clone());
+        let existing_bytes = dir_size_bytes(&target_dir).unwrap_or(0);
+        if existing_bytes > 0 {
+            on_event(ModelPullEvent::AlreadyPresent {
+                role,
+                model: model.clone(),
+                bytes: existing_bytes,
+            });
+            report.already_present.push(model);
             continue;
         }
 
+        on_event(ModelPullEvent::DownloadStarted {
+            role: role.clone(),
+            model: model.clone(),
+        });
         let downloaded_bytes = downloader.download_model(&target.model_id, &target_dir)?;
-        report.downloaded.push(target.model_id.clone());
+        on_event(ModelPullEvent::DownloadCompleted {
+            role,
+            model: model.clone(),
+            bytes: downloaded_bytes,
+        });
+        report.downloaded.push(model);
         report.total_bytes = report.total_bytes.saturating_add(downloaded_bytes);
     }
 

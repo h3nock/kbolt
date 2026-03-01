@@ -7,6 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::config::{Config, ModelConfig, ReapingConfig};
 use crate::engine::Engine;
 use crate::storage::Storage;
+use crate::ModelPullEvent;
 use kbolt_types::{
     ActiveSpaceSource, AddCollectionRequest, GetRequest, KboltError, Locator, MultiGetRequest,
     OmitReason, SearchMode, SearchRequest, UpdateOptions,
@@ -1760,4 +1761,45 @@ fn pull_models_skips_already_present_model_directories() {
     assert_eq!(report.downloaded.len(), 0);
     assert_eq!(report.already_present.len(), 3);
     assert_eq!(report.total_bytes, 0);
+}
+
+#[test]
+fn pull_models_with_progress_emits_already_present_events() {
+    let engine = test_engine();
+    let model_dir = engine.config().cache_dir.join("models");
+
+    std::fs::create_dir_all(model_dir.join("embedder")).expect("create embedder dir");
+    std::fs::create_dir_all(model_dir.join("reranker")).expect("create reranker dir");
+    std::fs::create_dir_all(model_dir.join("expander")).expect("create expander dir");
+    std::fs::write(model_dir.join("embedder/model.bin"), b"e").expect("seed embedder");
+    std::fs::write(model_dir.join("reranker/model.bin"), b"r").expect("seed reranker");
+    std::fs::write(model_dir.join("expander/model.bin"), b"x").expect("seed expander");
+
+    let mut events = Vec::new();
+    let report = engine
+        .pull_models_with_progress(|event| events.push(event))
+        .expect("pull models with progress");
+    assert_eq!(report.downloaded.len(), 0);
+    assert_eq!(report.already_present.len(), 3);
+
+    assert_eq!(
+        events,
+        vec![
+            ModelPullEvent::AlreadyPresent {
+                role: "embedder".to_string(),
+                model: "embed-model".to_string(),
+                bytes: 1,
+            },
+            ModelPullEvent::AlreadyPresent {
+                role: "reranker".to_string(),
+                model: "reranker-model".to_string(),
+                bytes: 1,
+            },
+            ModelPullEvent::AlreadyPresent {
+                role: "expander".to_string(),
+                model: "expander-model".to_string(),
+                bytes: 1,
+            },
+        ]
+    );
 }
