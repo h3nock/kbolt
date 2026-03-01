@@ -1447,6 +1447,37 @@ fn update_fails_fast_when_global_lock_is_unavailable() {
 }
 
 #[test]
+fn add_space_fails_fast_when_global_lock_is_unavailable() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+
+        let lock_path = engine.config().cache_dir.join("kbolt.lock");
+        std::fs::create_dir_all(&engine.config().cache_dir).expect("create cache dir");
+        let holder = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .expect("open lock file");
+        FileExt::try_lock_exclusive(&holder).expect("acquire lock in test");
+
+        let err = engine
+            .add_space("work", None)
+            .expect_err("add_space should fail while lock is held");
+        match KboltError::from(err) {
+            KboltError::Internal(message) => {
+                assert!(
+                    message.contains("Another kbolt process is active. Try again shortly."),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    });
+}
+
+#[test]
 fn status_reports_space_collection_and_model_counts() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);

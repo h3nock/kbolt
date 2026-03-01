@@ -55,19 +55,24 @@ impl Engine {
     }
 
     pub fn add_space(&self, name: &str, description: Option<&str>) -> Result<SpaceInfo> {
+        let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
         self.storage.create_space(name, description)?;
-        self.space_info(name)
+        let space = self.storage.get_space(name)?;
+        self.build_space_info(&space)
     }
 
     pub fn remove_space(&self, name: &str) -> Result<()> {
+        let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
         self.storage.delete_space(name)
     }
 
     pub fn rename_space(&self, old: &str, new: &str) -> Result<()> {
+        let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
         self.storage.rename_space(old, new)
     }
 
     pub fn describe_space(&self, name: &str, description: &str) -> Result<()> {
+        let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
         self.storage.update_space_description(name, description)
     }
 
@@ -98,6 +103,7 @@ impl Engine {
     }
 
     pub fn add_collection(&self, req: AddCollectionRequest) -> Result<CollectionInfo> {
+        let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
         let space = self.resolve_space_row(req.space.as_deref(), None)?;
         if !req.path.is_absolute() || !req.path.is_dir() {
             return Err(KboltError::InvalidPath(req.path).into());
@@ -122,7 +128,7 @@ impl Engine {
         )?;
 
         if !req.no_index {
-            self.update(UpdateOptions {
+            self.update_unlocked(UpdateOptions {
                 space: Some(space.name.clone()),
                 collections: vec![name.clone()],
                 no_embed: false,
@@ -131,20 +137,24 @@ impl Engine {
             })?;
         }
 
-        self.collection_info(Some(&space.name), &name)
+        let collection = self.storage.get_collection(space.id, &name)?;
+        self.build_collection_info(&space.name, &collection)
     }
 
     pub fn remove_collection(&self, space: Option<&str>, name: &str) -> Result<()> {
+        let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
         let resolved = self.resolve_space_row(space, Some(name))?;
         self.storage.delete_collection(resolved.id, name)
     }
 
     pub fn rename_collection(&self, space: Option<&str>, old: &str, new: &str) -> Result<()> {
+        let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
         let resolved = self.resolve_space_row(space, Some(old))?;
         self.storage.rename_collection(resolved.id, old, new)
     }
 
     pub fn describe_collection(&self, space: Option<&str>, name: &str, desc: &str) -> Result<()> {
+        let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
         let resolved = self.resolve_space_row(space, Some(name))?;
         self.storage.update_collection_description(resolved.id, name, desc)
     }
@@ -575,6 +585,10 @@ impl Engine {
 
     pub fn update(&self, options: UpdateOptions) -> Result<UpdateReport> {
         let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
+        self.update_unlocked(options)
+    }
+
+    fn update_unlocked(&self, options: UpdateOptions) -> Result<UpdateReport> {
         let started = Instant::now();
         let mut report = UpdateReport {
             scanned: 0,
