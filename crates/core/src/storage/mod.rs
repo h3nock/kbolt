@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::error::{CoreError, Result};
-use kbolt_types::KboltError;
+use kbolt_types::{DiskUsage, KboltError};
 use rusqlite::{params, params_from_iter, Connection, Error, ErrorCode};
 
 const DB_FILE: &str = "meta.sqlite";
@@ -10,6 +10,7 @@ const DEFAULT_SPACE_NAME: &str = "default";
 
 pub struct Storage {
     db: Mutex<Connection>,
+    cache_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +173,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
 
         Ok(Self {
             db: Mutex::new(conn),
+            cache_dir: cache_dir.to_path_buf(),
         })
     }
 
@@ -1096,6 +1098,36 @@ CREATE TABLE IF NOT EXISTS llm_cache (
 
         Ok(count as usize)
     }
+
+    pub fn disk_usage(&self) -> Result<DiskUsage> {
+        let sqlite_bytes = file_size_or_zero(&self.cache_dir.join(DB_FILE))?;
+
+        let mut tantivy_bytes = 0_u64;
+        let mut usearch_bytes = 0_u64;
+        let spaces_dir = self.cache_dir.join("spaces");
+        if spaces_dir.exists() {
+            for entry in std::fs::read_dir(&spaces_dir)? {
+                let space_dir = entry?.path();
+                if !space_dir.is_dir() {
+                    continue;
+                }
+
+                tantivy_bytes += dir_size_or_zero(&space_dir.join("tantivy"))?;
+                usearch_bytes += file_size_or_zero(&space_dir.join("vectors.usearch"))?;
+            }
+        }
+
+        let models_bytes = dir_size_or_zero(&self.cache_dir.join("models"))?;
+        let total_bytes = sqlite_bytes + tantivy_bytes + usearch_bytes + models_bytes;
+
+        Ok(DiskUsage {
+            sqlite_bytes,
+            tantivy_bytes,
+            usearch_bytes,
+            models_bytes,
+            total_bytes,
+        })
+    }
 }
 
 fn lookup_space_name(conn: &Connection, space_id: i64) -> Result<String> {
@@ -1156,6 +1188,39 @@ fn load_chunks_for_doc(conn: &Connection, doc_id: i64) -> Result<Vec<ChunkRow>> 
     let rows = stmt.query_map(params![doc_id], decode_chunk_row)?;
     let chunks = rows.collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(chunks)
+}
+
+fn file_size_or_zero(path: &Path) -> Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let metadata = std::fs::metadata(path)?;
+    if metadata.is_file() {
+        Ok(metadata.len())
+    } else {
+        Ok(0)
+    }
+}
+
+fn dir_size_or_zero(path: &Path) -> Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let mut total = 0_u64;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let child_path = entry.path();
+        let metadata = std::fs::symlink_metadata(&child_path)?;
+        if metadata.is_file() {
+            total += metadata.len();
+        } else if metadata.is_dir() {
+            total += dir_size_or_zero(&child_path)?;
+        }
+    }
+
+    Ok(total)
 }
 
 fn serialize_extensions(extensions: Option<&[String]>) -> Result<Option<String>> {
