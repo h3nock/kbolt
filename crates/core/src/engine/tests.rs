@@ -541,6 +541,11 @@ fn collection_mutation_wrappers_delegate_to_storage_with_explicit_space() {
             no_index: true,
         })
         .expect("add collection");
+    let ignore_dir = engine.config().config_dir.join("ignores").join("work");
+    std::fs::create_dir_all(&ignore_dir).expect("create ignore dir");
+    let old_ignore_path = ignore_dir.join("api.ignore");
+    write_text_file(&old_ignore_path, "dist/\n");
+    assert!(old_ignore_path.exists(), "ignore file should exist");
 
     engine
         .describe_collection(Some("work"), "api", "updated desc")
@@ -557,10 +562,17 @@ fn collection_mutation_wrappers_delegate_to_storage_with_explicit_space() {
         .collection_info(Some("work"), "backend")
         .expect("backend info");
     assert_eq!(renamed.name, "backend");
+    let renamed_ignore_path = ignore_dir.join("backend.ignore");
+    assert!(!old_ignore_path.exists(), "old ignore file should be renamed");
+    assert!(renamed_ignore_path.exists(), "renamed ignore file should exist");
 
     engine
         .remove_collection(Some("work"), "backend")
         .expect("remove collection");
+    assert!(
+        !renamed_ignore_path.exists(),
+        "ignore file should be deleted with collection"
+    );
     let missing = engine
         .collection_info(Some("work"), "backend")
         .expect_err("backend should be removed");

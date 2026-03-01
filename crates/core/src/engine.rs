@@ -154,13 +154,54 @@ impl Engine {
     pub fn remove_collection(&self, space: Option<&str>, name: &str) -> Result<()> {
         let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
         let resolved = self.resolve_space_row(space, Some(name))?;
-        self.storage.delete_collection(resolved.id, name)
+        self.storage.delete_collection(resolved.id, name)?;
+
+        let ignore_path = collection_ignore_file_path(&self.config.config_dir, &resolved.name, name);
+        if ignore_path.is_file() {
+            std::fs::remove_file(ignore_path)?;
+        }
+
+        Ok(())
     }
 
     pub fn rename_collection(&self, space: Option<&str>, old: &str, new: &str) -> Result<()> {
         let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
         let resolved = self.resolve_space_row(space, Some(old))?;
-        self.storage.rename_collection(resolved.id, old, new)
+        let old_ignore_path = collection_ignore_file_path(&self.config.config_dir, &resolved.name, old);
+        let new_ignore_path = collection_ignore_file_path(&self.config.config_dir, &resolved.name, new);
+        if old_ignore_path.is_file() && new_ignore_path.exists() {
+            return Err(KboltError::Internal(format!(
+                "cannot rename ignore file: destination already exists: {}",
+                new_ignore_path.display()
+            ))
+            .into());
+        }
+
+        self.storage.rename_collection(resolved.id, old, new)?;
+
+        if old_ignore_path.is_file() {
+            if let Some(parent) = new_ignore_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if let Err(rename_err) = std::fs::rename(&old_ignore_path, &new_ignore_path) {
+                match self.storage.rename_collection(resolved.id, new, old) {
+                    Ok(()) => {
+                        return Err(KboltError::Internal(format!(
+                            "renamed collection was rolled back after ignore rename failure: {rename_err}"
+                        ))
+                        .into())
+                    }
+                    Err(rollback_err) => {
+                        return Err(KboltError::Internal(format!(
+                            "ignore rename failed: {rename_err}; rollback failed: {rollback_err}"
+                        ))
+                        .into())
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub fn describe_collection(&self, space: Option<&str>, name: &str, desc: &str) -> Result<()> {
