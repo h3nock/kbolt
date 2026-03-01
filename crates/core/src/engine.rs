@@ -239,6 +239,10 @@ impl Engine {
 
     pub fn get_document(&self, req: GetRequest) -> Result<DocumentResponse> {
         let _lock = self.acquire_operation_lock(LockMode::Shared)?;
+        self.get_document_unlocked(req)
+    }
+
+    fn get_document_unlocked(&self, req: GetRequest) -> Result<DocumentResponse> {
         let GetRequest {
             locator,
             space,
@@ -337,6 +341,7 @@ impl Engine {
     }
 
     pub fn multi_get(&self, req: MultiGetRequest) -> Result<MultiGetResponse> {
+        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         if req.max_files == 0 {
             return Err(KboltError::InvalidInput("max_files must be greater than 0".to_string()).into());
         }
@@ -349,7 +354,7 @@ impl Engine {
         let mut consumed_bytes = 0usize;
 
         for locator in req.locators {
-            let document = self.get_document(GetRequest {
+            let document = self.get_document_unlocked(GetRequest {
                 locator,
                 space: req.space.clone(),
                 offset: None,
