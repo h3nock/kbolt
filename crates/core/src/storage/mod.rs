@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use crate::error::{CoreError, Result};
 use kbolt_types::KboltError;
-use rusqlite::{params, Connection, Error, ErrorCode};
+use rusqlite::{params, params_from_iter, Connection, Error, ErrorCode};
 
 const DB_FILE: &str = "meta.sqlite";
 const DEFAULT_SPACE_NAME: &str = "default";
@@ -638,6 +638,35 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         }
 
         Ok(())
+    }
+
+    pub fn reap_documents(&self, older_than_days: u32) -> Result<Vec<i64>> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let modifier = format!("-{} days", older_than_days);
+        let mut stmt = conn.prepare(
+            "SELECT id
+             FROM documents
+             WHERE active = 0
+               AND deactivated_at IS NOT NULL
+               AND deactivated_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![modifier], |row| row.get::<_, i64>(0))?;
+        let doc_ids = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+
+        if doc_ids.is_empty() {
+            return Ok(doc_ids);
+        }
+
+        let placeholders = vec!["?"; doc_ids.len()].join(", ");
+        let sql = format!("DELETE FROM documents WHERE id IN ({placeholders})");
+        conn.execute(&sql, params_from_iter(doc_ids.iter()))?;
+
+        Ok(doc_ids)
     }
 }
 
