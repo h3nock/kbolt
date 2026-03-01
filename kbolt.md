@@ -381,10 +381,10 @@ Defined in `types/`. A single error enum for the entire system. Each variant car
 pub enum KboltError {
     // Storage
     #[error("database error: {0}")]
-    Database(#[from] rusqlite::Error),
+    Database(String),
 
     #[error("tantivy error: {0}")]
-    Tantivy(#[from] tantivy::TantivyError),
+    Tantivy(String),
 
     #[error("usearch error: {0}")]
     USearch(String),
@@ -435,6 +435,9 @@ pub enum KboltError {
     #[error("invalid path: {0}")]
     InvalidPath(PathBuf),
 
+    #[error("internal error: {0}")]
+    Internal(String),
+
     // I/O
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -443,7 +446,7 @@ pub enum KboltError {
 pub type Result<T> = std::result::Result<T, KboltError>;
 ```
 
-Adapters translate `KboltError` into their output format: CLI prints the error message to stderr with exit code 1, MCP returns it as a tool error response. No adapter catches and re-wraps — they use the `Display` impl from `thiserror`.
+`KboltError` is the public error contract used by adapters and boundary types. Core modules use an internal error type (`CoreError`) with `#[from]` conversions for infrastructure errors (SQLite, TOML, JSON, etc.), then map to `KboltError` at the core/adapter boundary. Adapters translate `KboltError` into their output format: CLI prints the error message to stderr with exit code 1, MCP returns it as a tool error response. No adapter catches and re-wraps — they use the `Display` impl from `thiserror`.
 
 ### Types Crate (`types/`)
 
