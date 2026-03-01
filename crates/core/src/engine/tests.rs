@@ -26,6 +26,27 @@ fn test_engine() -> Engine {
     Engine::from_parts(storage, config)
 }
 
+fn test_engine_with_default_space(default_space: Option<&str>) -> Engine {
+    let root = tempdir().expect("create temp root");
+    let root_path = root.path().to_path_buf();
+    std::mem::forget(root);
+    let config_dir = root_path.join("config");
+    let cache_dir = root_path.join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+    let config = Config {
+        config_dir,
+        cache_dir,
+        default_space: default_space.map(ToString::to_string),
+        models: ModelConfig {
+            embed: "embed-model".to_string(),
+            reranker: "reranker-model".to_string(),
+            expander: "expander-model".to_string(),
+        },
+        reaping: ReapingConfig { days: 7 },
+    };
+    Engine::from_parts(storage, config)
+}
+
 #[test]
 fn add_space_and_space_info_include_description_and_zero_counts() {
     let engine = test_engine();
@@ -108,6 +129,26 @@ fn config_and_storage_accessors_expose_engine_components() {
     assert_eq!(default_space.name, "default");
     assert_eq!(engine.config().default_space, None::<String>);
     assert!(!engine.config().config_dir.as_os_str().is_empty());
+}
+
+#[test]
+fn resolve_space_returns_explicit_space_when_provided() {
+    let engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+
+    let resolved = engine
+        .resolve_space(Some("work"))
+        .expect("resolve explicit space");
+    assert_eq!(resolved, "work");
+}
+
+#[test]
+fn resolve_space_uses_configured_default_when_no_explicit_space() {
+    let engine = test_engine_with_default_space(Some("work"));
+    engine.add_space("work", None).expect("add work");
+
+    let resolved = engine.resolve_space(None).expect("resolve default space");
+    assert_eq!(resolved, "work");
 }
 
 #[test]
