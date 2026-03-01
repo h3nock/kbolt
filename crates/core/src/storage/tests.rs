@@ -369,8 +369,14 @@ fn rename_space_rejects_default_space() {
 #[test]
 fn rename_space_updates_name_for_non_default_space() {
     let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let cache_dir = tmp.path().join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
     storage.create_space("work", None).expect("create work");
+    std::fs::write(
+        cache_dir.join("spaces/work/tantivy/marker.bin"),
+        vec![b'm'; 8],
+    )
+    .expect("write marker");
 
     storage
         .rename_space("work", "team")
@@ -386,6 +392,15 @@ fn rename_space_updates_name_for_non_default_space() {
         KboltError::SpaceNotFound { name } => assert_eq!(name, "work"),
         other => panic!("unexpected error: {other}"),
     }
+
+    assert!(!cache_dir.join("spaces/work").exists());
+    assert!(cache_dir.join("spaces/team/tantivy").is_dir());
+    assert!(cache_dir.join("spaces/team/vectors.usearch").is_file());
+    assert!(cache_dir.join("spaces/team/tantivy/marker.bin").is_file());
+
+    let spaces = storage.spaces.read().expect("lock spaces map");
+    assert!(!spaces.contains_key("work"));
+    assert!(spaces.contains_key("team"));
 }
 
 #[test]
@@ -402,6 +417,32 @@ fn rename_space_to_existing_name_returns_space_already_exists() {
         KboltError::SpaceAlreadyExists { name } => assert_eq!(name, "notes"),
         other => panic!("unexpected error: {other}"),
     }
+}
+
+#[test]
+fn rename_space_rolls_back_when_destination_artifacts_exist() {
+    let tmp = tempdir().expect("create tempdir");
+    let cache_dir = tmp.path().join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+    storage.create_space("work", None).expect("create work");
+    std::fs::create_dir_all(cache_dir.join("spaces/team/tantivy"))
+        .expect("create stale destination dir");
+
+    let err = storage
+        .rename_space("work", "team")
+        .expect_err("rename should fail when destination artifacts already exist");
+    assert!(
+        err.to_string().contains("destination already exists"),
+        "unexpected error: {err}"
+    );
+
+    let work = storage.get_space("work").expect("work should still exist");
+    assert_eq!(work.name, "work");
+    let missing_team = storage.get_space("team");
+    assert!(missing_team.is_err(), "team should not exist in sqlite");
+
+    let spaces = storage.spaces.read().expect("lock spaces map");
+    assert!(spaces.contains_key("work"));
 }
 
 #[test]
