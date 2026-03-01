@@ -40,6 +40,83 @@ fn create_and_list_spaces() {
 }
 
 #[test]
+fn find_space_for_collection_returns_not_found_when_absent() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+
+    let resolution = storage
+        .find_space_for_collection("missing")
+        .expect("resolve collection");
+    assert_eq!(resolution, super::SpaceResolution::NotFound);
+}
+
+#[test]
+fn find_space_for_collection_returns_found_for_unique_match() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let work_space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    storage
+        .create_collection(
+            work_space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    let resolution = storage
+        .find_space_for_collection("api")
+        .expect("resolve collection");
+    match resolution {
+        super::SpaceResolution::Found(space) => assert_eq!(space.name, "work"),
+        other => panic!("unexpected resolution: {other:?}"),
+    }
+}
+
+#[test]
+fn find_space_for_collection_returns_ambiguous_with_sorted_space_names() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let zebra_space_id = storage
+        .create_space("zebra", None)
+        .expect("create zebra space");
+    let alpha_space_id = storage
+        .create_space("alpha", None)
+        .expect("create alpha space");
+    storage
+        .create_collection(
+            zebra_space_id,
+            "api",
+            std::path::Path::new("/tmp/zebra-api"),
+            None,
+            None,
+        )
+        .expect("create zebra collection");
+    storage
+        .create_collection(
+            alpha_space_id,
+            "api",
+            std::path::Path::new("/tmp/alpha-api"),
+            None,
+            None,
+        )
+        .expect("create alpha collection");
+
+    let resolution = storage
+        .find_space_for_collection("api")
+        .expect("resolve collection");
+    match resolution {
+        super::SpaceResolution::Ambiguous(spaces) => {
+            assert_eq!(spaces, vec!["alpha".to_string(), "zebra".to_string()]);
+        }
+        other => panic!("unexpected resolution: {other:?}"),
+    }
+}
+
+#[test]
 fn create_space_duplicate_returns_space_already_exists() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
