@@ -5,6 +5,7 @@ use std::sync::{Mutex, RwLock};
 use crate::error::{CoreError, Result};
 use kbolt_types::{DiskUsage, KboltError};
 use rusqlite::{params, params_from_iter, Connection, Error, ErrorCode};
+use tantivy::schema::{FAST, INDEXED, STORED, TEXT};
 
 const DB_FILE: &str = "meta.sqlite";
 const DEFAULT_SPACE_NAME: &str = "default";
@@ -99,10 +100,11 @@ pub enum SpaceResolution {
     NotFound,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct SpaceIndexes {
     tantivy_dir: PathBuf,
     usearch_path: PathBuf,
+    tantivy_index: tantivy::Index,
 }
 
 impl Storage {
@@ -202,12 +204,24 @@ CREATE TABLE IF NOT EXISTS llm_cache (
 
     pub fn open_space(&self, name: &str) -> Result<()> {
         let _space = self.get_space(name)?;
+
+        {
+            let spaces = self
+                .spaces
+                .read()
+                .map_err(|_| CoreError::poisoned("spaces"))?;
+            if spaces.contains_key(name) {
+                return Ok(());
+            }
+        }
+
         let (tantivy_dir, usearch_path) = self.space_paths(name);
         std::fs::create_dir_all(&tantivy_dir)?;
         std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&usearch_path)?;
+        let tantivy_index = open_or_create_tantivy_index(&tantivy_dir)?;
 
         let mut spaces = self
             .spaces
@@ -216,6 +230,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         spaces.entry(name.to_string()).or_insert(SpaceIndexes {
             tantivy_dir,
             usearch_path,
+            tantivy_index,
         });
 
         Ok(())
@@ -1395,6 +1410,26 @@ fn dir_size_or_zero(path: &Path) -> Result<u64> {
     }
 
     Ok(total)
+}
+
+fn open_or_create_tantivy_index(path: &Path) -> Result<tantivy::Index> {
+    let meta_path = path.join("meta.json");
+    if meta_path.exists() {
+        return Ok(tantivy::Index::open_in_dir(path)?);
+    }
+
+    Ok(tantivy::Index::create_in_dir(path, tantivy_schema())?)
+}
+
+fn tantivy_schema() -> tantivy::schema::Schema {
+    let mut builder = tantivy::schema::Schema::builder();
+    builder.add_u64_field("chunk_id", INDEXED | STORED | FAST);
+    builder.add_u64_field("doc_id", INDEXED | STORED | FAST);
+    builder.add_text_field("filepath", TEXT | STORED);
+    builder.add_text_field("title", TEXT | STORED);
+    builder.add_text_field("heading", TEXT | STORED);
+    builder.add_text_field("body", TEXT);
+    builder.build()
 }
 
 fn serialize_extensions(extensions: Option<&[String]>) -> Result<Option<String>> {
