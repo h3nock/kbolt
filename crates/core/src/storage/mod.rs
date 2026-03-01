@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use crate::error::{CoreError, Result};
 use kbolt_types::{DiskUsage, KboltError};
@@ -7,10 +8,14 @@ use rusqlite::{params, params_from_iter, Connection, Error, ErrorCode};
 
 const DB_FILE: &str = "meta.sqlite";
 const DEFAULT_SPACE_NAME: &str = "default";
+const SPACES_DIR: &str = "spaces";
+const TANTIVY_DIR_NAME: &str = "tantivy";
+const USEARCH_FILENAME: &str = "vectors.usearch";
 
 pub struct Storage {
     db: Mutex<Connection>,
     cache_dir: PathBuf,
+    spaces: RwLock<HashMap<String, SpaceIndexes>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +99,12 @@ pub enum SpaceResolution {
     NotFound,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpaceIndexes {
+    tantivy_dir: PathBuf,
+    usearch_path: PathBuf,
+}
+
 impl Storage {
     pub fn new(cache_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(cache_dir)?;
@@ -171,10 +182,53 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             params![DEFAULT_SPACE_NAME],
         )?;
 
-        Ok(Self {
+        let mut stmt = conn.prepare("SELECT name FROM spaces ORDER BY name ASC")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let space_names = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        let storage = Self {
             db: Mutex::new(conn),
             cache_dir: cache_dir.to_path_buf(),
-        })
+            spaces: RwLock::new(HashMap::new()),
+        };
+
+        for space_name in space_names {
+            storage.open_space(&space_name)?;
+        }
+
+        Ok(storage)
+    }
+
+    pub fn open_space(&self, name: &str) -> Result<()> {
+        let _space = self.get_space(name)?;
+        let (tantivy_dir, usearch_path) = self.space_paths(name);
+        std::fs::create_dir_all(&tantivy_dir)?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&usearch_path)?;
+
+        let mut spaces = self
+            .spaces
+            .write()
+            .map_err(|_| CoreError::poisoned("spaces"))?;
+        spaces.entry(name.to_string()).or_insert(SpaceIndexes {
+            tantivy_dir,
+            usearch_path,
+        });
+
+        Ok(())
+    }
+
+    pub fn close_space(&self, name: &str) -> Result<()> {
+        let _space = self.get_space(name)?;
+        let mut spaces = self
+            .spaces
+            .write()
+            .map_err(|_| CoreError::poisoned("spaces"))?;
+        let _removed = spaces.remove(name);
+        Ok(())
     }
 
     pub fn create_space(&self, name: &str, description: Option<&str>) -> Result<i64> {
@@ -1127,6 +1181,13 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             models_bytes,
             total_bytes,
         })
+    }
+
+    fn space_paths(&self, name: &str) -> (PathBuf, PathBuf) {
+        let space_root = self.cache_dir.join(SPACES_DIR).join(name);
+        let tantivy_dir = space_root.join(TANTIVY_DIR_NAME);
+        let usearch_path = space_root.join(USEARCH_FILENAME);
+        (tantivy_dir, usearch_path)
     }
 }
 
