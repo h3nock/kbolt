@@ -2,6 +2,7 @@ pub mod args;
 
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
+use kbolt_core::ModelPullEvent;
 use kbolt_types::{
     ActiveSpaceSource, AddCollectionRequest, GetRequest, KboltError, Locator, MultiGetRequest,
     OmitReason, SearchMode, SearchRequest, UpdateOptions,
@@ -325,8 +326,19 @@ impl CliAdapter {
     }
 
     pub fn models_pull(&self) -> Result<String> {
-        let report = self.engine.pull_models()?;
         let mut lines = Vec::new();
+        let report = self.engine.pull_models_with_progress(|event| match event {
+            ModelPullEvent::DownloadStarted { role, model } => {
+                lines.push(format!("downloading {role}: {model}"));
+            }
+            ModelPullEvent::DownloadCompleted { role, model, bytes } => {
+                lines.push(format!("downloaded {role}: {model} ({bytes} bytes)"));
+            }
+            ModelPullEvent::AlreadyPresent { role, model, bytes } => {
+                lines.push(format!("already present {role}: {model} ({bytes} bytes)"));
+            }
+        })?;
+
         lines.push(format!("downloaded: {}", report.downloaded.len()));
         lines.push("downloaded_models:".to_string());
         if report.downloaded.is_empty() {
@@ -1367,15 +1379,19 @@ mod tests {
                 "unexpected output: {output}"
             );
             assert!(
-                output.contains(&format!("- {embed_model}")),
+                output.contains(&format!("already present embedder: {embed_model} (1 bytes)")),
                 "unexpected output: {output}"
             );
             assert!(
-                output.contains(&format!("- {reranker_model}")),
+                output.contains(&format!(
+                    "already present reranker: {reranker_model} (1 bytes)"
+                )),
                 "unexpected output: {output}"
             );
             assert!(
-                output.contains(&format!("- {expander_model}")),
+                output.contains(&format!(
+                    "already present expander: {expander_model} (1 bytes)"
+                )),
                 "unexpected output: {output}"
             );
             assert!(output.contains("total_bytes: 0"), "unexpected output: {output}");
