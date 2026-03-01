@@ -14,12 +14,16 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let engine = Engine::new(None)?;
-    let adapter = CliAdapter::new(engine);
+    let mut adapter = CliAdapter::new(engine);
 
     match cli.command {
         Command::Space(space) => match space.command {
             SpaceCommand::Current => {
                 let line = adapter.space_current(cli.space.as_deref())?;
+                println!("{line}");
+            }
+            SpaceCommand::Default { name } => {
+                let line = adapter.space_default(name.as_deref())?;
                 println!("{line}");
             }
         },

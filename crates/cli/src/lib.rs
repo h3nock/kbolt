@@ -13,6 +13,21 @@ impl CliAdapter {
         Self { engine }
     }
 
+    pub fn space_default(&mut self, name: Option<&str>) -> Result<String> {
+        if let Some(space_name) = name {
+            let updated = self.engine.set_default_space(Some(space_name))?;
+            let value = updated.unwrap_or_default();
+            return Ok(format!("default space: {value}"));
+        }
+
+        let current = self.engine.config().default_space.as_deref();
+        let output = match current {
+            Some(value) => format!("default space: {value}"),
+            None => "default space: none".to_string(),
+        };
+        Ok(output)
+    }
+
     pub fn space_current(&self, explicit: Option<&str>) -> Result<String> {
         let active = self.engine.current_space(explicit)?;
         let output = match active {
@@ -107,6 +122,36 @@ mod tests {
 
             let output = adapter.space_current(None).expect("run space current");
             assert_eq!(output, "active space: default (default)");
+        });
+    }
+
+    #[test]
+    fn space_default_reports_none_when_unset() {
+        with_isolated_xdg_dirs(|| {
+            let mut engine = Engine::new(None).expect("create engine");
+            engine
+                .set_default_space(None)
+                .expect("clear default space for test");
+            let mut adapter = CliAdapter::new(engine);
+
+            let output = adapter.space_default(None).expect("show default space");
+            assert_eq!(output, "default space: none");
+        });
+    }
+
+    #[test]
+    fn space_default_sets_and_reports_value() {
+        with_isolated_xdg_dirs(|| {
+            let engine = Engine::new(None).expect("create engine");
+            let mut adapter = CliAdapter::new(engine);
+
+            let set_output = adapter
+                .space_default(Some("default"))
+                .expect("set default space");
+            assert_eq!(set_output, "default space: default");
+
+            let get_output = adapter.space_default(None).expect("read default space");
+            assert_eq!(get_output, "default space: default");
         });
     }
 }

@@ -24,6 +24,7 @@ pub struct SpaceArgs {
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum SpaceCommand {
     Current,
+    Default { name: Option<String> },
 }
 
 #[cfg(test)]
@@ -39,6 +40,32 @@ mod tests {
 
         match parsed.command {
             Command::Space(space) => assert_eq!(space.command, SpaceCommand::Current),
+        }
+    }
+
+    #[test]
+    fn parses_space_default_without_name() {
+        let parsed = Cli::try_parse_from(["kbolt", "space", "default"]).expect("parse cli");
+        assert_eq!(parsed.space, None);
+
+        match parsed.command {
+            Command::Space(space) => assert_eq!(space.command, SpaceCommand::Default { name: None }),
+        }
+    }
+
+    #[test]
+    fn parses_space_default_with_name() {
+        let parsed =
+            Cli::try_parse_from(["kbolt", "space", "default", "work"]).expect("parse cli");
+        assert_eq!(parsed.space, None);
+
+        match parsed.command {
+            Command::Space(space) => assert_eq!(
+                space.command,
+                SpaceCommand::Default {
+                    name: Some("work".to_string())
+                }
+            ),
         }
     }
 
