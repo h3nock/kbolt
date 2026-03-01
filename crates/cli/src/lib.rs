@@ -2,7 +2,7 @@ pub mod args;
 
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
-use kbolt_types::{ActiveSpaceSource, AddCollectionRequest};
+use kbolt_types::{ActiveSpaceSource, AddCollectionRequest, UpdateOptions};
 
 pub struct CliAdapter {
     pub engine: Engine,
@@ -295,6 +295,42 @@ impl CliAdapter {
     pub fn collection_remove(&self, space: Option<&str>, name: &str) -> Result<String> {
         self.engine.remove_collection(space, name)?;
         Ok(format!("collection removed: {name}"))
+    }
+
+    pub fn update(
+        &self,
+        space: Option<&str>,
+        collections: &[String],
+        no_embed: bool,
+        dry_run: bool,
+        verbose: bool,
+    ) -> Result<String> {
+        let report = self.engine.update(UpdateOptions {
+            space: space.map(ToString::to_string),
+            collections: collections.to_vec(),
+            no_embed,
+            dry_run,
+            verbose,
+        })?;
+
+        let mut lines = Vec::new();
+        lines.push(format!("scanned: {}", report.scanned));
+        lines.push(format!("skipped_mtime: {}", report.skipped_mtime));
+        lines.push(format!("skipped_hash: {}", report.skipped_hash));
+        lines.push(format!("added: {}", report.added));
+        lines.push(format!("updated: {}", report.updated));
+        lines.push(format!("deactivated: {}", report.deactivated));
+        lines.push(format!("reactivated: {}", report.reactivated));
+        lines.push(format!("reaped: {}", report.reaped));
+        lines.push(format!("embedded: {}", report.embedded));
+        lines.push(format!("errors: {}", report.errors.len()));
+        if verbose {
+            for error in report.errors {
+                lines.push(format!("- {}: {}", error.path, error.error));
+            }
+        }
+        lines.push(format!("elapsed_ms: {}", report.elapsed_ms));
+        Ok(lines.join("\n"))
     }
 }
 
@@ -926,6 +962,80 @@ mod tests {
                     .contains("automatic indexing on collection add is not wired yet"),
                 "unexpected error: {err}"
             );
+        });
+    }
+
+    #[test]
+    fn update_reports_added_and_skipped_counts() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            adapter
+                .space_add("work", None, false, &[])
+                .expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            adapter
+                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .expect("add collection");
+
+            let file_path = collection_path.join("src/lib.rs");
+            fs::create_dir_all(file_path.parent().expect("file parent")).expect("create parent");
+            fs::write(&file_path, "fn alpha() {}\n").expect("write file");
+
+            let first = adapter
+                .update(Some("work"), &["api".to_string()], true, false, false)
+                .expect("run update");
+            assert!(first.contains("added: 1"), "unexpected output: {first}");
+            assert!(first.contains("errors: 0"), "unexpected output: {first}");
+
+            let second = adapter
+                .update(Some("work"), &["api".to_string()], true, false, false)
+                .expect("run second update");
+            assert!(
+                second.contains("skipped_mtime: 1"),
+                "unexpected output: {second}"
+            );
+        });
+    }
+
+    #[test]
+    fn update_dry_run_does_not_persist_documents() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            adapter
+                .space_add("work", None, false, &[])
+                .expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            adapter
+                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .expect("add collection");
+
+            let file_path = collection_path.join("src/lib.rs");
+            fs::create_dir_all(file_path.parent().expect("file parent")).expect("create parent");
+            fs::write(&file_path, "fn alpha() {}\n").expect("write file");
+
+            let output = adapter
+                .update(Some("work"), &["api".to_string()], true, true, false)
+                .expect("run dry-run update");
+            assert!(output.contains("added: 1"), "unexpected output: {output}");
+
+            let space = adapter.engine.storage().get_space("work").expect("get space");
+            let collection = adapter
+                .engine
+                .storage()
+                .get_collection(space.id, "api")
+                .expect("get collection");
+            let docs = adapter
+                .engine
+                .storage()
+                .list_documents(collection.id, false)
+                .expect("list docs");
+            assert!(docs.is_empty(), "dry run should not persist docs");
         });
     }
 }

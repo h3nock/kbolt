@@ -95,6 +95,16 @@ fn run() -> Result<()> {
                 println!("{line}");
             }
         },
+        Command::Update(update) => {
+            let line = adapter.update(
+                cli.space.as_deref(),
+                &update.collections,
+                update.no_embed,
+                update.dry_run,
+                update.verbose,
+            )?;
+            println!("{line}");
+        }
     }
 
     Ok(())

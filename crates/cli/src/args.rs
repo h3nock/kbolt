@@ -16,6 +16,7 @@ pub struct Cli {
 pub enum Command {
     Space(SpaceArgs),
     Collection(CollectionArgs),
+    Update(UpdateArgs),
 }
 
 #[derive(Debug, Args)]
@@ -28,6 +29,18 @@ pub struct SpaceArgs {
 pub struct CollectionArgs {
     #[command(subcommand)]
     pub command: CollectionCommand,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct UpdateArgs {
+    #[arg(long = "collection", value_delimiter = ',')]
+    pub collections: Vec<String>,
+    #[arg(long)]
+    pub no_embed: bool,
+    #[arg(long)]
+    pub dry_run: bool,
+    #[arg(long)]
+    pub verbose: bool,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -83,7 +96,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Cli, CollectionCommand, Command, SpaceCommand};
+    use super::{Cli, CollectionCommand, Command, SpaceCommand, UpdateArgs};
 
     #[test]
     fn parses_space_current_command() {
@@ -93,6 +106,7 @@ mod tests {
         match parsed.command {
             Command::Space(space) => assert_eq!(space.command, SpaceCommand::Current),
             Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -114,6 +128,7 @@ mod tests {
                 }
             ),
             Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -144,6 +159,7 @@ mod tests {
                 }
             ),
             Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -164,6 +180,7 @@ mod tests {
                 }
             ),
             Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -175,6 +192,7 @@ mod tests {
         match parsed.command {
             Command::Space(space) => assert_eq!(space.command, SpaceCommand::Default { name: None }),
             Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -193,6 +211,7 @@ mod tests {
                 }
             ),
             Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -210,6 +229,7 @@ mod tests {
                 }
             ),
             Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -228,6 +248,7 @@ mod tests {
                 }
             ),
             Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -244,6 +265,7 @@ mod tests {
                 }
             ),
             Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -255,6 +277,7 @@ mod tests {
         match parsed.command {
             Command::Space(space) => assert_eq!(space.command, SpaceCommand::List),
             Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -271,6 +294,7 @@ mod tests {
                 }
             ),
             Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -283,6 +307,7 @@ mod tests {
         match parsed.command {
             Command::Space(space) => assert_eq!(space.command, SpaceCommand::Current),
             Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -296,6 +321,7 @@ mod tests {
                 assert_eq!(collection.command, CollectionCommand::List)
             }
             Command::Space(_) => panic!("unexpected space command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -329,6 +355,7 @@ mod tests {
                 }
             ),
             Command::Space(_) => panic!("unexpected space command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -346,6 +373,7 @@ mod tests {
                 }
             ),
             Command::Space(_) => panic!("unexpected space command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -365,6 +393,7 @@ mod tests {
                 }
             ),
             Command::Space(_) => panic!("unexpected space command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -383,6 +412,7 @@ mod tests {
                 }
             ),
             Command::Space(_) => panic!("unexpected space command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 
@@ -400,6 +430,58 @@ mod tests {
                 }
             ),
             Command::Space(_) => panic!("unexpected space command"),
+            Command::Update(_) => panic!("unexpected update command"),
+        }
+    }
+
+    #[test]
+    fn parses_update_with_defaults() {
+        let parsed = Cli::try_parse_from(["kbolt", "update"]).expect("parse cli");
+        assert_eq!(parsed.space, None);
+
+        match parsed.command {
+            Command::Update(update) => assert_eq!(
+                update,
+                UpdateArgs {
+                    collections: vec![],
+                    no_embed: false,
+                    dry_run: false,
+                    verbose: false,
+                }
+            ),
+            Command::Space(_) => panic!("unexpected space command"),
+            Command::Collection(_) => panic!("unexpected collection command"),
+        }
+    }
+
+    #[test]
+    fn parses_update_with_flags() {
+        let parsed = Cli::try_parse_from([
+            "kbolt",
+            "--space",
+            "work",
+            "update",
+            "--collection",
+            "api,wiki",
+            "--no-embed",
+            "--dry-run",
+            "--verbose",
+        ])
+        .expect("parse cli");
+        assert_eq!(parsed.space.as_deref(), Some("work"));
+
+        match parsed.command {
+            Command::Update(update) => assert_eq!(
+                update,
+                UpdateArgs {
+                    collections: vec!["api".to_string(), "wiki".to_string()],
+                    no_embed: true,
+                    dry_run: true,
+                    verbose: true,
+                }
+            ),
+            Command::Space(_) => panic!("unexpected space command"),
+            Command::Collection(_) => panic!("unexpected collection command"),
         }
     }
 }
