@@ -297,6 +297,30 @@ impl CliAdapter {
         Ok(format!("collection removed: {name}"))
     }
 
+    pub fn models_list(&self) -> Result<String> {
+        let status = self.engine.model_status()?;
+        let mut lines = Vec::new();
+        lines.push("models:".to_string());
+
+        for (label, info) in [
+            ("embedder", status.embedder),
+            ("reranker", status.reranker),
+            ("expander", status.expander),
+        ] {
+            let availability = if info.downloaded { "downloaded" } else { "missing" };
+            let mut line = format!("- {label}: {} ({availability})", info.name);
+            if let Some(size_bytes) = info.size_bytes {
+                line.push_str(&format!(", size_bytes: {size_bytes}"));
+            }
+            if let Some(path) = info.path {
+                line.push_str(&format!(", path: {}", path.display()));
+            }
+            lines.push(line);
+        }
+
+        Ok(lines.join("\n"))
+    }
+
     pub fn update(
         &self,
         space: Option<&str>,
@@ -1163,6 +1187,32 @@ mod tests {
                 err.to_string()
                     .contains("automatic indexing on collection add is not wired yet"),
                 "unexpected error: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn models_list_reports_configured_models() {
+        with_isolated_xdg_dirs(|| {
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+            let embed_model = adapter.engine.config().models.embed.clone();
+            let reranker_model = adapter.engine.config().models.reranker.clone();
+            let expander_model = adapter.engine.config().models.expander.clone();
+
+            let output = adapter.models_list().expect("list models");
+            assert!(output.contains("models:"), "unexpected output: {output}");
+            assert!(
+                output.contains(&format!("- embedder: {embed_model} (missing)")),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains(&format!("- reranker: {reranker_model} (missing)")),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains(&format!("- expander: {expander_model} (missing)")),
+                "unexpected output: {output}"
             );
         });
     }

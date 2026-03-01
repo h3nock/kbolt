@@ -1,5 +1,5 @@
 use clap::Parser;
-use kbolt_cli::args::{Cli, CollectionCommand, Command, SpaceCommand};
+use kbolt_cli::args::{Cli, CollectionCommand, Command, ModelsCommand, SpaceCommand};
 use kbolt_cli::CliAdapter;
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
@@ -92,6 +92,12 @@ fn run() -> Result<()> {
             }
             CollectionCommand::Remove { name } => {
                 let line = adapter.collection_remove(cli.space.as_deref(), &name)?;
+                println!("{line}");
+            }
+        },
+        Command::Models(models) => match models.command {
+            ModelsCommand::List => {
+                let line = adapter.models_list()?;
                 println!("{line}");
             }
         },
