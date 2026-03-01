@@ -2,6 +2,7 @@ use tempfile::tempdir;
 
 use super::Storage;
 use kbolt_types::KboltError;
+use rusqlite::Connection;
 
 #[test]
 fn new_creates_db_and_default_space() {
@@ -68,5 +69,50 @@ fn get_space_returns_not_found_for_missing_name() {
     match err {
         KboltError::SpaceNotFound { name } => assert_eq!(name, "missing"),
         other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn new_creates_expected_schema_objects() {
+    let tmp = tempdir().expect("create tempdir");
+    let cache_dir = tmp.path().join("cache");
+    Storage::new(&cache_dir).expect("create storage");
+
+    let db_path = cache_dir.join("meta.sqlite");
+    let conn = Connection::open(db_path).expect("open sqlite");
+
+    let tables = [
+        "spaces",
+        "collections",
+        "documents",
+        "chunks",
+        "embeddings",
+        "llm_cache",
+    ];
+    for table in tables {
+        let exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+                [table],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("query sqlite_master");
+        assert_eq!(exists, 1, "missing expected table: {table}");
+    }
+
+    let indexes = [
+        "idx_documents_collection",
+        "idx_documents_hash",
+        "idx_chunks_doc",
+    ];
+    for index in indexes {
+        let exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name = ?1",
+                [index],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("query sqlite_master for index");
+        assert_eq!(exists, 1, "missing expected index: {index}");
     }
 }
