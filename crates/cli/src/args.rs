@@ -25,6 +25,7 @@ pub struct SpaceArgs {
 pub enum SpaceCommand {
     Current,
     Default { name: Option<String> },
+    List,
 }
 
 #[cfg(test)]
@@ -66,6 +67,16 @@ mod tests {
                     name: Some("work".to_string())
                 }
             ),
+        }
+    }
+
+    #[test]
+    fn parses_space_list() {
+        let parsed = Cli::try_parse_from(["kbolt", "space", "list"]).expect("parse cli");
+        assert_eq!(parsed.space, None);
+
+        match parsed.command {
+            Command::Space(space) => assert_eq!(space.command, SpaceCommand::List),
         }
     }
 

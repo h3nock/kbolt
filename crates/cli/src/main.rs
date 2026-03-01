@@ -26,6 +26,10 @@ fn run() -> Result<()> {
                 let line = adapter.space_default(name.as_deref())?;
                 println!("{line}");
             }
+            SpaceCommand::List => {
+                let line = adapter.space_list()?;
+                println!("{line}");
+            }
         },
     }
 
