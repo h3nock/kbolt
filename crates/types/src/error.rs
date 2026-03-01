@@ -5,10 +5,10 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum KboltError {
     #[error("database error: {0}")]
-    Database(#[from] rusqlite::Error),
+    Database(String),
 
     #[error("tantivy error: {0}")]
-    Tantivy(#[from] tantivy::TantivyError),
+    Tantivy(String),
 
     #[error("usearch error: {0}")]
     USearch(String),
@@ -57,6 +57,9 @@ pub enum KboltError {
 
     #[error("invalid path: {0}")]
     InvalidPath(PathBuf),
+
+    #[error("internal error: {0}")]
+    Internal(String),
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
