@@ -168,6 +168,11 @@ impl CliAdapter {
         self.engine.rename_collection(space, old, new)?;
         Ok(format!("collection renamed: {old} -> {new}"))
     }
+
+    pub fn collection_remove(&self, space: Option<&str>, name: &str) -> Result<String> {
+        self.engine.remove_collection(space, name)?;
+        Ok(format!("collection removed: {name}"))
+    }
 }
 
 #[cfg(test)]
@@ -613,6 +618,41 @@ mod tests {
                 .collection_info(Some("work"), "backend")
                 .expect("collection info");
             assert!(info.contains("name: backend"), "unexpected output: {info}");
+        });
+    }
+
+    #[test]
+    fn collection_remove_deletes_collection() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: collection_path,
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add work collection");
+
+            let adapter = CliAdapter::new(engine);
+            let output = adapter
+                .collection_remove(Some("work"), "api")
+                .expect("remove collection");
+            assert_eq!(output, "collection removed: api");
+
+            let err = adapter
+                .collection_info(Some("work"), "api")
+                .expect_err("collection should be missing");
+            assert!(
+                err.to_string().contains("collection not found"),
+                "unexpected error: {err}"
+            );
         });
     }
 }

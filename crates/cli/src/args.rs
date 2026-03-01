@@ -58,6 +58,7 @@ pub enum CollectionCommand {
     Info { name: String },
     Describe { name: String, text: String },
     Rename { old: String, new: String },
+    Remove { name: String },
 }
 
 #[cfg(test)]
@@ -276,6 +277,23 @@ mod tests {
                 CollectionCommand::Rename {
                     old: "api".to_string(),
                     new: "backend".to_string()
+                }
+            ),
+            Command::Space(_) => panic!("unexpected space command"),
+        }
+    }
+
+    #[test]
+    fn parses_collection_remove() {
+        let parsed =
+            Cli::try_parse_from(["kbolt", "collection", "remove", "api"]).expect("parse cli");
+        assert_eq!(parsed.space, None);
+
+        match parsed.command {
+            Command::Collection(collection) => assert_eq!(
+                collection.command,
+                CollectionCommand::Remove {
+                    name: "api".to_string()
                 }
             ),
             Command::Space(_) => panic!("unexpected space command"),

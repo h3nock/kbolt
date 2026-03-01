@@ -68,6 +68,10 @@ fn run() -> Result<()> {
                 let line = adapter.collection_rename(cli.space.as_deref(), &old, &new)?;
                 println!("{line}");
             }
+            CollectionCommand::Remove { name } => {
+                let line = adapter.collection_remove(cli.space.as_deref(), &name)?;
+                println!("{line}");
+            }
         },
     }
 
