@@ -1179,6 +1179,73 @@ fn upsert_document_missing_collection_returns_not_found() {
 }
 
 #[test]
+fn update_document_metadata_updates_title_modified_and_reactivates_without_dirtying() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    let doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/lib.rs",
+            "lib",
+            "hash-1",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("upsert document");
+
+    {
+        let conn = storage.db.lock().expect("lock db");
+        conn.execute(
+            "UPDATE documents
+             SET active = 0, deactivated_at = '2026-03-01T11:00:00Z', fts_dirty = 0
+             WHERE id = ?1",
+            [doc_id],
+        )
+        .expect("mark inactive and clean");
+    }
+
+    storage
+        .update_document_metadata(doc_id, "lib-new", "2026-03-01T12:00:00Z")
+        .expect("update metadata");
+
+    let stored = storage
+        .get_document_by_path(collection_id, "src/lib.rs")
+        .expect("get document")
+        .expect("document should exist");
+    assert_eq!(stored.title, "lib-new");
+    assert_eq!(stored.modified, "2026-03-01T12:00:00Z");
+    assert!(stored.active);
+    assert_eq!(stored.deactivated_at, None);
+    assert!(!stored.fts_dirty, "metadata-only update should not mark dirty");
+}
+
+#[test]
+fn update_document_metadata_missing_id_returns_not_found() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+
+    let err = storage
+        .update_document_metadata(99999, "lib", "2026-03-01T12:00:00Z")
+        .expect_err("missing document id should fail");
+    match KboltError::from(err) {
+        KboltError::DocumentNotFound { path } => assert_eq!(path, "id=99999"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
 fn get_document_by_path_missing_path_returns_none() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");

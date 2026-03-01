@@ -811,6 +811,32 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         }
     }
 
+    pub fn update_document_metadata(&self, doc_id: i64, title: &str, modified: &str) -> Result<()> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let updated = conn.execute(
+            "UPDATE documents
+             SET title = ?1,
+                 modified = ?2,
+                 active = 1,
+                 deactivated_at = NULL
+             WHERE id = ?3",
+            params![title, modified, doc_id],
+        )?;
+
+        if updated == 0 {
+            return Err(KboltError::DocumentNotFound {
+                path: format!("id={doc_id}"),
+            }
+            .into());
+        }
+
+        Ok(())
+    }
+
     pub fn list_documents(
         &self,
         collection_id: i64,
