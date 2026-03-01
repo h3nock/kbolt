@@ -10,9 +10,9 @@ use crate::Result;
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 use kbolt_types::{
-    ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, KboltError, SpaceInfo,
-    CollectionStatus, FileEntry, FileError, ModelInfo, ModelStatus, SpaceStatus, StatusResponse,
-    UpdateOptions, UpdateReport,
+    ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, CollectionStatus,
+    DocumentResponse, FileEntry, FileError, GetRequest, KboltError, Locator, ModelInfo,
+    ModelStatus, SpaceInfo, SpaceStatus, StatusResponse, UpdateOptions, UpdateReport,
 };
 
 pub struct Engine {
@@ -201,6 +201,104 @@ impl Engine {
         }
 
         Ok(files)
+    }
+
+    pub fn get_document(&self, req: GetRequest) -> Result<DocumentResponse> {
+        let GetRequest {
+            locator,
+            space,
+            offset,
+            limit,
+        } = req;
+
+        let (document, collection_row, space_name) = match locator {
+            Locator::Path(locator_path) => {
+                let (collection_name, relative_path) = split_collection_path(&locator_path)?;
+                let resolved_space =
+                    self.resolve_space_row(space.as_deref(), Some(&collection_name))?;
+                let collection = self
+                    .storage
+                    .get_collection(resolved_space.id, &collection_name)?;
+                let document = self
+                    .storage
+                    .get_document_by_path(collection.id, &relative_path)?
+                    .ok_or_else(|| KboltError::DocumentNotFound {
+                        path: locator_path.clone(),
+                    })?;
+                (document, collection, resolved_space.name)
+            }
+            Locator::DocId(docid) => {
+                let prefix = normalize_docid(&docid)?;
+                let mut candidates = self
+                    .storage
+                    .get_document_by_hash_prefix(&prefix)?
+                    .into_iter()
+                    .map(|document| {
+                        let collection = self.storage.get_collection_by_id(document.collection_id)?;
+                        Ok((document, collection))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                if let Some(space_name) = space.as_deref() {
+                    let resolved_space = self.resolve_space_row(Some(space_name), None)?;
+                    candidates.retain(|(_, collection)| collection.space_id == resolved_space.id);
+                }
+
+                if candidates.is_empty() {
+                    return Err(KboltError::DocumentNotFound {
+                        path: format!("#{prefix}"),
+                    }
+                    .into());
+                }
+
+                if candidates.len() > 1 {
+                    return Err(KboltError::InvalidInput(
+                        "docid is ambiguous; provide more characters".to_string(),
+                    )
+                    .into());
+                }
+
+                let (document, collection) = candidates.pop().expect("candidate exists");
+                let space = self.storage.get_space_by_id(collection.space_id)?;
+                (document, collection, space.name)
+            }
+        };
+
+        let full_path = collection_row.path.join(&document.path);
+        let bytes = match std::fs::read(&full_path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(KboltError::FileDeleted(full_path).into())
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        let raw_content = String::from_utf8_lossy(&bytes).into_owned();
+        let stale = sha256_hex(&bytes) != document.hash;
+
+        let lines = raw_content.lines().collect::<Vec<_>>();
+        let total_lines = lines.len();
+        let start = offset.unwrap_or(0).min(total_lines);
+        let requested = limit.unwrap_or(total_lines.saturating_sub(start));
+        let end = start.saturating_add(requested).min(total_lines);
+        let returned_lines = end.saturating_sub(start);
+        let content = if returned_lines == 0 {
+            String::new()
+        } else {
+            lines[start..end].join("\n")
+        };
+
+        Ok(DocumentResponse {
+            docid: short_docid(&document.hash),
+            path: format!("{}/{}", collection_row.name, document.path),
+            title: document.title,
+            space: space_name,
+            collection: collection_row.name,
+            content,
+            stale,
+            total_lines,
+            returned_lines,
+        })
     }
 
     pub fn resolve_space(&self, explicit: Option<&str>) -> Result<String> {
@@ -764,6 +862,54 @@ fn normalize_list_prefix(prefix: Option<&str>) -> Result<Option<String>> {
     }
 
     Ok(Some(parts.join("/")))
+}
+
+fn split_collection_path(locator: &str) -> Result<(String, String)> {
+    let trimmed = locator.trim();
+    if trimmed.is_empty() {
+        return Err(
+            KboltError::InvalidInput("path locator must be '<collection>/<path>'".to_string())
+                .into(),
+        );
+    }
+
+    let parsed = Path::new(trimmed);
+    if parsed.is_absolute() {
+        return Err(KboltError::InvalidInput("path locator must be relative".to_string()).into());
+    }
+
+    let mut parts = Vec::new();
+    for component in parsed.components() {
+        match component {
+            Component::Normal(item) => parts.push(item.to_string_lossy().into_owned()),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(
+                    KboltError::InvalidInput(
+                        "path locator must not traverse directories".to_string(),
+                    )
+                    .into(),
+                )
+            }
+        }
+    }
+
+    if parts.len() < 2 {
+        return Err(
+            KboltError::InvalidInput("path locator must be '<collection>/<path>'".to_string())
+                .into(),
+        );
+    }
+
+    Ok((parts[0].clone(), parts[1..].join("/")))
+}
+
+fn normalize_docid(raw: &str) -> Result<String> {
+    let normalized = raw.trim().trim_start_matches('#').to_string();
+    if normalized.is_empty() {
+        return Err(KboltError::InvalidInput("docid cannot be empty".to_string()).into());
+    }
+    Ok(normalized)
 }
 
 fn path_matches_prefix(path: &str, prefix: &str) -> bool {

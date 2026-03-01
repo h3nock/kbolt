@@ -5,7 +5,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::config::{Config, ModelConfig, ReapingConfig};
 use crate::engine::Engine;
 use crate::storage::Storage;
-use kbolt_types::{ActiveSpaceSource, AddCollectionRequest, KboltError, UpdateOptions};
+use kbolt_types::{ActiveSpaceSource, AddCollectionRequest, GetRequest, KboltError, Locator, UpdateOptions};
 
 fn test_engine() -> Engine {
     let root = tempdir().expect("create temp root");
@@ -665,6 +665,183 @@ fn list_files_errors_for_ambiguous_collection_and_invalid_prefix() {
         match KboltError::from(err) {
             KboltError::InvalidInput(message) => {
                 assert!(message.contains("prefix"), "unexpected message: {message}");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    });
+}
+
+#[test]
+fn get_document_by_path_supports_offsets_and_stale_detection() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        let file_path = work_path.join("src/lib.rs");
+        write_text_file(&file_path, "line-a\nline-b\nline-c\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let sliced = engine
+            .get_document(GetRequest {
+                locator: Locator::Path("api/src/lib.rs".to_string()),
+                space: Some("work".to_string()),
+                offset: Some(1),
+                limit: Some(1),
+            })
+            .expect("get sliced document");
+        assert_eq!(sliced.path, "api/src/lib.rs");
+        assert_eq!(sliced.space, "work");
+        assert_eq!(sliced.collection, "api");
+        assert_eq!(sliced.content, "line-b");
+        assert_eq!(sliced.total_lines, 3);
+        assert_eq!(sliced.returned_lines, 1);
+        assert!(!sliced.stale);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        write_text_file(&file_path, "line-a\nline-b\nline-c\nline-d\n");
+        let stale = engine
+            .get_document(GetRequest {
+                locator: Locator::Path("api/src/lib.rs".to_string()),
+                space: Some("work".to_string()),
+                offset: None,
+                limit: None,
+            })
+            .expect("get stale document");
+        assert!(stale.stale);
+        assert_eq!(stale.returned_lines, stale.total_lines);
+    });
+}
+
+#[test]
+fn get_document_by_docid_resolves_uniquely_and_honors_optional_space_scope() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        let notes_path = root.path().join("notes-wiki");
+        std::fs::create_dir_all(&work_path).expect("create work dir");
+        std::fs::create_dir_all(&notes_path).expect("create notes dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+        add_collection_fixture(&engine, "notes", "wiki", notes_path.clone());
+
+        write_text_file(&work_path.join("src/lib.rs"), "fn alpha() {}\n");
+        write_text_file(&notes_path.join("guide.md"), "notes guide\n");
+        engine
+            .update(update_options(None, &[]))
+            .expect("initial update");
+
+        let files = engine
+            .list_files(Some("work"), "api", None)
+            .expect("list files");
+        let docid = files[0].docid.clone();
+
+        let doc = engine
+            .get_document(GetRequest {
+                locator: Locator::DocId(docid.clone()),
+                space: None,
+                offset: None,
+                limit: None,
+            })
+            .expect("get document by docid");
+        assert_eq!(doc.space, "work");
+        assert_eq!(doc.collection, "api");
+        assert_eq!(doc.path, "api/src/lib.rs");
+
+        let wrong_scope = engine
+            .get_document(GetRequest {
+                locator: Locator::DocId(docid),
+                space: Some("notes".to_string()),
+                offset: None,
+                limit: None,
+            })
+            .expect_err("wrong space scope should not resolve docid");
+        match KboltError::from(wrong_scope) {
+            KboltError::DocumentNotFound { path } => assert!(path.starts_with('#')),
+            other => panic!("unexpected error: {other}"),
+        }
+    });
+}
+
+#[test]
+fn get_document_errors_for_deleted_file_and_ambiguous_docid() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        let file_path = work_path.join("src/lib.rs");
+        write_text_file(&file_path, "fn alpha() {}\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+        std::fs::remove_file(&file_path).expect("remove file");
+
+        let deleted_err = engine
+            .get_document(GetRequest {
+                locator: Locator::Path("api/src/lib.rs".to_string()),
+                space: Some("work".to_string()),
+                offset: None,
+                limit: None,
+            })
+            .expect_err("deleted file should error");
+        match KboltError::from(deleted_err) {
+            KboltError::FileDeleted(path) => {
+                assert!(path.ends_with("src/lib.rs"), "unexpected path: {}", path.display());
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(work_space.id, "api")
+            .expect("get api collection");
+        engine
+            .storage()
+            .upsert_document(
+                collection.id,
+                "a.rs",
+                "a.rs",
+                "abc123000000",
+                "2026-03-01T10:00:00Z",
+            )
+            .expect("insert first synthetic hash");
+        engine
+            .storage()
+            .upsert_document(
+                collection.id,
+                "b.rs",
+                "b.rs",
+                "abc123999999",
+                "2026-03-01T10:01:00Z",
+            )
+            .expect("insert second synthetic hash");
+
+        let ambiguous = engine
+            .get_document(GetRequest {
+                locator: Locator::DocId("#abc123".to_string()),
+                space: Some("work".to_string()),
+                offset: None,
+                limit: None,
+            })
+            .expect_err("ambiguous docid should fail");
+        match KboltError::from(ambiguous) {
+            KboltError::InvalidInput(message) => {
+                assert!(message.contains("ambiguous"), "unexpected message: {message}");
             }
             other => panic!("unexpected error: {other}"),
         }

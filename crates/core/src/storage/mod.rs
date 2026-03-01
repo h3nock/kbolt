@@ -377,6 +377,33 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         }
     }
 
+    pub fn get_space_by_id(&self, id: i64) -> Result<SpaceRow> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let mut stmt =
+            conn.prepare("SELECT id, name, description, created FROM spaces WHERE id = ?1")?;
+
+        let row = stmt.query_row(params![id], |row| {
+            Ok(SpaceRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                created: row.get(3)?,
+            })
+        });
+
+        match row {
+            Ok(space) => Ok(space),
+            Err(Error::QueryReturnedNoRows) => Err(KboltError::SpaceNotFound {
+                name: format!("id={id}"),
+            }
+            .into()),
+            Err(err) => Err(err.into()),
+        }
+    }
+
     pub fn list_spaces(&self) -> Result<Vec<SpaceRow>> {
         let conn = self
             .db
@@ -619,6 +646,28 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             Ok(row) => Ok(row),
             Err(Error::QueryReturnedNoRows) => Err(KboltError::CollectionNotFound {
                 name: name.to_string(),
+            }
+            .into()),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn get_collection_by_id(&self, id: i64) -> Result<CollectionRow> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, space_id, name, path, description, extensions, created, updated
+             FROM collections
+             WHERE id = ?1",
+        )?;
+
+        let result = stmt.query_row(params![id], decode_collection_row);
+        match result {
+            Ok(row) => Ok(row),
+            Err(Error::QueryReturnedNoRows) => Err(KboltError::CollectionNotFound {
+                name: format!("id={id}"),
             }
             .into()),
             Err(err) => Err(err.into()),

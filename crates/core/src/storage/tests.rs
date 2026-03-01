@@ -498,6 +498,30 @@ fn get_space_returns_not_found_for_missing_name() {
 }
 
 #[test]
+fn get_space_by_id_returns_row_or_not_found() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let work_id = storage
+        .create_space("work", Some("work docs"))
+        .expect("create work space");
+
+    let work = storage
+        .get_space_by_id(work_id)
+        .expect("fetch work by id");
+    assert_eq!(work.id, work_id);
+    assert_eq!(work.name, "work");
+    assert_eq!(work.description.as_deref(), Some("work docs"));
+
+    let err = storage
+        .get_space_by_id(99999)
+        .expect_err("missing space id should fail");
+    match KboltError::from(err) {
+        KboltError::SpaceNotFound { name } => assert_eq!(name, "id=99999"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
 fn new_creates_expected_schema_objects() {
     let tmp = tempdir().expect("create tempdir");
     let cache_dir = tmp.path().join("cache");
@@ -845,6 +869,41 @@ fn get_collection_missing_name_returns_not_found() {
         .expect_err("missing collection should fail");
     match KboltError::from(err) {
         KboltError::CollectionNotFound { name } => assert_eq!(name, "missing"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn get_collection_by_id_returns_row_or_not_found() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let work_space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            work_space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            Some("api docs"),
+            None,
+        )
+        .expect("create collection");
+
+    let collection = storage
+        .get_collection_by_id(collection_id)
+        .expect("fetch collection by id");
+    assert_eq!(collection.id, collection_id);
+    assert_eq!(collection.space_id, work_space_id);
+    assert_eq!(collection.name, "api");
+    assert_eq!(collection.path, std::path::PathBuf::from("/tmp/api"));
+    assert_eq!(collection.description.as_deref(), Some("api docs"));
+
+    let err = storage
+        .get_collection_by_id(99999)
+        .expect_err("missing collection id should fail");
+    match KboltError::from(err) {
+        KboltError::CollectionNotFound { name } => assert_eq!(name, "id=99999"),
         other => panic!("unexpected error: {other}"),
     }
 }
