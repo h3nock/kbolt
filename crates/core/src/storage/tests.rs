@@ -26,6 +26,7 @@ fn new_preloads_default_space_index_paths() {
     let storage = Storage::new(&cache_dir).expect("create storage");
 
     assert!(cache_dir.join("spaces/default/tantivy").is_dir());
+    assert!(cache_dir.join("spaces/default/tantivy/meta.json").is_file());
     assert!(cache_dir.join("spaces/default/vectors.usearch").is_file());
 
     let spaces = storage.spaces.read().expect("lock spaces map");
@@ -41,6 +42,7 @@ fn open_space_registers_paths_for_existing_space() {
 
     storage.open_space("work").expect("open work space");
     assert!(cache_dir.join("spaces/work/tantivy").is_dir());
+    assert!(cache_dir.join("spaces/work/tantivy/meta.json").is_file());
     assert!(cache_dir.join("spaces/work/vectors.usearch").is_file());
 
     let spaces = storage.spaces.read().expect("lock spaces map");
@@ -115,10 +117,30 @@ fn create_space_provisions_index_paths() {
 
     storage.create_space("work", None).expect("create work space");
     assert!(cache_dir.join("spaces/work/tantivy").is_dir());
+    assert!(cache_dir.join("spaces/work/tantivy/meta.json").is_file());
     assert!(cache_dir.join("spaces/work/vectors.usearch").is_file());
 
     let spaces = storage.spaces.read().expect("lock spaces map");
     assert!(spaces.contains_key("work"));
+}
+
+#[test]
+fn open_space_initializes_expected_tantivy_schema_fields() {
+    let tmp = tempdir().expect("create tempdir");
+    let cache_dir = tmp.path().join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+    storage.create_space("work", None).expect("create work");
+    storage.open_space("work").expect("open work");
+
+    let index = tantivy::Index::open_in_dir(cache_dir.join("spaces/work/tantivy"))
+        .expect("open tantivy index");
+    let schema = index.schema();
+    assert!(schema.get_field("chunk_id").is_ok());
+    assert!(schema.get_field("doc_id").is_ok());
+    assert!(schema.get_field("filepath").is_ok());
+    assert!(schema.get_field("title").is_ok());
+    assert!(schema.get_field("heading").is_ok());
+    assert!(schema.get_field("body").is_ok());
 }
 
 #[test]
