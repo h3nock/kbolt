@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use kbolt_types::{KboltError, Result};
@@ -17,6 +17,18 @@ pub struct SpaceRow {
     pub name: String,
     pub description: Option<String>,
     pub created: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionRow {
+    pub id: i64,
+    pub space_id: i64,
+    pub name: String,
+    pub path: PathBuf,
+    pub description: Option<String>,
+    pub extensions: Option<Vec<String>>,
+    pub created: String,
+    pub updated: String,
 }
 
 impl Storage {
@@ -255,6 +267,144 @@ CREATE TABLE IF NOT EXISTS llm_cache (
 
         Ok(())
     }
+
+    pub fn create_collection(
+        &self,
+        space_id: i64,
+        name: &str,
+        path: &Path,
+        description: Option<&str>,
+        extensions: Option<&[String]>,
+    ) -> Result<i64> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+
+        let space_name = lookup_space_name(&conn, space_id)?;
+        let extensions_json = serialize_extensions(extensions)?;
+        let result = conn.execute(
+            "INSERT INTO collections (space_id, name, path, description, extensions, created, updated)
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+            params![space_id, name, path.to_string_lossy(), description, extensions_json],
+        );
+
+        match result {
+            Ok(_) => Ok(conn.last_insert_rowid()),
+            Err(Error::SqliteFailure(sqlite_err, _))
+                if sqlite_err.code == ErrorCode::ConstraintViolation =>
+            {
+                Err(KboltError::CollectionAlreadyExists {
+                    name: name.to_string(),
+                    space: space_name,
+                })
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn get_collection(&self, space_id: i64, name: &str) -> Result<CollectionRow> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, space_id, name, path, description, extensions, created, updated
+             FROM collections
+             WHERE space_id = ?1 AND name = ?2",
+        )?;
+
+        let result = stmt.query_row(params![space_id, name], decode_collection_row);
+        match result {
+            Ok(row) => Ok(row),
+            Err(Error::QueryReturnedNoRows) => Err(KboltError::CollectionNotFound {
+                name: name.to_string(),
+            }),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn list_collections(&self, space_id: Option<i64>) -> Result<Vec<CollectionRow>> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+
+        let (sql, params): (&str, Vec<i64>) = match space_id {
+            Some(id) => (
+                "SELECT id, space_id, name, path, description, extensions, created, updated
+                 FROM collections
+                 WHERE space_id = ?1
+                 ORDER BY name ASC",
+                vec![id],
+            ),
+            None => (
+                "SELECT id, space_id, name, path, description, extensions, created, updated
+                 FROM collections
+                 ORDER BY space_id ASC, name ASC",
+                Vec::new(),
+            ),
+        };
+
+        let mut stmt = conn.prepare(sql)?;
+        let rows = if params.is_empty() {
+            stmt.query_map([], decode_collection_row)?
+        } else {
+            stmt.query_map(params![params[0]], decode_collection_row)?
+        };
+        let collections = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(collections)
+    }
+}
+
+fn lookup_space_name(conn: &Connection, space_id: i64) -> Result<String> {
+    let result = conn.query_row(
+        "SELECT name FROM spaces WHERE id = ?1",
+        params![space_id],
+        |row| row.get::<_, String>(0),
+    );
+    match result {
+        Ok(name) => Ok(name),
+        Err(Error::QueryReturnedNoRows) => Err(KboltError::SpaceNotFound {
+            name: format!("id={space_id}"),
+        }),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn serialize_extensions(extensions: Option<&[String]>) -> Result<Option<String>> {
+    match extensions {
+        None => Ok(None),
+        Some(values) => serde_json::to_string(values)
+            .map(Some)
+            .map_err(|err| KboltError::Config(format!("failed to encode extensions: {err}"))),
+    }
+}
+
+fn deserialize_extensions(raw: Option<String>) -> Result<Option<Vec<String>>> {
+    match raw {
+        None => Ok(None),
+        Some(json) => serde_json::from_str::<Vec<String>>(&json)
+            .map(Some)
+            .map_err(|err| KboltError::Config(format!("failed to decode extensions: {err}"))),
+    }
+}
+
+fn decode_collection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CollectionRow> {
+    let raw_extensions: Option<String> = row.get(5)?;
+    let extensions = deserialize_extensions(raw_extensions).map_err(|err| {
+        Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+    Ok(CollectionRow {
+        id: row.get(0)?,
+        space_id: row.get(1)?,
+        name: row.get(2)?,
+        path: PathBuf::from(row.get::<_, String>(3)?),
+        description: row.get(4)?,
+        extensions,
+        created: row.get(6)?,
+        updated: row.get(7)?,
+    })
 }
 
 #[cfg(test)]
