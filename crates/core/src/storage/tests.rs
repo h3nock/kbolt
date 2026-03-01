@@ -1064,3 +1064,211 @@ fn reap_documents_returns_empty_when_no_documents_qualify() {
     let reaped = storage.reap_documents(7).expect("reap docs");
     assert!(reaped.is_empty());
 }
+
+#[test]
+fn insert_and_get_chunks_for_document() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/lib.rs",
+            "lib",
+            "hash-1",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc");
+
+    let inserts = vec![
+        super::ChunkInsert {
+            seq: 0,
+            offset: 0,
+            length: 100,
+            heading: Some("# Intro".to_string()),
+            kind: "section".to_string(),
+        },
+        super::ChunkInsert {
+            seq: 1,
+            offset: 100,
+            length: 80,
+            heading: Some("# Usage".to_string()),
+            kind: "section".to_string(),
+        },
+    ];
+
+    let ids = storage
+        .insert_chunks(doc_id, &inserts)
+        .expect("insert chunks");
+    assert_eq!(ids.len(), 2);
+
+    let chunks = storage
+        .get_chunks_for_document(doc_id)
+        .expect("get chunks for doc");
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks[0].seq, 0);
+    assert_eq!(chunks[0].offset, 0);
+    assert_eq!(chunks[0].length, 100);
+    assert_eq!(chunks[0].heading.as_deref(), Some("# Intro"));
+    assert_eq!(chunks[1].seq, 1);
+}
+
+#[test]
+fn delete_chunks_for_document_returns_deleted_ids() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/lib.rs",
+            "lib",
+            "hash-1",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc");
+
+    let inserts = vec![
+        super::ChunkInsert {
+            seq: 0,
+            offset: 0,
+            length: 100,
+            heading: None,
+            kind: "section".to_string(),
+        },
+        super::ChunkInsert {
+            seq: 1,
+            offset: 100,
+            length: 50,
+            heading: None,
+            kind: "section".to_string(),
+        },
+    ];
+    let inserted_ids = storage
+        .insert_chunks(doc_id, &inserts)
+        .expect("insert chunks");
+
+    let deleted_ids = storage
+        .delete_chunks_for_document(doc_id)
+        .expect("delete chunks");
+    assert_eq!(deleted_ids, inserted_ids);
+
+    let remaining = storage
+        .get_chunks_for_document(doc_id)
+        .expect("get chunks for doc");
+    assert!(remaining.is_empty());
+}
+
+#[test]
+fn get_chunks_by_id_returns_requested_chunks() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/lib.rs",
+            "lib",
+            "hash-1",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc");
+
+    let inserts = vec![
+        super::ChunkInsert {
+            seq: 0,
+            offset: 0,
+            length: 100,
+            heading: None,
+            kind: "section".to_string(),
+        },
+        super::ChunkInsert {
+            seq: 1,
+            offset: 100,
+            length: 50,
+            heading: None,
+            kind: "section".to_string(),
+        },
+    ];
+    let inserted_ids = storage
+        .insert_chunks(doc_id, &inserts)
+        .expect("insert chunks");
+
+    let fetched = storage
+        .get_chunks(&[inserted_ids[1], inserted_ids[0]])
+        .expect("get chunks by id");
+    assert_eq!(fetched.len(), 2);
+    assert_eq!(fetched[0].id, inserted_ids[0]);
+    assert_eq!(fetched[1].id, inserted_ids[1]);
+}
+
+#[test]
+fn chunk_methods_missing_document_return_not_found() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+
+    let inserts = vec![super::ChunkInsert {
+        seq: 0,
+        offset: 0,
+        length: 10,
+        heading: None,
+        kind: "section".to_string(),
+    }];
+
+    let insert_err = storage
+        .insert_chunks(99999, &inserts)
+        .expect_err("insert missing doc should fail");
+    match KboltError::from(insert_err) {
+        KboltError::DocumentNotFound { path } => assert_eq!(path, "id=99999"),
+        other => panic!("unexpected insert error: {other}"),
+    }
+
+    let list_err = storage
+        .get_chunks_for_document(99999)
+        .expect_err("list missing doc should fail");
+    match KboltError::from(list_err) {
+        KboltError::DocumentNotFound { path } => assert_eq!(path, "id=99999"),
+        other => panic!("unexpected list error: {other}"),
+    }
+
+    let delete_err = storage
+        .delete_chunks_for_document(99999)
+        .expect_err("delete missing doc should fail");
+    match KboltError::from(delete_err) {
+        KboltError::DocumentNotFound { path } => assert_eq!(path, "id=99999"),
+        other => panic!("unexpected delete error: {other}"),
+    }
+}
