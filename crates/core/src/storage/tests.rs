@@ -1564,3 +1564,46 @@ fn batch_clear_fts_dirty_clears_selected_documents_only() {
         .batch_clear_fts_dirty(&[])
         .expect("empty batch should be no-op");
 }
+
+#[test]
+fn cache_get_returns_none_for_missing_key() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+
+    let value = storage.cache_get("missing").expect("query missing key");
+    assert_eq!(value, None);
+}
+
+#[test]
+fn cache_set_upserts_value_by_key() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+
+    storage
+        .cache_set("query:abc", "first-value")
+        .expect("insert cache value");
+    let first = storage
+        .cache_get("query:abc")
+        .expect("read inserted value")
+        .expect("value should exist");
+    assert_eq!(first, "first-value");
+
+    storage
+        .cache_set("query:abc", "updated-value")
+        .expect("update cache value");
+    let updated = storage
+        .cache_get("query:abc")
+        .expect("read updated value")
+        .expect("updated value should exist");
+    assert_eq!(updated, "updated-value");
+
+    let conn = storage.db.lock().expect("lock db");
+    let rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM llm_cache WHERE key = 'query:abc'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count cache rows");
+    assert_eq!(rows, 1);
+}
