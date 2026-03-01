@@ -1272,3 +1272,179 @@ fn chunk_methods_missing_document_return_not_found() {
         other => panic!("unexpected delete error: {other}"),
     }
 }
+
+#[test]
+fn insert_count_and_delete_embeddings_by_model() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/lib.rs",
+            "lib",
+            "hash-1",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc");
+    let chunk_ids = storage
+        .insert_chunks(
+            doc_id,
+            &[
+                super::ChunkInsert {
+                    seq: 0,
+                    offset: 0,
+                    length: 100,
+                    heading: None,
+                    kind: "section".to_string(),
+                },
+                super::ChunkInsert {
+                    seq: 1,
+                    offset: 100,
+                    length: 50,
+                    heading: None,
+                    kind: "section".to_string(),
+                },
+            ],
+        )
+        .expect("insert chunks");
+
+    assert_eq!(storage.count_embeddings().expect("count embeddings"), 0);
+
+    storage
+        .insert_embeddings(&[
+            (chunk_ids[0], "model-a"),
+            (chunk_ids[1], "model-a"),
+            (chunk_ids[1], "model-b"),
+        ])
+        .expect("insert embeddings");
+
+    storage
+        .insert_embeddings(&[(chunk_ids[0], "model-a")])
+        .expect("idempotent upsert");
+
+    assert_eq!(storage.count_embeddings().expect("count embeddings"), 3);
+
+    let deleted_a = storage
+        .delete_embeddings_for_model("model-a")
+        .expect("delete model a");
+    assert_eq!(deleted_a, 2);
+    assert_eq!(storage.count_embeddings().expect("count embeddings"), 1);
+
+    let deleted_missing = storage
+        .delete_embeddings_for_model("missing-model")
+        .expect("delete missing model");
+    assert_eq!(deleted_missing, 0);
+}
+
+#[test]
+fn get_unembedded_chunks_filters_active_and_model_specific_backlog() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    let active_doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/active.rs",
+            "active",
+            "hash-active",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert active doc");
+    let inactive_doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/inactive.rs",
+            "inactive",
+            "hash-inactive",
+            "2026-03-01T10:01:00Z",
+        )
+        .expect("insert inactive doc");
+
+    let active_chunk_ids = storage
+        .insert_chunks(
+            active_doc_id,
+            &[
+                super::ChunkInsert {
+                    seq: 0,
+                    offset: 0,
+                    length: 100,
+                    heading: None,
+                    kind: "section".to_string(),
+                },
+                super::ChunkInsert {
+                    seq: 1,
+                    offset: 100,
+                    length: 50,
+                    heading: None,
+                    kind: "section".to_string(),
+                },
+            ],
+        )
+        .expect("insert active chunks");
+    let inactive_chunk_ids = storage
+        .insert_chunks(
+            inactive_doc_id,
+            &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 42,
+                heading: None,
+                kind: "section".to_string(),
+            }],
+        )
+        .expect("insert inactive chunk");
+
+    storage
+        .insert_embeddings(&[
+            (active_chunk_ids[0], "model-a"),
+            (active_chunk_ids[1], "model-b"),
+        ])
+        .expect("insert embeddings");
+    storage
+        .deactivate_document(inactive_doc_id)
+        .expect("deactivate second doc");
+
+    let backlog = storage
+        .get_unembedded_chunks("model-a", 10)
+        .expect("query backlog");
+    assert_eq!(backlog.len(), 1);
+    assert_eq!(backlog[0].chunk_id, active_chunk_ids[1]);
+    assert_eq!(backlog[0].doc_path, "src/active.rs");
+    assert_eq!(
+        backlog[0].collection_path,
+        std::path::PathBuf::from("/tmp/api")
+    );
+    assert_eq!(backlog[0].space_name, "work");
+    assert_eq!(backlog[0].offset, 100);
+    assert_eq!(backlog[0].length, 50);
+    assert_ne!(backlog[0].chunk_id, inactive_chunk_ids[0]);
+
+    let limited = storage
+        .get_unembedded_chunks("model-a", 1)
+        .expect("query limited backlog");
+    assert_eq!(limited.len(), 1);
+}
