@@ -8,8 +8,9 @@ license = "MIT"
 version = "0.1.0"
 
 [workspace.dependencies]
+dirs = "6.0"
 rusqlite = "0.33"
 serde = { version = "1.0", features = ["derive"] }
 tantivy = "0.24"
 thiserror = "2.0"
-
+toml = "0.9"
