@@ -623,6 +623,52 @@ fn list_collections_returns_all_or_space_scoped_collections() {
 }
 
 #[test]
+fn read_collection_ignore_returns_none_when_file_missing() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path);
+
+        let (space, content) = engine
+            .read_collection_ignore(Some("work"), "api")
+            .expect("read ignore file");
+        assert_eq!(space, "work");
+        assert_eq!(content, None);
+    });
+}
+
+#[test]
+fn read_collection_ignore_returns_file_contents() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path);
+
+        let ignore_path = engine
+            .config()
+            .config_dir
+            .join("ignores")
+            .join("work")
+            .join("api.ignore");
+        write_text_file(&ignore_path, "dist/\n*.tmp\n");
+
+        let (space, content) = engine
+            .read_collection_ignore(None, "api")
+            .expect("read ignore file");
+        assert_eq!(space, "work");
+        assert_eq!(content.as_deref(), Some("dist/\n*.tmp"));
+    });
+}
+
+#[test]
 fn list_files_returns_entries_and_applies_prefix_filter() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);

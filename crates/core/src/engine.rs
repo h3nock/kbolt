@@ -730,6 +730,33 @@ impl Engine {
         self.model_status_unlocked()
     }
 
+    pub fn read_collection_ignore(
+        &self,
+        space: Option<&str>,
+        collection: &str,
+    ) -> Result<(String, Option<String>)> {
+        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
+        let resolved_space = self.resolve_space_row(space, Some(collection))?;
+        self.storage
+            .get_collection(resolved_space.id, collection)?;
+
+        let path = collection_ignore_file_path(&self.config.config_dir, &resolved_space.name, collection);
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((resolved_space.name, None))
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        let trimmed = raw.trim_end_matches('\n').to_string();
+        if trimmed.trim().is_empty() {
+            return Ok((resolved_space.name, None));
+        }
+
+        Ok((resolved_space.name, Some(trimmed)))
+    }
+
     fn model_status_unlocked(&self) -> Result<ModelStatus> {
         models::status(&self.config.models, &self.model_dir())
     }
