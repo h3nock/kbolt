@@ -557,11 +557,7 @@ impl CliAdapter {
         offset: Option<usize>,
         limit: Option<usize>,
     ) -> Result<String> {
-        let locator = if identifier.trim_start().starts_with('#') {
-            Locator::DocId(identifier.to_string())
-        } else {
-            Locator::Path(identifier.to_string())
-        };
+        let locator = parse_cli_locator(identifier);
 
         let document = self.engine.get_document(GetRequest {
             locator,
@@ -593,13 +589,7 @@ impl CliAdapter {
     ) -> Result<String> {
         let locators = locators
             .iter()
-            .map(|item| {
-                if item.trim_start().starts_with('#') {
-                    Locator::DocId(item.to_string())
-                } else {
-                    Locator::Path(item.to_string())
-                }
-            })
+            .map(|item| parse_cli_locator(item))
             .collect::<Vec<_>>();
 
         let response = self.engine.multi_get(MultiGetRequest {
@@ -646,6 +636,16 @@ fn format_search_mode(mode: &SearchMode) -> &'static str {
         SearchMode::Keyword => "keyword",
         SearchMode::Semantic => "semantic",
     }
+}
+
+fn parse_cli_locator(raw: &str) -> Locator {
+    let trimmed = raw.trim();
+    if trimmed.contains('/') {
+        return Locator::Path(trimmed.to_string());
+    }
+
+    let docid = trimmed.trim_start_matches('#').to_string();
+    Locator::DocId(docid)
 }
 
 #[cfg(test)]
@@ -1624,6 +1624,15 @@ mod tests {
                 .expect("get by docid");
             assert!(output.contains("stale: true"), "unexpected output: {output}");
             assert!(output.contains("content:\nfn beta() {}"), "unexpected output: {output}");
+
+            let bare_docid = docid.trim_start_matches('#').to_string();
+            let bare_output = adapter
+                .get(Some("work"), &bare_docid, None, None)
+                .expect("get by bare docid");
+            assert!(
+                bare_output.contains("path: api/src/lib.rs"),
+                "unexpected output: {bare_output}"
+            );
         });
     }
 
