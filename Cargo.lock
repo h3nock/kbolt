@@ -518,6 +518,7 @@ dependencies = [
  "kbolt-types",
  "rusqlite",
  "serde",
+ "serde_json",
  "tempfile",
  "toml",
 ]
