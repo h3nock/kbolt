@@ -2,7 +2,7 @@ pub mod args;
 
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
-use kbolt_types::ActiveSpaceSource;
+use kbolt_types::{ActiveSpaceSource, AddCollectionRequest};
 
 pub struct CliAdapter {
     pub engine: Engine,
@@ -125,6 +125,27 @@ impl CliAdapter {
             ));
         }
         Ok(lines.join("\n"))
+    }
+
+    pub fn collection_add(
+        &self,
+        space: Option<&str>,
+        path: &std::path::Path,
+        name: Option<&str>,
+        description: Option<&str>,
+        extensions: Option<&[String]>,
+        no_index: bool,
+    ) -> Result<String> {
+        let added = self.engine.add_collection(AddCollectionRequest {
+            path: path.to_path_buf(),
+            space: space.map(ToString::to_string),
+            name: name.map(ToString::to_string),
+            description: description.map(ToString::to_string),
+            extensions: extensions.map(|items| items.to_vec()),
+            no_index,
+        })?;
+
+        Ok(format!("collection added: {}/{}", added.space, added.name))
     }
 
     pub fn collection_info(&self, space: Option<&str>, name: &str) -> Result<String> {
@@ -651,6 +672,47 @@ mod tests {
                 .expect_err("collection should be missing");
             assert!(
                 err.to_string().contains("collection not found"),
+                "unexpected error: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn collection_add_registers_collection_with_no_index() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let adapter = CliAdapter::new(engine);
+
+            let output = adapter
+                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .expect("add collection");
+            assert_eq!(output, "collection added: work/api");
+
+            let info = adapter
+                .collection_info(Some("work"), "api")
+                .expect("collection info");
+            assert!(info.contains("name: api"), "unexpected output: {info}");
+        });
+    }
+
+    #[test]
+    fn collection_add_without_no_index_surfaces_current_core_error() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let adapter = CliAdapter::new(engine);
+
+            let err = adapter
+                .collection_add(Some("work"), &collection_path, Some("api"), None, None, false)
+                .expect_err("collection add should fail without --no-index for now");
+            assert!(
+                err.to_string()
+                    .contains("automatic indexing on collection add is not wired yet"),
                 "unexpected error: {err}"
             );
         });

@@ -52,6 +52,23 @@ fn run() -> Result<()> {
             }
         },
         Command::Collection(collection) => match collection.command {
+            CollectionCommand::Add {
+                path,
+                name,
+                description,
+                extensions,
+                no_index,
+            } => {
+                let line = adapter.collection_add(
+                    cli.space.as_deref(),
+                    &path,
+                    name.as_deref(),
+                    description.as_deref(),
+                    extensions.as_deref(),
+                    no_index,
+                )?;
+                println!("{line}");
+            }
             CollectionCommand::List => {
                 let line = adapter.collection_list(cli.space.as_deref())?;
                 println!("{line}");

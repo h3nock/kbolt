@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -54,6 +56,17 @@ pub enum SpaceCommand {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum CollectionCommand {
+    Add {
+        path: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        extensions: Option<Vec<String>>,
+        #[arg(long)]
+        no_index: bool,
+    },
     List,
     Info { name: String },
     Describe { name: String, text: String },
@@ -63,6 +76,8 @@ pub enum CollectionCommand {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use clap::Parser;
 
     use super::{Cli, CollectionCommand, Command, SpaceCommand};
@@ -225,6 +240,39 @@ mod tests {
             Command::Collection(collection) => {
                 assert_eq!(collection.command, CollectionCommand::List)
             }
+            Command::Space(_) => panic!("unexpected space command"),
+        }
+    }
+
+    #[test]
+    fn parses_collection_add_with_options() {
+        let parsed = Cli::try_parse_from([
+            "kbolt",
+            "collection",
+            "add",
+            "/tmp/work-api",
+            "--name",
+            "api",
+            "--description",
+            "api docs",
+            "--extensions",
+            "rs,md",
+            "--no-index",
+        ])
+        .expect("parse cli");
+        assert_eq!(parsed.space, None);
+
+        match parsed.command {
+            Command::Collection(collection) => assert_eq!(
+                collection.command,
+                CollectionCommand::Add {
+                    path: PathBuf::from("/tmp/work-api"),
+                    name: Some("api".to_string()),
+                    description: Some("api docs".to_string()),
+                    extensions: Some(vec!["rs".to_string(), "md".to_string()]),
+                    no_index: true
+                }
+            ),
             Command::Space(_) => panic!("unexpected space command"),
         }
     }
