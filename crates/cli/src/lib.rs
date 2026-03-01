@@ -2,7 +2,7 @@ pub mod args;
 
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
-use kbolt_types::{ActiveSpaceSource, AddCollectionRequest, UpdateOptions};
+use kbolt_types::{ActiveSpaceSource, AddCollectionRequest, GetRequest, Locator, UpdateOptions};
 
 pub struct CliAdapter {
     pub engine: Engine,
@@ -445,6 +445,40 @@ impl CliAdapter {
         }
 
         Ok(lines.join("\n"))
+    }
+
+    pub fn get(
+        &self,
+        space: Option<&str>,
+        identifier: &str,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<String> {
+        let locator = if identifier.trim_start().starts_with('#') {
+            Locator::DocId(identifier.to_string())
+        } else {
+            Locator::Path(identifier.to_string())
+        };
+
+        let document = self.engine.get_document(GetRequest {
+            locator,
+            space: space.map(ToString::to_string),
+            offset,
+            limit,
+        })?;
+
+        Ok(format!(
+            "docid: {}\npath: {}\ntitle: {}\nspace: {}\ncollection: {}\nstale: {}\ntotal_lines: {}\nreturned_lines: {}\ncontent:\n{}",
+            document.docid,
+            document.path,
+            document.title,
+            document.space,
+            document.collection,
+            document.stale,
+            document.total_lines,
+            document.returned_lines,
+            document.content
+        ))
     }
 }
 
@@ -1253,6 +1287,86 @@ mod tests {
                 !output.contains("docs/guide.md"),
                 "unexpected output: {output}"
             );
+        });
+    }
+
+    #[test]
+    fn get_by_path_formats_sliced_document_fields() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            adapter
+                .space_add("work", None, false, &[])
+                .expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            adapter
+                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .expect("add collection");
+
+            fs::create_dir_all(collection_path.join("src")).expect("create src dir");
+            fs::write(
+                collection_path.join("src/lib.rs"),
+                "line-a\nline-b\nline-c\n",
+            )
+            .expect("write src");
+            adapter
+                .update(Some("work"), &["api".to_string()], true, false, false)
+                .expect("run update");
+
+            let output = adapter
+                .get(Some("work"), "api/src/lib.rs", Some(1), Some(1))
+                .expect("get sliced file");
+            assert!(output.contains("docid: #"), "unexpected output: {output}");
+            assert!(
+                output.contains("path: api/src/lib.rs"),
+                "unexpected output: {output}"
+            );
+            assert!(output.contains("stale: false"), "unexpected output: {output}");
+            assert!(output.contains("total_lines: 3"), "unexpected output: {output}");
+            assert!(
+                output.contains("returned_lines: 1"),
+                "unexpected output: {output}"
+            );
+            assert!(output.ends_with("line-b"), "unexpected output: {output}");
+        });
+    }
+
+    #[test]
+    fn get_by_docid_reports_stale_after_file_change() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            adapter
+                .space_add("work", None, false, &[])
+                .expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            adapter
+                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .expect("add collection");
+
+            fs::create_dir_all(collection_path.join("src")).expect("create src dir");
+            let file_path = collection_path.join("src/lib.rs");
+            fs::write(&file_path, "fn alpha() {}\n").expect("write src");
+            adapter
+                .update(Some("work"), &["api".to_string()], true, false, false)
+                .expect("run update");
+
+            let files = adapter
+                .engine
+                .list_files(Some("work"), "api", None)
+                .expect("list files");
+            let docid = files[0].docid.clone();
+
+            fs::write(&file_path, "fn beta() {}\n").expect("modify src");
+            let output = adapter
+                .get(Some("work"), &docid, None, None)
+                .expect("get by docid");
+            assert!(output.contains("stale: true"), "unexpected output: {output}");
+            assert!(output.contains("content:\nfn beta() {}"), "unexpected output: {output}");
         });
     }
 

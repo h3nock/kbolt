@@ -118,6 +118,15 @@ fn run() -> Result<()> {
             )?;
             println!("{line}");
         }
+        Command::Get(get) => {
+            let line = adapter.get(
+                cli.space.as_deref(),
+                &get.identifier,
+                get.offset,
+                get.limit,
+            )?;
+            println!("{line}");
+        }
     }
 
     Ok(())
