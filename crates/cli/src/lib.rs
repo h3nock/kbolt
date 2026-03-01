@@ -699,6 +699,8 @@ mod tests {
     use kbolt_core::engine::Engine;
     use kbolt_types::AddCollectionRequest;
 
+    const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";
+
     struct EnvRestore {
         home: Option<OsString>,
         config_home: Option<OsString>,
@@ -1074,6 +1076,22 @@ mod tests {
         path
     }
 
+    fn json_escape(value: &str) -> String {
+        value.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+
+    fn seed_model_artifact(model_root: &PathBuf, role: &str, model_id: &str, payload: &[u8]) {
+        let role_dir = model_root.join(role);
+        fs::create_dir_all(&role_dir).expect("create model role dir");
+        fs::write(role_dir.join("model.bin"), payload).expect("write model payload");
+
+        let manifest = format!(
+            "{{\n  \"provider\": \"huggingface\",\n  \"id\": \"{}\",\n  \"revision\": null\n}}\n",
+            json_escape(model_id)
+        );
+        fs::write(role_dir.join(MODEL_MANIFEST_FILENAME), manifest).expect("write model manifest");
+    }
+
     #[test]
     fn collection_list_reports_none_when_empty() {
         with_isolated_xdg_dirs(|| {
@@ -1357,16 +1375,12 @@ mod tests {
             let adapter = CliAdapter::new(engine);
             let model_dir = adapter.engine.config().cache_dir.join("models");
 
-            fs::create_dir_all(model_dir.join("embedder")).expect("create embedder dir");
-            fs::create_dir_all(model_dir.join("reranker")).expect("create reranker dir");
-            fs::create_dir_all(model_dir.join("expander")).expect("create expander dir");
-            fs::write(model_dir.join("embedder/model.bin"), b"e").expect("seed embedder");
-            fs::write(model_dir.join("reranker/model.bin"), b"r").expect("seed reranker");
-            fs::write(model_dir.join("expander/model.bin"), b"x").expect("seed expander");
-
             let embed_model = adapter.engine.config().models.embedder.id.clone();
             let reranker_model = adapter.engine.config().models.reranker.id.clone();
             let expander_model = adapter.engine.config().models.expander.id.clone();
+            seed_model_artifact(&model_dir, "embedder", &embed_model, b"e");
+            seed_model_artifact(&model_dir, "reranker", &reranker_model, b"r");
+            seed_model_artifact(&model_dir, "expander", &expander_model, b"x");
 
             let output = adapter.models_pull().expect("pull models");
             assert!(output.contains("downloaded: 0"), "unexpected output: {output}");
