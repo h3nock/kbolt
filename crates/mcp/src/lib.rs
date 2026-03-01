@@ -2,7 +2,7 @@ use kbolt_core::engine::Engine;
 use kbolt_core::Result;
 use kbolt_types::{
     CollectionInfo, DocumentResponse, FileEntry, GetRequest, MultiGetRequest, MultiGetResponse,
-    SpaceInfo, StatusResponse, UpdateOptions, UpdateReport,
+    ModelStatus, SpaceInfo, StatusResponse, UpdateOptions, UpdateReport,
 };
 
 pub struct McpAdapter {
@@ -45,6 +45,10 @@ impl McpAdapter {
 
     pub fn multi_get(&self, req: MultiGetRequest) -> Result<MultiGetResponse> {
         self.engine.multi_get(req)
+    }
+
+    pub fn model_status(&self) -> Result<ModelStatus> {
+        self.engine.model_status()
     }
 }
 
@@ -313,6 +317,22 @@ mod tests {
             assert_eq!(response.documents.len(), 2);
             assert_eq!(response.omitted.len(), 1);
             assert_eq!(response.resolved_count, 2);
+        });
+    }
+
+    #[test]
+    fn model_status_wrapper_exposes_configured_models() {
+        with_isolated_xdg_dirs(|| {
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = McpAdapter::new(engine);
+
+            let status = adapter.model_status().expect("read model status");
+            assert!(!status.embedder.name.is_empty());
+            assert!(!status.reranker.name.is_empty());
+            assert!(!status.expander.name.is_empty());
+            assert!(!status.embedder.downloaded);
+            assert!(!status.reranker.downloaded);
+            assert!(!status.expander.downloaded);
         });
     }
 }
