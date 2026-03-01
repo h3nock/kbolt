@@ -355,6 +355,107 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let collections = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collections)
     }
+
+    pub fn delete_collection(&self, space_id: i64, name: &str) -> Result<()> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+        let _space_name = lookup_space_name(&conn, space_id)?;
+
+        let deleted = conn.execute(
+            "DELETE FROM collections WHERE space_id = ?1 AND name = ?2",
+            params![space_id, name],
+        )?;
+
+        if deleted == 0 {
+            return Err(KboltError::CollectionNotFound {
+                name: name.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn rename_collection(&self, space_id: i64, old: &str, new: &str) -> Result<()> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+        let space_name = lookup_space_name(&conn, space_id)?;
+        let result = conn.execute(
+            "UPDATE collections
+             SET name = ?1, updated = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+             WHERE space_id = ?2 AND name = ?3",
+            params![new, space_id, old],
+        );
+
+        match result {
+            Ok(0) => Err(KboltError::CollectionNotFound {
+                name: old.to_string(),
+            }),
+            Ok(_) => Ok(()),
+            Err(Error::SqliteFailure(sqlite_err, _))
+                if sqlite_err.code == ErrorCode::ConstraintViolation =>
+            {
+                Err(KboltError::CollectionAlreadyExists {
+                    name: new.to_string(),
+                    space: space_name,
+                })
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn update_collection_description(
+        &self,
+        space_id: i64,
+        name: &str,
+        desc: &str,
+    ) -> Result<()> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+        let _space_name = lookup_space_name(&conn, space_id)?;
+
+        let updated = conn.execute(
+            "UPDATE collections
+             SET description = ?1, updated = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+             WHERE space_id = ?2 AND name = ?3",
+            params![desc, space_id, name],
+        )?;
+
+        if updated == 0 {
+            return Err(KboltError::CollectionNotFound {
+                name: name.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn update_collection_timestamp(&self, collection_id: i64) -> Result<()> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+
+        let updated = conn.execute(
+            "UPDATE collections
+             SET updated = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+             WHERE id = ?1",
+            params![collection_id],
+        )?;
+
+        if updated == 0 {
+            return Err(KboltError::CollectionNotFound {
+                name: format!("id={collection_id}"),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 fn lookup_space_name(conn: &Connection, space_id: i64) -> Result<String> {
