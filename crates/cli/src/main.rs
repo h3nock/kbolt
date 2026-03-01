@@ -3,6 +3,8 @@ use kbolt_cli::args::{Cli, CollectionCommand, Command, ModelsCommand, SpaceComma
 use kbolt_cli::CliAdapter;
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
+use kbolt_mcp::stdio;
+use kbolt_mcp::McpAdapter;
 
 fn main() {
     if let Err(err) = run() {
@@ -13,6 +15,13 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    if matches!(cli.command, Command::Mcp) {
+        let engine = Engine::new(None)?;
+        let adapter = McpAdapter::new(engine);
+        return stdio::run_stdio(&adapter);
+    }
+
     let engine = Engine::new(None)?;
     let mut adapter = CliAdapter::new(engine);
 
@@ -101,6 +110,7 @@ fn run() -> Result<()> {
                 println!("{line}");
             }
         },
+        Command::Mcp => unreachable!("mcp command handled before adapter setup"),
         Command::Search(search) => {
             let line = adapter.search(
                 cli.space.as_deref(),
