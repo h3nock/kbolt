@@ -420,13 +420,50 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             "UPDATE spaces SET name = ?1 WHERE name = ?2",
             params![new, old],
         );
+        drop(conn);
 
         match result {
             Ok(0) => Err(KboltError::SpaceNotFound {
                 name: old.to_string(),
             }
             .into()),
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                if let Err(rename_err) = self.rename_space_artifacts(old, new) {
+                    let rollback = self
+                        .db
+                        .lock()
+                        .map_err(|_| CoreError::poisoned("database"))?
+                        .execute(
+                            "UPDATE spaces SET name = ?1 WHERE name = ?2",
+                            params![old, new],
+                        );
+
+                    if let Err(rollback_err) = rollback {
+                        return Err(CoreError::Internal(format!(
+                            "failed to rename space artifacts from '{old}' to '{new}': {rename_err}; rollback failed: {rollback_err}"
+                        )));
+                    }
+
+                    return Err(rename_err);
+                }
+
+                self.unload_space(old)?;
+                if let Err(open_err) = self.open_space(new) {
+                    let _ = self.rename_space_artifacts(new, old);
+                    let _ = self
+                        .db
+                        .lock()
+                        .map_err(|_| CoreError::poisoned("database"))?
+                        .execute(
+                            "UPDATE spaces SET name = ?1 WHERE name = ?2",
+                            params![old, new],
+                        );
+                    let _ = self.open_space(old);
+                    return Err(open_err);
+                }
+
+                Ok(())
+            }
             Err(Error::SqliteFailure(sqlite_err, _))
                 if sqlite_err.code == ErrorCode::ConstraintViolation =>
             {
@@ -1231,6 +1268,27 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         if space_root.exists() {
             std::fs::remove_dir_all(space_root)?;
         }
+        Ok(())
+    }
+
+    fn rename_space_artifacts(&self, old: &str, new: &str) -> Result<()> {
+        let old_root = self.space_root_path(old);
+        let new_root = self.space_root_path(new);
+        if !old_root.exists() {
+            return Ok(());
+        }
+
+        if new_root.exists() {
+            return Err(CoreError::Internal(format!(
+                "cannot rename space artifacts: destination already exists: {}",
+                new_root.display()
+            )));
+        }
+
+        if let Some(parent) = new_root.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(old_root, new_root)?;
         Ok(())
     }
 
