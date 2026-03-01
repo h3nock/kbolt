@@ -943,6 +943,41 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         conn.execute(&sql, params_from_iter(doc_ids.iter()))?;
         Ok(())
     }
+
+    pub fn cache_get(&self, key: &str) -> Result<Option<String>> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let value = conn.query_row(
+            "SELECT value FROM llm_cache WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        );
+        match value {
+            Ok(value) => Ok(Some(value)),
+            Err(Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn cache_set(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        conn.execute(
+            "INSERT INTO llm_cache (key, value, created)
+             VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+             ON CONFLICT(key) DO UPDATE SET
+               value = excluded.value,
+               created = excluded.created",
+            params![key, value],
+        )?;
+        Ok(())
+    }
 }
 
 fn lookup_space_name(conn: &Connection, space_id: i64) -> Result<String> {
