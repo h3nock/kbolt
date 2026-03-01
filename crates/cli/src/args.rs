@@ -36,6 +36,8 @@ pub enum SpaceCommand {
         name: String,
         #[arg(long)]
         description: Option<String>,
+        #[arg(long)]
+        strict: bool,
         dirs: Vec<PathBuf>,
     },
     Describe {
@@ -107,6 +109,7 @@ mod tests {
                 SpaceCommand::Add {
                     name: "work".to_string(),
                     description: Some("work docs".to_string()),
+                    strict: false,
                     dirs: vec![]
                 }
             ),
@@ -133,10 +136,31 @@ mod tests {
                 SpaceCommand::Add {
                     name: "work".to_string(),
                     description: None,
+                    strict: false,
                     dirs: vec![
                         PathBuf::from("/tmp/work-api"),
                         PathBuf::from("/tmp/work-wiki"),
                     ]
+                }
+            ),
+            Command::Collection(_) => panic!("unexpected collection command"),
+        }
+    }
+
+    #[test]
+    fn parses_space_add_with_strict() {
+        let parsed = Cli::try_parse_from(["kbolt", "space", "add", "work", "--strict", "/tmp/work-api"])
+            .expect("parse cli");
+        assert_eq!(parsed.space, None);
+
+        match parsed.command {
+            Command::Space(space) => assert_eq!(
+                space.command,
+                SpaceCommand::Add {
+                    name: "work".to_string(),
+                    description: None,
+                    strict: true,
+                    dirs: vec![PathBuf::from("/tmp/work-api")]
                 }
             ),
             Command::Collection(_) => panic!("unexpected collection command"),

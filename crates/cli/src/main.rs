@@ -21,9 +21,10 @@ fn run() -> Result<()> {
             SpaceCommand::Add {
                 name,
                 description,
+                strict,
                 dirs,
             } => {
-                let line = adapter.space_add(&name, description.as_deref(), &dirs)?;
+                let line = adapter.space_add(&name, description.as_deref(), strict, &dirs)?;
                 println!("{line}");
             }
             SpaceCommand::Describe { name, text } => {

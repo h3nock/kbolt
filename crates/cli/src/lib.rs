@@ -17,8 +17,47 @@ impl CliAdapter {
         &self,
         name: &str,
         description: Option<&str>,
+        strict: bool,
         dirs: &[std::path::PathBuf],
     ) -> Result<String> {
+        if strict {
+            use std::collections::HashSet;
+
+            let mut validation_errors = Vec::new();
+            let mut derived_names = HashSet::new();
+            for dir in dirs {
+                if !dir.is_absolute() || !dir.is_dir() {
+                    validation_errors.push(format!("- {} -> invalid path", dir.display()));
+                    continue;
+                }
+
+                let collection_name = dir.file_name().and_then(|item| item.to_str());
+                match collection_name {
+                    Some(name) => {
+                        if !derived_names.insert(name.to_string()) {
+                            validation_errors.push(format!(
+                                "- {} -> duplicate derived collection name '{name}'",
+                                dir.display()
+                            ));
+                        }
+                    }
+                    None => validation_errors.push(format!(
+                        "- {} -> cannot derive collection name from path",
+                        dir.display()
+                    )),
+                }
+            }
+
+            if !validation_errors.is_empty() {
+                let mut lines = Vec::new();
+                lines.push(
+                    "strict mode aborted: one or more directories are invalid".to_string(),
+                );
+                lines.extend(validation_errors);
+                return Err(kbolt_types::KboltError::Internal(lines.join("\n")).into());
+            }
+        }
+
         let added = self.engine.add_space(name, description)?;
         let description = added.description.unwrap_or_default();
         let suffix = if description.is_empty() {
@@ -55,7 +94,19 @@ impl CliAdapter {
                     info.space,
                     info.name
                 )),
-                Err(err) => failures.push(format!("- {} -> {}", dir.display(), err)),
+                Err(err) => {
+                    if strict {
+                        let rollback_result = self.engine.remove_space(name);
+                        return match rollback_result {
+                            Ok(()) => Err(err),
+                            Err(rollback_err) => Err(kbolt_types::KboltError::Internal(format!(
+                                "strict mode rollback failed: add error: {err}; rollback error: {rollback_err}"
+                            ))
+                            .into()),
+                        };
+                    }
+                    failures.push(format!("- {} -> {}", dir.display(), err));
+                }
             }
         }
 
@@ -422,7 +473,9 @@ mod tests {
             let engine = Engine::new(None).expect("create engine");
             let adapter = CliAdapter::new(engine);
 
-            let output = adapter.space_add("work", None, &[]).expect("add space");
+            let output = adapter
+                .space_add("work", None, false, &[])
+                .expect("add space");
             assert_eq!(output, "space added: work");
 
             let info = adapter.space_info("work").expect("space info");
@@ -437,7 +490,7 @@ mod tests {
             let adapter = CliAdapter::new(engine);
 
             let output = adapter
-                .space_add("work", Some("work docs"), &[])
+                .space_add("work", Some("work docs"), false, &[])
                 .expect("add space");
             assert_eq!(output, "space added: work - work docs");
         });
@@ -460,6 +513,7 @@ mod tests {
                 .space_add(
                     "work",
                     Some("work docs"),
+                    false,
                     &[valid_api.clone(), missing.clone(), valid_wiki.clone()],
                 )
                 .expect("add space with dirs");
@@ -483,12 +537,75 @@ mod tests {
     }
 
     #[test]
+    fn space_add_with_dirs_strict_aborts_without_side_effects() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            let valid_api = root.path().join("api");
+            let missing = root.path().join("missing");
+            fs::create_dir_all(&valid_api).expect("create api dir");
+
+            let err = adapter
+                .space_add(
+                    "work",
+                    Some("work docs"),
+                    true,
+                    &[valid_api.clone(), missing.clone()],
+                )
+                .expect_err("strict mode should fail");
+            assert!(
+                err.to_string()
+                    .contains("strict mode aborted: one or more directories are invalid"),
+                "unexpected error: {err}"
+            );
+
+            let missing_space = adapter
+                .space_info("work")
+                .expect_err("space should not be created");
+            assert!(
+                missing_space.to_string().contains("space not found"),
+                "unexpected error: {missing_space}"
+            );
+        });
+    }
+
+    #[test]
+    fn space_add_with_dirs_strict_succeeds_when_all_valid() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            let valid_api = root.path().join("api");
+            let valid_wiki = root.path().join("wiki");
+            fs::create_dir_all(&valid_api).expect("create api dir");
+            fs::create_dir_all(&valid_wiki).expect("create wiki dir");
+
+            let output = adapter
+                .space_add(
+                    "work",
+                    Some("work docs"),
+                    true,
+                    &[valid_api.clone(), valid_wiki.clone()],
+                )
+                .expect("strict mode should succeed");
+            assert!(output.contains("collections added: 2"), "unexpected output: {output}");
+            assert!(
+                !output.contains("collections failed:"),
+                "unexpected output: {output}"
+            );
+        });
+    }
+
+    #[test]
     fn space_describe_updates_space_description() {
         with_isolated_xdg_dirs(|| {
             let engine = Engine::new(None).expect("create engine");
             let adapter = CliAdapter::new(engine);
             adapter
-                .space_add("work", Some("old docs"), &[])
+                .space_add("work", Some("old docs"), false, &[])
                 .expect("add work space");
 
             let output = adapter
@@ -509,7 +626,9 @@ mod tests {
         with_isolated_xdg_dirs(|| {
             let engine = Engine::new(None).expect("create engine");
             let adapter = CliAdapter::new(engine);
-            adapter.space_add("work", None, &[]).expect("add work");
+            adapter
+                .space_add("work", None, false, &[])
+                .expect("add work");
 
             let output = adapter
                 .space_rename("work", "team")
@@ -526,7 +645,9 @@ mod tests {
         with_isolated_xdg_dirs(|| {
             let engine = Engine::new(None).expect("create engine");
             let adapter = CliAdapter::new(engine);
-            adapter.space_add("work", None, &[]).expect("add work");
+            adapter
+                .space_add("work", None, false, &[])
+                .expect("add work");
 
             let output = adapter.space_remove("work").expect("remove work");
             assert_eq!(output, "space removed: work");
