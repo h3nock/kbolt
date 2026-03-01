@@ -176,6 +176,85 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let spaces = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(spaces)
     }
+
+    pub fn delete_space(&self, name: &str) -> Result<()> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+
+        if name == DEFAULT_SPACE_NAME {
+            let affected = conn.execute(
+                "DELETE FROM collections
+                 WHERE space_id = (SELECT id FROM spaces WHERE name = ?1)",
+                params![name],
+            )?;
+            let _ = affected;
+            return Ok(());
+        }
+
+        let deleted = conn.execute("DELETE FROM spaces WHERE name = ?1", params![name])?;
+        if deleted == 0 {
+            return Err(KboltError::SpaceNotFound {
+                name: name.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn rename_space(&self, old: &str, new: &str) -> Result<()> {
+        if old == DEFAULT_SPACE_NAME {
+            return Err(KboltError::Config(
+                "cannot rename reserved space: default".to_string(),
+            ));
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+
+        let result = conn.execute(
+            "UPDATE spaces SET name = ?1 WHERE name = ?2",
+            params![new, old],
+        );
+
+        match result {
+            Ok(0) => Err(KboltError::SpaceNotFound {
+                name: old.to_string(),
+            }),
+            Ok(_) => Ok(()),
+            Err(Error::SqliteFailure(sqlite_err, _))
+                if sqlite_err.code == ErrorCode::ConstraintViolation =>
+            {
+                Err(KboltError::SpaceAlreadyExists {
+                    name: new.to_string(),
+                })
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn update_space_description(&self, name: &str, description: &str) -> Result<()> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| KboltError::Config("database mutex poisoned".to_string()))?;
+
+        let updated = conn.execute(
+            "UPDATE spaces SET description = ?1 WHERE name = ?2",
+            params![description, name],
+        )?;
+
+        if updated == 0 {
+            return Err(KboltError::SpaceNotFound {
+                name: name.to_string(),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
