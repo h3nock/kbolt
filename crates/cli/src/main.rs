@@ -64,6 +64,10 @@ fn run() -> Result<()> {
                 let line = adapter.collection_describe(cli.space.as_deref(), &name, &text)?;
                 println!("{line}");
             }
+            CollectionCommand::Rename { old, new } => {
+                let line = adapter.collection_rename(cli.space.as_deref(), &old, &new)?;
+                println!("{line}");
+            }
         },
     }
 

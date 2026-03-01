@@ -163,6 +163,11 @@ impl CliAdapter {
         self.engine.describe_collection(space, name, text)?;
         Ok(format!("collection description updated: {name}"))
     }
+
+    pub fn collection_rename(&self, space: Option<&str>, old: &str, new: &str) -> Result<String> {
+        self.engine.rename_collection(space, old, new)?;
+        Ok(format!("collection renamed: {old} -> {new}"))
+    }
 }
 
 #[cfg(test)]
@@ -576,6 +581,38 @@ mod tests {
                 info.contains("description: new docs"),
                 "unexpected output: {info}"
             );
+        });
+    }
+
+    #[test]
+    fn collection_rename_updates_collection_name() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: collection_path,
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add work collection");
+
+            let adapter = CliAdapter::new(engine);
+            let output = adapter
+                .collection_rename(Some("work"), "api", "backend")
+                .expect("rename collection");
+            assert_eq!(output, "collection renamed: api -> backend");
+
+            let info = adapter
+                .collection_info(Some("work"), "backend")
+                .expect("collection info");
+            assert!(info.contains("name: backend"), "unexpected output: {info}");
         });
     }
 }
