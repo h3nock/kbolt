@@ -364,3 +364,216 @@ fn get_collection_missing_name_returns_not_found() {
         other => panic!("unexpected error: {other}"),
     }
 }
+
+#[test]
+fn delete_collection_removes_entry() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    storage
+        .delete_collection(space_id, "api")
+        .expect("delete collection");
+
+    let err = storage
+        .get_collection(space_id, "api")
+        .expect_err("collection should not exist");
+    match err {
+        KboltError::CollectionNotFound { name } => assert_eq!(name, "api"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn delete_collection_missing_name_returns_not_found() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+
+    let err = storage
+        .delete_collection(space_id, "missing")
+        .expect_err("missing collection should fail");
+    match err {
+        KboltError::CollectionNotFound { name } => assert_eq!(name, "missing"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn rename_collection_updates_name() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    storage
+        .rename_collection(space_id, "api", "backend")
+        .expect("rename collection");
+
+    let renamed = storage
+        .get_collection(space_id, "backend")
+        .expect("get renamed collection");
+    assert_eq!(renamed.name, "backend");
+    let err = storage
+        .get_collection(space_id, "api")
+        .expect_err("old name should not exist");
+    match err {
+        KboltError::CollectionNotFound { name } => assert_eq!(name, "api"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn rename_collection_to_existing_name_returns_already_exists() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create api");
+    storage
+        .create_collection(
+            space_id,
+            "backend",
+            std::path::Path::new("/tmp/backend"),
+            None,
+            None,
+        )
+        .expect("create backend");
+
+    let err = storage
+        .rename_collection(space_id, "api", "backend")
+        .expect_err("rename duplicate should fail");
+    match err {
+        KboltError::CollectionAlreadyExists { name, space } => {
+            assert_eq!(name, "backend");
+            assert_eq!(space, "work");
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn update_collection_description_persists_value() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    storage
+        .update_collection_description(space_id, "api", "API docs")
+        .expect("update description");
+
+    let updated = storage
+        .get_collection(space_id, "api")
+        .expect("get updated collection");
+    assert_eq!(updated.description.as_deref(), Some("API docs"));
+}
+
+#[test]
+fn update_collection_description_missing_name_returns_not_found() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+
+    let err = storage
+        .update_collection_description(space_id, "missing", "desc")
+        .expect_err("missing collection should fail");
+    match err {
+        KboltError::CollectionNotFound { name } => assert_eq!(name, "missing"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn update_collection_timestamp_refreshes_updated_column() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    {
+        let conn = storage.db.lock().expect("lock db");
+        conn.execute(
+            "UPDATE collections SET updated = '2000-01-01T00:00:00Z' WHERE id = ?1",
+            [collection_id],
+        )
+        .expect("set old timestamp");
+    }
+
+    storage
+        .update_collection_timestamp(collection_id)
+        .expect("update timestamp");
+
+    let refreshed = storage
+        .get_collection(space_id, "api")
+        .expect("get collection");
+    assert_ne!(refreshed.updated, "2000-01-01T00:00:00Z");
+}
+
+#[test]
+fn update_collection_timestamp_missing_collection_returns_not_found() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+
+    let err = storage
+        .update_collection_timestamp(99999)
+        .expect_err("missing collection should fail");
+    match err {
+        KboltError::CollectionNotFound { name } => assert_eq!(name, "id=99999"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
