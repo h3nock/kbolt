@@ -1,6 +1,7 @@
+pub mod args;
+
 use kbolt_core::engine::Engine;
 
-#[derive(Debug)]
 pub struct CliAdapter {
     pub engine: Engine,
 }
