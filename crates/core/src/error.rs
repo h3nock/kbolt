@@ -18,6 +18,9 @@ pub enum CoreError {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("tantivy error: {0}")]
+    Tantivy(#[from] tantivy::TantivyError),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -41,6 +44,7 @@ impl From<CoreError> for KboltError {
                 KboltError::Config(format!("failed to serialize config: {err}"))
             }
             CoreError::Json(err) => KboltError::Internal(format!("json error: {err}")),
+            CoreError::Tantivy(err) => KboltError::Tantivy(err.to_string()),
             CoreError::Io(err) => KboltError::Io(err),
             CoreError::Internal(msg) => KboltError::Internal(msg),
         }
