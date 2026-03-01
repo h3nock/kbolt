@@ -1,5 +1,7 @@
+use fs2::FileExt;
 use tempfile::tempdir;
 use std::ffi::OsString;
+use std::fs::OpenOptions;
 use std::sync::{Mutex, OnceLock};
 
 use crate::config::{Config, ModelConfig, ReapingConfig};
@@ -1382,6 +1384,65 @@ fn update_dry_run_reports_changes_without_writing() {
             .list_documents(collection.id, false)
             .expect("list all documents");
         assert!(docs.is_empty(), "dry run should not persist documents");
+    });
+}
+
+#[test]
+fn update_creates_global_lock_file() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+        write_text_file(&work_path.join("src/lib.rs"), "fn alpha() {}\n");
+
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("run update");
+
+        let lock_path = engine.config().cache_dir.join("kbolt.lock");
+        assert!(lock_path.exists(), "expected lock file at {}", lock_path.display());
+    });
+}
+
+#[test]
+fn update_fails_fast_when_global_lock_is_unavailable() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+        write_text_file(&work_path.join("src/lib.rs"), "fn alpha() {}\n");
+
+        let lock_path = engine.config().cache_dir.join("kbolt.lock");
+        std::fs::create_dir_all(&engine.config().cache_dir).expect("create cache dir");
+        let holder = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .expect("open lock file");
+        FileExt::try_lock_exclusive(&holder).expect("acquire lock in test");
+
+        let err = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect_err("update should fail while lock is held");
+        match KboltError::from(err) {
+            KboltError::Internal(message) => {
+                assert!(
+                    message.contains("Another kbolt process is active. Try again shortly."),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     });
 }
 

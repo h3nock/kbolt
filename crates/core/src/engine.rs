@@ -4,6 +4,7 @@ use std::time::{Instant, UNIX_EPOCH};
 
 use crate::config;
 use crate::config::Config;
+use crate::lock::{LockMode, OperationLock};
 use crate::storage::{ChunkInsert, CollectionRow, DocumentRow, SpaceResolution, TantivyEntry};
 use crate::storage::Storage;
 use crate::Result;
@@ -566,6 +567,7 @@ impl Engine {
     }
 
     pub fn update(&self, options: UpdateOptions) -> Result<UpdateReport> {
+        let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
         let started = Instant::now();
         let mut report = UpdateReport {
             scanned: 0,
@@ -613,6 +615,7 @@ impl Engine {
     }
 
     pub fn status(&self, space: Option<&str>) -> Result<StatusResponse> {
+        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let (spaces, totals_scope) = if let Some(space_name) = space {
             let resolved = self.resolve_space_row(Some(space_name), None)?;
             (vec![resolved.clone()], Some(resolved.id))
@@ -739,6 +742,10 @@ impl Engine {
 
     pub fn storage(&self) -> &Storage {
         &self.storage
+    }
+
+    fn acquire_operation_lock(&self, mode: LockMode) -> Result<OperationLock> {
+        OperationLock::acquire(&self.config.cache_dir, mode)
     }
 
     fn build_space_info(&self, space: &crate::storage::SpaceRow) -> Result<SpaceInfo> {
