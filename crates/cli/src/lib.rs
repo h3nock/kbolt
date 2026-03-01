@@ -106,17 +106,39 @@ impl CliAdapter {
             space.name, space.collection_count, space.document_count, space.chunk_count, space.created
         ))
     }
+
+    pub fn collection_list(&self, space: Option<&str>) -> Result<String> {
+        let collections = self.engine.list_collections(space)?;
+        let mut lines = Vec::with_capacity(collections.len() + 1);
+        lines.push("collections:".to_string());
+        if collections.is_empty() {
+            lines.push("- none".to_string());
+            return Ok(lines.join("\n"));
+        }
+
+        for collection in collections {
+            lines.push(format!(
+                "- {}/{} ({})",
+                collection.space,
+                collection.name,
+                collection.path.display()
+            ));
+        }
+        Ok(lines.join("\n"))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
     use std::sync::{Mutex, OnceLock};
+    use std::{fs, path::PathBuf};
 
     use tempfile::tempdir;
 
     use super::CliAdapter;
     use kbolt_core::engine::Engine;
+    use kbolt_types::AddCollectionRequest;
 
     struct EnvRestore {
         home: Option<OsString>,
@@ -375,6 +397,77 @@ mod tests {
                 info.contains("name: default"),
                 "unexpected output: {info}"
             );
+        });
+    }
+
+    fn new_collection_dir(root: &PathBuf, name: &str) -> PathBuf {
+        let path = root.join(name);
+        fs::create_dir_all(&path).expect("create collection directory");
+        path
+    }
+
+    #[test]
+    fn collection_list_reports_none_when_empty() {
+        with_isolated_xdg_dirs(|| {
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            let output = adapter.collection_list(None).expect("list collections");
+            assert_eq!(output, "collections:\n- none");
+        });
+    }
+
+    #[test]
+    fn collection_list_supports_space_scoping() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+            engine.add_space("notes", None).expect("add notes");
+
+            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: work_path.clone(),
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add work collection");
+
+            let notes_path = new_collection_dir(&root.path().to_path_buf(), "notes-wiki");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: notes_path.clone(),
+                    space: Some("notes".to_string()),
+                    name: Some("wiki".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add notes collection");
+
+            let adapter = CliAdapter::new(engine);
+
+            let scoped = adapter
+                .collection_list(Some("work"))
+                .expect("list scoped collections");
+            assert!(
+                scoped.contains("- work/api"),
+                "unexpected scoped output: {scoped}"
+            );
+            assert!(
+                !scoped.contains("notes/wiki"),
+                "unexpected scoped output: {scoped}"
+            );
+
+            let all = adapter
+                .collection_list(None)
+                .expect("list all collections");
+            assert!(all.contains("- work/api"), "unexpected all output: {all}");
+            assert!(all.contains("- notes/wiki"), "unexpected all output: {all}");
         });
     }
 }

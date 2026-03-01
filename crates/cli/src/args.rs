@@ -13,12 +13,19 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Space(SpaceArgs),
+    Collection(CollectionArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct SpaceArgs {
     #[command(subcommand)]
     pub command: SpaceCommand,
+}
+
+#[derive(Debug, Args)]
+pub struct CollectionArgs {
+    #[command(subcommand)]
+    pub command: CollectionCommand,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -45,11 +52,16 @@ pub enum SpaceCommand {
     Info { name: String },
 }
 
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum CollectionCommand {
+    List,
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Command, SpaceCommand};
+    use super::{Cli, CollectionCommand, Command, SpaceCommand};
 
     #[test]
     fn parses_space_current_command() {
@@ -58,6 +70,7 @@ mod tests {
 
         match parsed.command {
             Command::Space(space) => assert_eq!(space.command, SpaceCommand::Current),
+            Command::Collection(_) => panic!("unexpected collection command"),
         }
     }
 
@@ -76,6 +89,7 @@ mod tests {
                     description: Some("work docs".to_string())
                 }
             ),
+            Command::Collection(_) => panic!("unexpected collection command"),
         }
     }
 
@@ -86,6 +100,7 @@ mod tests {
 
         match parsed.command {
             Command::Space(space) => assert_eq!(space.command, SpaceCommand::Default { name: None }),
+            Command::Collection(_) => panic!("unexpected collection command"),
         }
     }
 
@@ -103,6 +118,7 @@ mod tests {
                     text: "updated docs".to_string()
                 }
             ),
+            Command::Collection(_) => panic!("unexpected collection command"),
         }
     }
 
@@ -119,6 +135,7 @@ mod tests {
                     name: Some("work".to_string())
                 }
             ),
+            Command::Collection(_) => panic!("unexpected collection command"),
         }
     }
 
@@ -136,6 +153,7 @@ mod tests {
                     new: "team".to_string()
                 }
             ),
+            Command::Collection(_) => panic!("unexpected collection command"),
         }
     }
 
@@ -151,6 +169,7 @@ mod tests {
                     name: "work".to_string()
                 }
             ),
+            Command::Collection(_) => panic!("unexpected collection command"),
         }
     }
 
@@ -161,6 +180,7 @@ mod tests {
 
         match parsed.command {
             Command::Space(space) => assert_eq!(space.command, SpaceCommand::List),
+            Command::Collection(_) => panic!("unexpected collection command"),
         }
     }
 
@@ -176,6 +196,7 @@ mod tests {
                     name: "work".to_string()
                 }
             ),
+            Command::Collection(_) => panic!("unexpected collection command"),
         }
     }
 
@@ -187,6 +208,20 @@ mod tests {
 
         match parsed.command {
             Command::Space(space) => assert_eq!(space.command, SpaceCommand::Current),
+            Command::Collection(_) => panic!("unexpected collection command"),
+        }
+    }
+
+    #[test]
+    fn parses_collection_list() {
+        let parsed = Cli::try_parse_from(["kbolt", "collection", "list"]).expect("parse cli");
+        assert_eq!(parsed.space, None);
+
+        match parsed.command {
+            Command::Collection(collection) => {
+                assert_eq!(collection.command, CollectionCommand::List)
+            }
+            Command::Space(_) => panic!("unexpected space command"),
         }
     }
 }

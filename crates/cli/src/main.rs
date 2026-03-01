@@ -1,5 +1,5 @@
 use clap::Parser;
-use kbolt_cli::args::{Cli, Command, SpaceCommand};
+use kbolt_cli::args::{Cli, CollectionCommand, Command, SpaceCommand};
 use kbolt_cli::CliAdapter;
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
@@ -48,6 +48,12 @@ fn run() -> Result<()> {
             }
             SpaceCommand::Info { name } => {
                 let line = adapter.space_info(&name)?;
+                println!("{line}");
+            }
+        },
+        Command::Collection(collection) => match collection.command {
+            CollectionCommand::List => {
+                let line = adapter.collection_list(cli.space.as_deref())?;
                 println!("{line}");
             }
         },
