@@ -86,6 +86,13 @@ pub struct FtsDirtyRecord {
     pub chunks: Vec<ChunkRow>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpaceResolution {
+    Found(SpaceRow),
+    Ambiguous(Vec<String>),
+    NotFound,
+}
+
 impl Storage {
     pub fn new(cache_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(cache_dir)?;
@@ -244,6 +251,40 @@ CREATE TABLE IF NOT EXISTS llm_cache (
 
         let spaces = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(spaces)
+    }
+
+    pub fn find_space_for_collection(&self, collection: &str) -> Result<SpaceResolution> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let mut stmt = conn.prepare(
+            "SELECT s.id, s.name, s.description, s.created
+             FROM spaces s
+             JOIN collections c ON c.space_id = s.id
+             WHERE c.name = ?1
+             ORDER BY s.name ASC",
+        )?;
+        let rows = stmt.query_map(params![collection], |row| {
+            Ok(SpaceRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                created: row.get(3)?,
+            })
+        })?;
+        let matches = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+
+        if matches.is_empty() {
+            return Ok(SpaceResolution::NotFound);
+        }
+
+        if matches.len() == 1 {
+            return Ok(SpaceResolution::Found(matches[0].clone()));
+        }
+
+        let spaces = matches.into_iter().map(|space| space.name).collect();
+        Ok(SpaceResolution::Ambiguous(spaces))
     }
 
     pub fn delete_space(&self, name: &str) -> Result<()> {
