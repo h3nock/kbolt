@@ -81,13 +81,6 @@ impl Engine {
     }
 
     pub fn add_collection(&self, req: AddCollectionRequest) -> Result<CollectionInfo> {
-        if !req.no_index {
-            return Err(KboltError::Internal(
-                "automatic indexing on collection add is not wired yet; use --no-index and run `kbolt update` manually for now".to_string(),
-            )
-            .into());
-        }
-
         let space = self.resolve_space_row(req.space.as_deref(), None)?;
         if !req.path.is_absolute() || !req.path.is_dir() {
             return Err(KboltError::InvalidPath(req.path).into());
@@ -110,6 +103,16 @@ impl Engine {
             req.description.as_deref(),
             req.extensions.as_deref(),
         )?;
+
+        if !req.no_index {
+            self.update(UpdateOptions {
+                space: Some(space.name.clone()),
+                collections: vec![name.clone()],
+                no_embed: false,
+                dry_run: false,
+                verbose: false,
+            })?;
+        }
 
         self.collection_info(Some(&space.name), &name)
     }

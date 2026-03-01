@@ -434,33 +434,30 @@ fn add_collection_and_collection_info_with_explicit_space() {
 }
 
 #[test]
-fn add_collection_without_no_index_returns_explicit_error_and_does_not_create_row() {
+fn add_collection_without_no_index_triggers_initial_index_update() {
     let engine = test_engine();
     engine.add_space("work", None).expect("add work");
     let root = tempdir().expect("create temp root");
     let collection_path = root.path().join("api");
     std::fs::create_dir_all(&collection_path).expect("create collection dir");
+    write_text_file(&collection_path.join("src/lib.rs"), "fn alpha() {}\n");
 
-    let err = engine
+    let added = engine
         .add_collection(AddCollectionRequest {
-            path: collection_path,
+            path: collection_path.clone(),
             space: Some("work".to_string()),
             name: Some("api".to_string()),
             description: None,
             extensions: None,
             no_index: false,
         })
-        .expect_err("collection add should fail without --no-index until update is wired");
-    assert!(
-        err.to_string()
-            .contains("automatic indexing on collection add is not wired yet"),
-        "unexpected error: {err}"
-    );
-
-    let collections = engine
-        .list_collections(Some("work"))
-        .expect("list collections");
-    assert!(collections.is_empty(), "collection should not have been created");
+        .expect("collection add should index by default");
+    assert_eq!(added.space, "work");
+    assert_eq!(added.name, "api");
+    assert_eq!(added.path, collection_path);
+    assert_eq!(added.document_count, 1);
+    assert_eq!(added.active_document_count, 1);
+    assert_eq!(added.chunk_count, 1);
 }
 
 #[test]
