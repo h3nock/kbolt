@@ -784,6 +784,52 @@ impl Engine {
         Ok((resolved_space.name, normalized_pattern))
     }
 
+    pub fn remove_collection_ignore_pattern(
+        &self,
+        space: Option<&str>,
+        collection: &str,
+        pattern: &str,
+    ) -> Result<(String, usize)> {
+        let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
+        let resolved_space = self.resolve_space_row(space, Some(collection))?;
+        self.storage
+            .get_collection(resolved_space.id, collection)?;
+
+        let normalized_pattern = validate_ignore_pattern(pattern)?;
+        let path = collection_ignore_file_path(&self.config.config_dir, &resolved_space.name, collection);
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((resolved_space.name, 0))
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        let mut removed_count = 0usize;
+        let mut remaining = Vec::new();
+        for line in raw.lines() {
+            if line == normalized_pattern {
+                removed_count = removed_count.saturating_add(1);
+            } else {
+                remaining.push(line.to_string());
+            }
+        }
+
+        if removed_count == 0 {
+            return Ok((resolved_space.name, 0));
+        }
+
+        if remaining.is_empty() {
+            std::fs::remove_file(path)?;
+            return Ok((resolved_space.name, removed_count));
+        }
+
+        let mut content = remaining.join("\n");
+        content.push('\n');
+        std::fs::write(path, content)?;
+        Ok((resolved_space.name, removed_count))
+    }
+
     fn model_status_unlocked(&self) -> Result<ModelStatus> {
         models::status(&self.config.models, &self.model_dir())
     }

@@ -116,6 +116,13 @@ fn run() -> Result<()> {
                 let line = adapter.ignore_add(cli.space.as_deref(), &collection, &pattern)?;
                 println!("{line}");
             }
+            IgnoreCommand::Remove {
+                collection,
+                pattern,
+            } => {
+                let line = adapter.ignore_remove(cli.space.as_deref(), &collection, &pattern)?;
+                println!("{line}");
+            }
         },
         Command::Models(models) => match models.command {
             ModelsCommand::List => {

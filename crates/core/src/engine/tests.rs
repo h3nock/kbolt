@@ -742,6 +742,77 @@ fn add_collection_ignore_pattern_rejects_empty_or_multiline_input() {
 }
 
 #[test]
+fn remove_collection_ignore_pattern_removes_matches_and_deletes_empty_file() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path);
+
+        let ignore_path = engine
+            .config()
+            .config_dir
+            .join("ignores")
+            .join("work")
+            .join("api.ignore");
+        write_text_file(&ignore_path, "dist/\n*.tmp\ndist/\n");
+
+        let (space, removed) = engine
+            .remove_collection_ignore_pattern(Some("work"), "api", "dist/")
+            .expect("remove dist pattern");
+        assert_eq!(space, "work");
+        assert_eq!(removed, 2);
+        let saved = std::fs::read_to_string(&ignore_path).expect("read updated ignore file");
+        assert_eq!(saved, "*.tmp\n");
+
+        let (space, removed) = engine
+            .remove_collection_ignore_pattern(None, "api", "*.tmp")
+            .expect("remove tmp pattern");
+        assert_eq!(space, "work");
+        assert_eq!(removed, 1);
+        assert!(!ignore_path.exists(), "ignore file should be deleted");
+    });
+}
+
+#[test]
+fn remove_collection_ignore_pattern_returns_zero_when_pattern_or_file_is_missing() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path);
+
+        let (space, removed) = engine
+            .remove_collection_ignore_pattern(Some("work"), "api", "dist/")
+            .expect("remove from missing file");
+        assert_eq!(space, "work");
+        assert_eq!(removed, 0);
+
+        let ignore_path = engine
+            .config()
+            .config_dir
+            .join("ignores")
+            .join("work")
+            .join("api.ignore");
+        write_text_file(&ignore_path, "*.tmp\n");
+
+        let (space, removed) = engine
+            .remove_collection_ignore_pattern(None, "api", "dist/")
+            .expect("remove missing pattern");
+        assert_eq!(space, "work");
+        assert_eq!(removed, 0);
+        let saved = std::fs::read_to_string(ignore_path).expect("read untouched ignore file");
+        assert_eq!(saved, "*.tmp\n");
+    });
+}
+
+#[test]
 fn list_files_returns_entries_and_applies_prefix_filter() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);

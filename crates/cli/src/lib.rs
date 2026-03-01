@@ -322,6 +322,26 @@ impl CliAdapter {
         ))
     }
 
+    pub fn ignore_remove(
+        &self,
+        space: Option<&str>,
+        collection: &str,
+        pattern: &str,
+    ) -> Result<String> {
+        let (resolved_space, removed_count) = self
+            .engine
+            .remove_collection_ignore_pattern(space, collection, pattern)?;
+        if removed_count == 0 {
+            return Ok(format!(
+                "ignore pattern not found for {resolved_space}/{collection}: {pattern}"
+            ));
+        }
+
+        Ok(format!(
+            "ignore pattern removed for {resolved_space}/{collection}: {pattern} ({removed_count} match(es))"
+        ))
+    }
+
     pub fn models_list(&self) -> Result<String> {
         let status = self.engine.model_status()?;
         let mut lines = Vec::new();
@@ -1510,6 +1530,91 @@ mod tests {
                 err.to_string().contains("ignore pattern cannot be empty"),
                 "unexpected error: {err}"
             );
+        });
+    }
+
+    #[test]
+    fn ignore_remove_deletes_matching_patterns() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: collection_path,
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add collection");
+            fs::create_dir_all(
+                engine
+                    .config()
+                    .config_dir
+                    .join("ignores")
+                    .join("work"),
+            )
+            .expect("create ignore dir");
+            fs::write(
+                engine
+                    .config()
+                    .config_dir
+                    .join("ignores")
+                    .join("work")
+                    .join("api.ignore"),
+                "dist/\n*.tmp\ndist/\n",
+            )
+            .expect("write ignore file");
+            let adapter = CliAdapter::new(engine);
+
+            let output = adapter
+                .ignore_remove(Some("work"), "api", "dist/")
+                .expect("remove pattern");
+            assert_eq!(
+                output,
+                "ignore pattern removed for work/api: dist/ (2 match(es))"
+            );
+
+            let saved = fs::read_to_string(
+                adapter
+                    .engine
+                    .config()
+                    .config_dir
+                    .join("ignores")
+                    .join("work")
+                    .join("api.ignore"),
+            )
+            .expect("read updated ignore file");
+            assert_eq!(saved, "*.tmp\n");
+        });
+    }
+
+    #[test]
+    fn ignore_remove_reports_when_pattern_is_not_found() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: collection_path,
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add collection");
+            let adapter = CliAdapter::new(engine);
+
+            let output = adapter
+                .ignore_remove(None, "api", "dist/")
+                .expect("remove missing pattern");
+            assert_eq!(output, "ignore pattern not found for work/api: dist/");
         });
     }
 
