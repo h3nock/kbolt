@@ -792,3 +792,165 @@ fn list_documents_missing_collection_returns_not_found() {
         other => panic!("unexpected error: {other}"),
     }
 }
+
+#[test]
+fn get_document_by_hash_prefix_returns_matching_rows() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    let _doc1 = storage
+        .upsert_document(
+            collection_id,
+            "src/a.rs",
+            "a",
+            "abcd0001",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc1");
+    let _doc2 = storage
+        .upsert_document(
+            collection_id,
+            "src/b.rs",
+            "b",
+            "abcd0002",
+            "2026-03-01T10:01:00Z",
+        )
+        .expect("insert doc2");
+    let _doc3 = storage
+        .upsert_document(
+            collection_id,
+            "src/c.rs",
+            "c",
+            "ffff0003",
+            "2026-03-01T10:02:00Z",
+        )
+        .expect("insert doc3");
+
+    let matches = storage
+        .get_document_by_hash_prefix("abcd")
+        .expect("query prefix");
+    assert_eq!(matches.len(), 2);
+    assert_eq!(matches[0].hash, "abcd0001");
+    assert_eq!(matches[1].hash, "abcd0002");
+}
+
+#[test]
+fn deactivate_document_marks_document_inactive() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    let doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/lib.rs",
+            "lib",
+            "hash-1",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc");
+
+    storage
+        .deactivate_document(doc_id)
+        .expect("deactivate document");
+
+    let stored = storage
+        .get_document_by_path(collection_id, "src/lib.rs")
+        .expect("get document")
+        .expect("document exists");
+    assert!(!stored.active);
+    assert!(stored.deactivated_at.is_some());
+}
+
+#[test]
+fn deactivate_document_missing_id_returns_not_found() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+
+    let err = storage
+        .deactivate_document(99999)
+        .expect_err("missing document should fail");
+    match KboltError::from(err) {
+        KboltError::DocumentNotFound { path } => assert_eq!(path, "id=99999"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn reactivate_document_marks_document_active_and_clears_deactivated_at() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    let doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/lib.rs",
+            "lib",
+            "hash-1",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc");
+    storage
+        .deactivate_document(doc_id)
+        .expect("deactivate document");
+
+    storage
+        .reactivate_document(doc_id)
+        .expect("reactivate document");
+
+    let stored = storage
+        .get_document_by_path(collection_id, "src/lib.rs")
+        .expect("get document")
+        .expect("document exists");
+    assert!(stored.active);
+    assert_eq!(stored.deactivated_at, None);
+}
+
+#[test]
+fn reactivate_document_missing_id_returns_not_found() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+
+    let err = storage
+        .reactivate_document(99999)
+        .expect_err("missing document should fail");
+    match KboltError::from(err) {
+        KboltError::DocumentNotFound { path } => assert_eq!(path, "id=99999"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
