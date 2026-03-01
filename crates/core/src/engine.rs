@@ -12,8 +12,9 @@ use walkdir::WalkDir;
 use kbolt_types::{
     ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, CollectionStatus,
     DocumentResponse, FileEntry, FileError, GetRequest, KboltError, Locator, ModelInfo,
-    ModelStatus, MultiGetRequest, MultiGetResponse, OmitReason, OmittedFile, SpaceInfo,
-    SpaceStatus, StatusResponse, UpdateOptions, UpdateReport,
+    ModelStatus, MultiGetRequest, MultiGetResponse, OmitReason, OmittedFile, SearchMode,
+    SearchRequest, SearchResponse, SearchResult, SearchSignals, SpaceInfo, SpaceStatus,
+    StatusResponse, UpdateOptions, UpdateReport,
 };
 
 pub struct Engine {
@@ -25,6 +26,19 @@ pub struct Engine {
 pub struct UpdateTarget {
     pub space: String,
     pub collection: CollectionRow,
+}
+
+#[derive(Debug, Clone)]
+struct SearchCollectionMeta {
+    space: String,
+    collection: String,
+    path: std::path::PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct SearchHitCandidate {
+    chunk_id: i64,
+    bm25_score: f32,
 }
 
 impl Engine {
@@ -354,6 +368,187 @@ impl Engine {
             resolved_count: documents.len(),
             documents,
             omitted,
+        })
+    }
+
+    pub fn search(&self, req: SearchRequest) -> Result<SearchResponse> {
+        let started = Instant::now();
+        let query = req.query.trim();
+        if query.is_empty() {
+            return Err(KboltError::InvalidInput("query cannot be empty".to_string()).into());
+        }
+
+        let mode = match req.mode {
+            SearchMode::Auto | SearchMode::Keyword => SearchMode::Keyword,
+            SearchMode::Semantic => {
+                return Err(
+                    KboltError::InvalidInput("semantic mode is not implemented yet".to_string())
+                        .into(),
+                )
+            }
+            SearchMode::Deep => {
+                return Err(KboltError::InvalidInput("deep mode is not implemented yet".to_string()).into())
+            }
+        };
+
+        let targets = self.resolve_update_targets(&UpdateOptions {
+            space: req.space.clone(),
+            collections: req.collections.clone(),
+            no_embed: true,
+            dry_run: false,
+            verbose: false,
+        })?;
+
+        let staleness_hint = targets
+            .iter()
+            .map(|target| target.collection.updated.clone())
+            .max()
+            .map(|updated| format!("Index last updated: {updated}"));
+
+        if req.limit == 0 || targets.is_empty() {
+            return Ok(SearchResponse {
+                results: Vec::new(),
+                query: req.query,
+                mode,
+                staleness_hint,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
+        }
+
+        let mut collections_by_id: HashMap<i64, SearchCollectionMeta> = HashMap::new();
+        for target in &targets {
+            collections_by_id.insert(
+                target.collection.id,
+                SearchCollectionMeta {
+                    space: target.space.clone(),
+                    collection: target.collection.name.clone(),
+                    path: target.collection.path.clone(),
+                },
+            );
+        }
+
+        let mut candidates = Vec::new();
+        for target in &targets {
+            let hits = self.storage.query_bm25(
+                &target.space,
+                query,
+                &[("title", 2.0), ("heading", 1.5), ("body", 1.0), ("filepath", 0.5)],
+                req.limit,
+            )?;
+            for hit in hits {
+                candidates.push(SearchHitCandidate {
+                    chunk_id: hit.chunk_id,
+                    bm25_score: hit.score,
+                });
+            }
+        }
+
+        candidates.sort_by(|left, right| right.bm25_score.total_cmp(&left.bm25_score));
+        let max_bm25 = candidates
+            .iter()
+            .map(|candidate| candidate.bm25_score)
+            .fold(0.0_f32, f32::max);
+
+        let mut seen_chunks = HashSet::new();
+        let mut selected = Vec::new();
+        for candidate in candidates {
+            if !seen_chunks.insert(candidate.chunk_id) {
+                continue;
+            }
+
+            let normalized_score = if max_bm25 > 0.0 {
+                candidate.bm25_score / max_bm25
+            } else {
+                0.0
+            };
+
+            if normalized_score < req.min_score {
+                continue;
+            }
+
+            selected.push((candidate, normalized_score));
+            if selected.len() >= req.limit {
+                break;
+            }
+        }
+
+        if selected.is_empty() {
+            return Ok(SearchResponse {
+                results: Vec::new(),
+                query: req.query,
+                mode,
+                staleness_hint,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
+        }
+
+        let chunk_ids = selected
+            .iter()
+            .map(|(candidate, _)| candidate.chunk_id)
+            .collect::<Vec<_>>();
+        let chunk_rows = self.storage.get_chunks(&chunk_ids)?;
+        let chunk_by_id = chunk_rows
+            .into_iter()
+            .map(|chunk| (chunk.id, chunk))
+            .collect::<HashMap<_, _>>();
+
+        let mut docs_by_id: HashMap<i64, DocumentRow> = HashMap::new();
+        let mut results = Vec::new();
+        for (candidate, normalized_score) in selected {
+            let Some(chunk) = chunk_by_id.get(&candidate.chunk_id) else {
+                continue;
+            };
+
+            let document = if let Some(existing) = docs_by_id.get(&chunk.doc_id) {
+                existing.clone()
+            } else {
+                let loaded = self.storage.get_document_by_id(chunk.doc_id)?;
+                docs_by_id.insert(chunk.doc_id, loaded.clone());
+                loaded
+            };
+            if !document.active {
+                continue;
+            }
+
+            let Some(collection) = collections_by_id.get(&document.collection_id) else {
+                continue;
+            };
+
+            let full_path = collection.path.join(&document.path);
+            let bytes = match std::fs::read(&full_path) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+            let text = chunk_text_from_bytes(&bytes, chunk.offset, chunk.length);
+
+            results.push(SearchResult {
+                docid: short_docid(&document.hash),
+                path: format!("{}/{}", collection.collection, document.path),
+                title: document.title,
+                space: collection.space.clone(),
+                collection: collection.collection.clone(),
+                heading: chunk.heading.clone(),
+                text,
+                score: normalized_score,
+                signals: if req.debug {
+                    Some(SearchSignals {
+                        bm25: Some(normalized_score),
+                        dense: None,
+                        rrf: normalized_score,
+                        reranker: None,
+                    })
+                } else {
+                    None
+                },
+            });
+        }
+
+        Ok(SearchResponse {
+            results,
+            query: req.query,
+            mode,
+            staleness_hint,
+            elapsed_ms: started.elapsed().as_millis() as u64,
         })
     }
 
@@ -1040,6 +1235,12 @@ fn file_error(path: Option<std::path::PathBuf>, error: String) -> FileError {
             .unwrap_or_else(|| "<unknown>".to_string()),
         error,
     }
+}
+
+fn chunk_text_from_bytes(bytes: &[u8], offset: usize, length: usize) -> String {
+    let start = offset.min(bytes.len());
+    let end = offset.saturating_add(length).min(bytes.len());
+    String::from_utf8_lossy(&bytes[start..end]).into_owned()
 }
 
 #[cfg(test)]

@@ -1342,6 +1342,49 @@ fn get_document_by_path_missing_collection_returns_not_found() {
 }
 
 #[test]
+fn get_document_by_id_returns_row_or_not_found() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/lib.rs",
+            "lib.rs",
+            "hash-abc",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert document");
+
+    let doc = storage.get_document_by_id(doc_id).expect("get document by id");
+    assert_eq!(doc.id, doc_id);
+    assert_eq!(doc.collection_id, collection_id);
+    assert_eq!(doc.path, "src/lib.rs");
+    assert_eq!(doc.title, "lib.rs");
+    assert_eq!(doc.hash, "hash-abc");
+    assert!(doc.active);
+
+    let err = storage
+        .get_document_by_id(99999)
+        .expect_err("missing id should fail");
+    match KboltError::from(err) {
+        KboltError::DocumentNotFound { path } => assert_eq!(path, "id=99999"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
 fn list_documents_respects_active_only_filter() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");

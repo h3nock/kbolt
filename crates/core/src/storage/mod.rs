@@ -871,6 +871,28 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         }
     }
 
+    pub fn get_document_by_id(&self, id: i64) -> Result<DocumentRow> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, collection_id, path, title, hash, modified, active, deactivated_at, fts_dirty
+             FROM documents
+             WHERE id = ?1",
+        )?;
+
+        let result = stmt.query_row(params![id], decode_document_row);
+        match result {
+            Ok(row) => Ok(row),
+            Err(Error::QueryReturnedNoRows) => Err(KboltError::DocumentNotFound {
+                path: format!("id={id}"),
+            }
+            .into()),
+            Err(err) => Err(err.into()),
+        }
+    }
+
     pub fn update_document_metadata(&self, doc_id: i64, title: &str, modified: &str) -> Result<()> {
         let conn = self
             .db

@@ -7,7 +7,7 @@ use crate::engine::Engine;
 use crate::storage::Storage;
 use kbolt_types::{
     ActiveSpaceSource, AddCollectionRequest, GetRequest, KboltError, Locator, MultiGetRequest,
-    OmitReason, UpdateOptions,
+    OmitReason, SearchMode, SearchRequest, UpdateOptions,
 };
 
 fn test_engine() -> Engine {
@@ -934,6 +934,168 @@ fn multi_get_respects_max_bytes_and_supports_mixed_locators() {
         assert_eq!(result.omitted.len(), 1);
         assert_eq!(result.omitted[0].path, "api/b.md");
         assert_eq!(result.omitted[0].reason, OmitReason::MaxBytes);
+    });
+}
+
+#[test]
+fn search_keyword_returns_ranked_results_for_targeted_collection() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        write_text_file(&work_path.join("src/lib.rs"), "fn alpha_search_term() {}\n");
+        write_text_file(&work_path.join("src/other.rs"), "fn beta() {}\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let response = engine
+            .search(SearchRequest {
+                query: "alpha_search_term".to_string(),
+                mode: SearchMode::Keyword,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 5,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: true,
+            })
+            .expect("run keyword search");
+
+        assert_eq!(response.mode, SearchMode::Keyword);
+        assert_eq!(response.query, "alpha_search_term");
+        assert!(!response.results.is_empty(), "expected at least one result");
+        let first = &response.results[0];
+        assert_eq!(first.space, "work");
+        assert_eq!(first.collection, "api");
+        assert!(first.path.starts_with("api/"));
+        assert!(first.docid.starts_with('#'));
+        assert!(first.text.contains("alpha_search_term"));
+        assert!(first.score >= 0.0 && first.score <= 1.0);
+        assert!(response.staleness_hint.is_some());
+        let signals = first.signals.as_ref().expect("debug signals");
+        assert!(signals.bm25.is_some());
+        assert!(signals.dense.is_none());
+        assert!(signals.reranker.is_none());
+    });
+}
+
+#[test]
+fn search_auto_mode_uses_keyword_path_and_scopes_space() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        let notes_path = root.path().join("notes-api");
+        std::fs::create_dir_all(&work_path).expect("create work dir");
+        std::fs::create_dir_all(&notes_path).expect("create notes dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+        add_collection_fixture(&engine, "notes", "api", notes_path.clone());
+
+        write_text_file(&work_path.join("a.md"), "space scoped token\n");
+        write_text_file(&notes_path.join("a.md"), "space scoped token\n");
+        engine
+            .update(update_options(None, &[]))
+            .expect("initial update");
+
+        let response = engine
+            .search(SearchRequest {
+                query: "scoped".to_string(),
+                mode: SearchMode::Auto,
+                space: Some("work".to_string()),
+                collections: vec![],
+                limit: 10,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: false,
+            })
+            .expect("run auto search");
+
+        assert_eq!(response.mode, SearchMode::Keyword);
+        assert!(response.results.iter().all(|item| item.space == "work"));
+    });
+}
+
+#[test]
+fn search_rejects_unimplemented_modes_and_ambiguous_collection_scope() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        let notes_path = root.path().join("notes-api");
+        std::fs::create_dir_all(&work_path).expect("create work dir");
+        std::fs::create_dir_all(&notes_path).expect("create notes dir");
+        add_collection_fixture(&engine, "work", "api", work_path);
+        add_collection_fixture(&engine, "notes", "api", notes_path);
+
+        let semantic_err = engine
+            .search(SearchRequest {
+                query: "test".to_string(),
+                mode: SearchMode::Semantic,
+                space: None,
+                collections: vec![],
+                limit: 10,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: false,
+            })
+            .expect_err("semantic mode should error");
+        match KboltError::from(semantic_err) {
+            KboltError::InvalidInput(message) => {
+                assert!(message.contains("semantic mode"), "unexpected message: {message}");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+
+        let deep_err = engine
+            .search(SearchRequest {
+                query: "test".to_string(),
+                mode: SearchMode::Deep,
+                space: None,
+                collections: vec![],
+                limit: 10,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: false,
+            })
+            .expect_err("deep mode should error");
+        match KboltError::from(deep_err) {
+            KboltError::InvalidInput(message) => {
+                assert!(message.contains("deep mode"), "unexpected message: {message}");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+
+        let ambiguous_err = engine
+            .search(SearchRequest {
+                query: "test".to_string(),
+                mode: SearchMode::Keyword,
+                space: None,
+                collections: vec!["api".to_string()],
+                limit: 10,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: false,
+            })
+            .expect_err("ambiguous collection should error");
+        match KboltError::from(ambiguous_err) {
+            KboltError::AmbiguousSpace { collection, spaces } => {
+                assert_eq!(collection, "api");
+                assert_eq!(spaces, vec!["notes".to_string(), "work".to_string()]);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     });
 }
 
