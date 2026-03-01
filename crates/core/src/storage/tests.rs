@@ -1979,3 +1979,58 @@ fn count_embedded_chunks_scopes_by_space_and_deduplicates_models() {
         1
     );
 }
+
+#[test]
+fn disk_usage_sums_sqlite_indexes_and_models() {
+    let tmp = tempdir().expect("create tempdir");
+    let cache_dir = tmp.path().join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+
+    std::fs::create_dir_all(cache_dir.join("spaces/work/tantivy/segments"))
+        .expect("create work tantivy dir");
+    std::fs::create_dir_all(cache_dir.join("spaces/notes")).expect("create notes dir");
+    std::fs::create_dir_all(cache_dir.join("models")).expect("create models dir");
+
+    std::fs::write(cache_dir.join("spaces/work/tantivy/seg1.bin"), vec![b'x'; 10])
+        .expect("write tantivy segment 1");
+    std::fs::write(
+        cache_dir.join("spaces/work/tantivy/segments/seg2.bin"),
+        vec![b'y'; 4],
+    )
+    .expect("write tantivy segment 2");
+    std::fs::write(cache_dir.join("spaces/work/vectors.usearch"), vec![b'v'; 7])
+        .expect("write work vectors");
+    std::fs::write(cache_dir.join("spaces/notes/vectors.usearch"), vec![b'w'; 3])
+        .expect("write notes vectors");
+    std::fs::write(cache_dir.join("models/embed.onnx"), vec![b'm'; 11]).expect("write model file");
+    std::fs::write(cache_dir.join("spaces/work/ignored.bin"), vec![b'i'; 9])
+        .expect("write ignored file");
+
+    let sqlite_bytes = std::fs::metadata(cache_dir.join("meta.sqlite"))
+        .expect("stat sqlite file")
+        .len();
+
+    let usage = storage.disk_usage().expect("calculate disk usage");
+    assert_eq!(usage.sqlite_bytes, sqlite_bytes);
+    assert_eq!(usage.tantivy_bytes, 14);
+    assert_eq!(usage.usearch_bytes, 10);
+    assert_eq!(usage.models_bytes, 11);
+    assert_eq!(
+        usage.total_bytes,
+        usage.sqlite_bytes + usage.tantivy_bytes + usage.usearch_bytes + usage.models_bytes
+    );
+}
+
+#[test]
+fn disk_usage_handles_missing_optional_directories() {
+    let tmp = tempdir().expect("create tempdir");
+    let cache_dir = tmp.path().join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+
+    let usage = storage.disk_usage().expect("calculate disk usage");
+    assert!(usage.sqlite_bytes > 0);
+    assert_eq!(usage.tantivy_bytes, 0);
+    assert_eq!(usage.usearch_bytes, 0);
+    assert_eq!(usage.models_bytes, 0);
+    assert_eq!(usage.total_bytes, usage.sqlite_bytes);
+}
