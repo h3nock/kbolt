@@ -13,7 +13,12 @@ impl CliAdapter {
         Self { engine }
     }
 
-    pub fn space_add(&self, name: &str, description: Option<&str>) -> Result<String> {
+    pub fn space_add(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        dirs: &[std::path::PathBuf],
+    ) -> Result<String> {
         let added = self.engine.add_space(name, description)?;
         let description = added.description.unwrap_or_default();
         let suffix = if description.is_empty() {
@@ -21,7 +26,53 @@ impl CliAdapter {
         } else {
             format!(" - {description}")
         };
-        Ok(format!("space added: {}{suffix}", added.name))
+
+        if dirs.is_empty() {
+            return Ok(format!("space added: {}{suffix}", added.name));
+        }
+
+        let mut successes = Vec::new();
+        let mut failures = Vec::new();
+        for dir in dirs {
+            let collection_name = dir
+                .file_name()
+                .and_then(|item| item.to_str())
+                .map(ToString::to_string);
+
+            let result = self.engine.add_collection(AddCollectionRequest {
+                path: dir.clone(),
+                space: Some(name.to_string()),
+                name: collection_name,
+                description: None,
+                extensions: None,
+                no_index: true,
+            });
+
+            match result {
+                Ok(info) => successes.push(format!(
+                    "- {} -> {}/{}",
+                    dir.display(),
+                    info.space,
+                    info.name
+                )),
+                Err(err) => failures.push(format!("- {} -> {}", dir.display(), err)),
+            }
+        }
+
+        let mut lines = Vec::new();
+        lines.push(format!("space added: {}{suffix}", added.name));
+        lines.push(format!("collections added: {}", successes.len()));
+        lines.extend(successes);
+        if !failures.is_empty() {
+            lines.push(format!("collections failed: {}", failures.len()));
+            lines.extend(failures);
+        }
+        lines.push(
+            "note: collections were registered without indexing; run `kbolt update` to index them"
+                .to_string(),
+        );
+
+        Ok(lines.join("\n"))
     }
 
     pub fn space_describe(&self, name: &str, text: &str) -> Result<String> {
@@ -371,7 +422,7 @@ mod tests {
             let engine = Engine::new(None).expect("create engine");
             let adapter = CliAdapter::new(engine);
 
-            let output = adapter.space_add("work", None).expect("add space");
+            let output = adapter.space_add("work", None, &[]).expect("add space");
             assert_eq!(output, "space added: work");
 
             let info = adapter.space_info("work").expect("space info");
@@ -386,9 +437,48 @@ mod tests {
             let adapter = CliAdapter::new(engine);
 
             let output = adapter
-                .space_add("work", Some("work docs"))
+                .space_add("work", Some("work docs"), &[])
                 .expect("add space");
             assert_eq!(output, "space added: work - work docs");
+        });
+    }
+
+    #[test]
+    fn space_add_with_dirs_is_best_effort_and_reports_failures() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            let valid_api = root.path().join("api");
+            let valid_wiki = root.path().join("wiki");
+            let missing = root.path().join("missing");
+            fs::create_dir_all(&valid_api).expect("create api dir");
+            fs::create_dir_all(&valid_wiki).expect("create wiki dir");
+
+            let output = adapter
+                .space_add(
+                    "work",
+                    Some("work docs"),
+                    &[valid_api.clone(), missing.clone(), valid_wiki.clone()],
+                )
+                .expect("add space with dirs");
+            assert!(output.contains("space added: work - work docs"), "unexpected output: {output}");
+            assert!(output.contains("collections added: 2"), "unexpected output: {output}");
+            assert!(output.contains("collections failed: 1"), "unexpected output: {output}");
+            assert!(
+                output.contains(&format!("- {} ->", missing.display())),
+                "unexpected output: {output}"
+            );
+
+            let api = adapter
+                .collection_info(Some("work"), "api")
+                .expect("api should be added");
+            assert!(api.contains("name: api"), "unexpected output: {api}");
+            let wiki = adapter
+                .collection_info(Some("work"), "wiki")
+                .expect("wiki should be added");
+            assert!(wiki.contains("name: wiki"), "unexpected output: {wiki}");
         });
     }
 
@@ -398,7 +488,7 @@ mod tests {
             let engine = Engine::new(None).expect("create engine");
             let adapter = CliAdapter::new(engine);
             adapter
-                .space_add("work", Some("old docs"))
+                .space_add("work", Some("old docs"), &[])
                 .expect("add work space");
 
             let output = adapter
@@ -419,7 +509,7 @@ mod tests {
         with_isolated_xdg_dirs(|| {
             let engine = Engine::new(None).expect("create engine");
             let adapter = CliAdapter::new(engine);
-            adapter.space_add("work", None).expect("add work");
+            adapter.space_add("work", None, &[]).expect("add work");
 
             let output = adapter
                 .space_rename("work", "team")
@@ -436,7 +526,7 @@ mod tests {
         with_isolated_xdg_dirs(|| {
             let engine = Engine::new(None).expect("create engine");
             let adapter = CliAdapter::new(engine);
-            adapter.space_add("work", None).expect("add work");
+            adapter.space_add("work", None, &[]).expect("add work");
 
             let output = adapter.space_remove("work").expect("remove work");
             assert_eq!(output, "space removed: work");
