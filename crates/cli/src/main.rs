@@ -101,6 +101,21 @@ fn run() -> Result<()> {
                 println!("{line}");
             }
         },
+        Command::Search(search) => {
+            let line = adapter.search(
+                cli.space.as_deref(),
+                &search.query,
+                &search.collections,
+                search.limit,
+                search.min_score,
+                search.deep,
+                search.keyword,
+                search.semantic,
+                search.no_rerank,
+                search.debug,
+            )?;
+            println!("{line}");
+        }
         Command::Update(update) => {
             let line = adapter.update(
                 cli.space.as_deref(),

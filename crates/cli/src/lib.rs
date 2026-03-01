@@ -2,7 +2,10 @@ pub mod args;
 
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
-use kbolt_types::{ActiveSpaceSource, AddCollectionRequest, GetRequest, Locator, MultiGetRequest, OmitReason, UpdateOptions};
+use kbolt_types::{
+    ActiveSpaceSource, AddCollectionRequest, GetRequest, KboltError, Locator, MultiGetRequest,
+    OmitReason, SearchMode, SearchRequest, UpdateOptions,
+};
 
 pub struct CliAdapter {
     pub engine: Engine,
@@ -321,6 +324,82 @@ impl CliAdapter {
         Ok(lines.join("\n"))
     }
 
+    pub fn search(
+        &self,
+        space: Option<&str>,
+        query: &str,
+        collections: &[String],
+        limit: usize,
+        min_score: f32,
+        deep: bool,
+        keyword: bool,
+        semantic: bool,
+        no_rerank: bool,
+        debug: bool,
+    ) -> Result<String> {
+        let mode_flags = deep as u8 + keyword as u8 + semantic as u8;
+        if mode_flags > 1 {
+            return Err(
+                KboltError::InvalidInput(
+                    "only one of --deep, --keyword, or --semantic can be set".to_string(),
+                )
+                .into(),
+            );
+        }
+
+        let mode = if deep {
+            SearchMode::Deep
+        } else if keyword {
+            SearchMode::Keyword
+        } else if semantic {
+            SearchMode::Semantic
+        } else {
+            SearchMode::Auto
+        };
+
+        let response = self.engine.search(SearchRequest {
+            query: query.to_string(),
+            mode,
+            space: space.map(ToString::to_string),
+            collections: collections.to_vec(),
+            limit,
+            min_score,
+            no_rerank,
+            debug,
+        })?;
+
+        let mut lines = Vec::new();
+        lines.push(format!("query: {}", response.query));
+        lines.push(format!("mode: {}", format_search_mode(&response.mode)));
+        lines.push(format!("results: {}", response.results.len()));
+        for (index, item) in response.results.iter().enumerate() {
+            lines.push(format!(
+                "{}. {} {} score={:.3}",
+                index + 1,
+                item.docid,
+                item.path,
+                item.score
+            ));
+            lines.push(format!("title: {}", item.title));
+            lines.push(format!("space: {} | collection: {}", item.space, item.collection));
+            if let Some(heading) = &item.heading {
+                lines.push(format!("heading: {heading}"));
+            }
+            lines.push(format!("text: {}", item.text));
+            if let Some(signals) = &item.signals {
+                lines.push(format!(
+                    "signals: bm25={:?} dense={:?} rrf={:.3} reranker={:?}",
+                    signals.bm25, signals.dense, signals.rrf, signals.reranker
+                ));
+            }
+        }
+        if let Some(hint) = response.staleness_hint {
+            lines.push(hint);
+        }
+        lines.push(format!("elapsed_ms: {}", response.elapsed_ms));
+        Ok(lines.join("\n"))
+    }
+
     pub fn update(
         &self,
         space: Option<&str>,
@@ -557,6 +636,15 @@ impl CliAdapter {
         }
         lines.push(format!("resolved_count: {}", response.resolved_count));
         Ok(lines.join("\n"))
+    }
+}
+
+fn format_search_mode(mode: &SearchMode) -> &'static str {
+    match mode {
+        SearchMode::Auto => "auto",
+        SearchMode::Deep => "deep",
+        SearchMode::Keyword => "keyword",
+        SearchMode::Semantic => "semantic",
     }
 }
 
@@ -1220,6 +1308,65 @@ mod tests {
                 output.contains(&format!("- expander: {expander_model} (missing)")),
                 "unexpected output: {output}"
             );
+        });
+    }
+
+    #[test]
+    fn search_rejects_conflicting_mode_flags() {
+        with_isolated_xdg_dirs(|| {
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            let err = adapter
+                .search(None, "alpha", &[], 10, 0.0, true, true, false, false, false)
+                .expect_err("conflicting search flags should fail");
+            assert!(
+                err.to_string().contains("only one of --deep, --keyword, or --semantic"),
+                "unexpected error: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn search_keyword_formats_ranked_output() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            adapter
+                .space_add("work", None, false, &[])
+                .expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            adapter
+                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .expect("add collection");
+
+            fs::write(collection_path.join("a.md"), "alpha query token\n").expect("write file");
+            adapter
+                .update(Some("work"), &["api".to_string()], true, false, false)
+                .expect("run update");
+
+            let output = adapter
+                .search(
+                    Some("work"),
+                    "alpha",
+                    &["api".to_string()],
+                    5,
+                    0.0,
+                    false,
+                    true,
+                    false,
+                    false,
+                    true,
+                )
+                .expect("run search");
+            assert!(output.contains("query: alpha"), "unexpected output: {output}");
+            assert!(output.contains("mode: keyword"), "unexpected output: {output}");
+            assert!(output.contains("results: 1"), "unexpected output: {output}");
+            assert!(output.contains("1. #"), "unexpected output: {output}");
+            assert!(output.contains("api/a.md"), "unexpected output: {output}");
+            assert!(output.contains("signals:"), "unexpected output: {output}");
         });
     }
 
