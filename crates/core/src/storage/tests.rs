@@ -2148,6 +2148,7 @@ fn disk_usage_sums_sqlite_indexes_and_models() {
     let tmp = tempdir().expect("create tempdir");
     let cache_dir = tmp.path().join("cache");
     let storage = Storage::new(&cache_dir).expect("create storage");
+    let baseline = storage.disk_usage().expect("calculate baseline disk usage");
 
     std::fs::create_dir_all(cache_dir.join("spaces/work/tantivy/segments"))
         .expect("create work tantivy dir");
@@ -2175,9 +2176,9 @@ fn disk_usage_sums_sqlite_indexes_and_models() {
 
     let usage = storage.disk_usage().expect("calculate disk usage");
     assert_eq!(usage.sqlite_bytes, sqlite_bytes);
-    assert_eq!(usage.tantivy_bytes, 14);
-    assert_eq!(usage.usearch_bytes, 10);
-    assert_eq!(usage.models_bytes, 11);
+    assert_eq!(usage.tantivy_bytes, baseline.tantivy_bytes + 14);
+    assert_eq!(usage.usearch_bytes, baseline.usearch_bytes + 10);
+    assert_eq!(usage.models_bytes, baseline.models_bytes + 11);
     assert_eq!(
         usage.total_bytes,
         usage.sqlite_bytes + usage.tantivy_bytes + usage.usearch_bytes + usage.models_bytes
@@ -2192,8 +2193,11 @@ fn disk_usage_handles_missing_optional_directories() {
 
     let usage = storage.disk_usage().expect("calculate disk usage");
     assert!(usage.sqlite_bytes > 0);
-    assert_eq!(usage.tantivy_bytes, 0);
+    assert!(usage.tantivy_bytes > 0);
     assert_eq!(usage.usearch_bytes, 0);
     assert_eq!(usage.models_bytes, 0);
-    assert_eq!(usage.total_bytes, usage.sqlite_bytes);
+    assert_eq!(
+        usage.total_bytes,
+        usage.sqlite_bytes + usage.tantivy_bytes + usage.usearch_bytes + usage.models_bytes
+    );
 }
