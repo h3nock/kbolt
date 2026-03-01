@@ -12,7 +12,8 @@ use walkdir::WalkDir;
 use kbolt_types::{
     ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, CollectionStatus,
     DocumentResponse, FileEntry, FileError, GetRequest, KboltError, Locator, ModelInfo,
-    ModelStatus, SpaceInfo, SpaceStatus, StatusResponse, UpdateOptions, UpdateReport,
+    ModelStatus, MultiGetRequest, MultiGetResponse, OmitReason, OmittedFile, SpaceInfo,
+    SpaceStatus, StatusResponse, UpdateOptions, UpdateReport,
 };
 
 pub struct Engine {
@@ -298,6 +299,58 @@ impl Engine {
             stale,
             total_lines,
             returned_lines,
+        })
+    }
+
+    pub fn multi_get(&self, req: MultiGetRequest) -> Result<MultiGetResponse> {
+        if req.max_files == 0 {
+            return Err(KboltError::InvalidInput("max_files must be greater than 0".to_string()).into());
+        }
+        if req.max_bytes == 0 {
+            return Err(KboltError::InvalidInput("max_bytes must be greater than 0".to_string()).into());
+        }
+
+        let mut documents = Vec::new();
+        let mut omitted = Vec::new();
+        let mut consumed_bytes = 0usize;
+
+        for locator in req.locators {
+            let document = self.get_document(GetRequest {
+                locator,
+                space: req.space.clone(),
+                offset: None,
+                limit: None,
+            })?;
+
+            let size_bytes = document.content.as_bytes().len();
+            if documents.len() >= req.max_files {
+                omitted.push(OmittedFile {
+                    path: document.path,
+                    docid: document.docid,
+                    size_bytes,
+                    reason: OmitReason::MaxFiles,
+                });
+                continue;
+            }
+
+            if consumed_bytes.saturating_add(size_bytes) > req.max_bytes {
+                omitted.push(OmittedFile {
+                    path: document.path,
+                    docid: document.docid,
+                    size_bytes,
+                    reason: OmitReason::MaxBytes,
+                });
+                continue;
+            }
+
+            consumed_bytes = consumed_bytes.saturating_add(size_bytes);
+            documents.push(document);
+        }
+
+        Ok(MultiGetResponse {
+            resolved_count: documents.len(),
+            documents,
+            omitted,
         })
     }
 

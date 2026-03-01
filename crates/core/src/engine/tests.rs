@@ -5,7 +5,10 @@ use std::sync::{Mutex, OnceLock};
 use crate::config::{Config, ModelConfig, ReapingConfig};
 use crate::engine::Engine;
 use crate::storage::Storage;
-use kbolt_types::{ActiveSpaceSource, AddCollectionRequest, GetRequest, KboltError, Locator, UpdateOptions};
+use kbolt_types::{
+    ActiveSpaceSource, AddCollectionRequest, GetRequest, KboltError, Locator, MultiGetRequest,
+    OmitReason, UpdateOptions,
+};
 
 fn test_engine() -> Engine {
     let root = tempdir().expect("create temp root");
@@ -845,6 +848,95 @@ fn get_document_errors_for_deleted_file_and_ambiguous_docid() {
             }
             other => panic!("unexpected error: {other}"),
         }
+    });
+}
+
+#[test]
+fn multi_get_respects_max_files_and_preserves_locator_order() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        write_text_file(&work_path.join("a.md"), "a\n");
+        write_text_file(&work_path.join("b.md"), "bb\n");
+        write_text_file(&work_path.join("c.md"), "ccc\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let result = engine
+            .multi_get(MultiGetRequest {
+                locators: vec![
+                    Locator::Path("api/a.md".to_string()),
+                    Locator::Path("api/b.md".to_string()),
+                    Locator::Path("api/c.md".to_string()),
+                ],
+                space: Some("work".to_string()),
+                max_files: 2,
+                max_bytes: 1024,
+            })
+            .expect("run multi_get");
+
+        assert_eq!(result.resolved_count, 2);
+        assert_eq!(result.documents.len(), 2);
+        assert_eq!(result.documents[0].path, "api/a.md");
+        assert_eq!(result.documents[1].path, "api/b.md");
+        assert_eq!(result.omitted.len(), 1);
+        assert_eq!(result.omitted[0].path, "api/c.md");
+        assert_eq!(result.omitted[0].reason, OmitReason::MaxFiles);
+    });
+}
+
+#[test]
+fn multi_get_respects_max_bytes_and_supports_mixed_locators() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        write_text_file(&work_path.join("a.md"), "alpha\n");
+        write_text_file(&work_path.join("b.md"), "beta\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let files = engine
+            .list_files(Some("work"), "api", None)
+            .expect("list files");
+        let docid = files
+            .iter()
+            .find(|entry| entry.path == "a.md")
+            .expect("a.md entry should exist")
+            .docid
+            .clone();
+
+        let result = engine
+            .multi_get(MultiGetRequest {
+                locators: vec![
+                    Locator::DocId(docid),
+                    Locator::Path("api/b.md".to_string()),
+                ],
+                space: Some("work".to_string()),
+                max_files: 10,
+                max_bytes: 7,
+            })
+            .expect("run multi_get");
+
+        assert_eq!(result.resolved_count, 1);
+        assert_eq!(result.documents.len(), 1);
+        assert_eq!(result.documents[0].path, "api/a.md");
+        assert_eq!(result.omitted.len(), 1);
+        assert_eq!(result.omitted[0].path, "api/b.md");
+        assert_eq!(result.omitted[0].reason, OmitReason::MaxBytes);
     });
 }
 
