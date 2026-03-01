@@ -105,6 +105,10 @@ fn run() -> Result<()> {
             )?;
             println!("{line}");
         }
+        Command::Status => {
+            let line = adapter.status(cli.space.as_deref())?;
+            println!("{line}");
+        }
     }
 
     Ok(())

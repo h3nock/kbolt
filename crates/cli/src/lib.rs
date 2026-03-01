@@ -332,6 +332,87 @@ impl CliAdapter {
         lines.push(format!("elapsed_ms: {}", report.elapsed_ms));
         Ok(lines.join("\n"))
     }
+
+    pub fn status(&self, space: Option<&str>) -> Result<String> {
+        let status = self.engine.status(space)?;
+        let mut lines = Vec::new();
+        lines.push("spaces:".to_string());
+        if status.spaces.is_empty() {
+            lines.push("- none".to_string());
+        } else {
+            for space in status.spaces {
+                let collection_count = space.collections.len();
+                let description = space.description.unwrap_or_default();
+                let description_suffix = if description.is_empty() {
+                    String::new()
+                } else {
+                    format!(" - {description}")
+                };
+                let last_updated = space
+                    .last_updated
+                    .as_deref()
+                    .map(|value| format!(", last_updated: {value}"))
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "- {} (collections: {}{}){}",
+                    space.name, collection_count, last_updated, description_suffix
+                ));
+
+                for collection in space.collections {
+                    lines.push(format!(
+                        "  - {} ({}) documents: {}, active: {}, chunks: {}, embedded: {}, last_updated: {}",
+                        collection.name,
+                        collection.path.display(),
+                        collection.documents,
+                        collection.active_documents,
+                        collection.chunks,
+                        collection.embedded_chunks,
+                        collection.last_updated
+                    ));
+                }
+            }
+        }
+
+        lines.push(format!("total_documents: {}", status.total_documents));
+        lines.push(format!("total_chunks: {}", status.total_chunks));
+        lines.push(format!("total_embedded: {}", status.total_embedded));
+        lines.push(format!("sqlite_bytes: {}", status.disk_usage.sqlite_bytes));
+        lines.push(format!("tantivy_bytes: {}", status.disk_usage.tantivy_bytes));
+        lines.push(format!("usearch_bytes: {}", status.disk_usage.usearch_bytes));
+        lines.push(format!("models_bytes: {}", status.disk_usage.models_bytes));
+        lines.push(format!("total_bytes: {}", status.disk_usage.total_bytes));
+        lines.push(format!(
+            "model_embedder: {} ({})",
+            status.models.embedder.name,
+            if status.models.embedder.downloaded {
+                "downloaded"
+            } else {
+                "missing"
+            }
+        ));
+        lines.push(format!(
+            "model_reranker: {} ({})",
+            status.models.reranker.name,
+            if status.models.reranker.downloaded {
+                "downloaded"
+            } else {
+                "missing"
+            }
+        ));
+        lines.push(format!(
+            "model_expander: {} ({})",
+            status.models.expander.name,
+            if status.models.expander.downloaded {
+                "downloaded"
+            } else {
+                "missing"
+            }
+        ));
+        lines.push(format!("cache_dir: {}", status.cache_dir.display()));
+        lines.push(format!("config_dir: {}", status.config_dir.display()));
+
+        Ok(lines.join("\n"))
+    }
 }
 
 #[cfg(test)]
@@ -1036,6 +1117,100 @@ mod tests {
                 .list_documents(collection.id, false)
                 .expect("list docs");
             assert!(docs.is_empty(), "dry run should not persist docs");
+        });
+    }
+
+    #[test]
+    fn status_reports_spaces_totals_and_models() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            adapter
+                .space_add("work", Some("work docs"), false, &[])
+                .expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            adapter
+                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .expect("add collection");
+
+            let file_path = collection_path.join("src/lib.rs");
+            fs::create_dir_all(file_path.parent().expect("file parent")).expect("create parent");
+            fs::write(&file_path, "fn alpha() {}\n").expect("write file");
+            adapter
+                .update(Some("work"), &["api".to_string()], true, false, false)
+                .expect("run update");
+
+            let output = adapter.status(None).expect("run status");
+            assert!(output.contains("spaces:"), "unexpected output: {output}");
+            assert!(
+                output.contains("- work (collections: 1"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("  - api ("),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("total_documents: 1"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("total_chunks: 1"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("model_embedder:"),
+                "unexpected output: {output}"
+            );
+            assert!(output.contains("cache_dir:"), "unexpected output: {output}");
+            assert!(output.contains("config_dir:"), "unexpected output: {output}");
+        });
+    }
+
+    #[test]
+    fn status_supports_space_scope() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            adapter
+                .space_add("work", None, false, &[])
+                .expect("add work");
+            adapter
+                .space_add("notes", None, false, &[])
+                .expect("add notes");
+
+            let work_collection = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            adapter
+                .collection_add(Some("work"), &work_collection, Some("api"), None, None, true)
+                .expect("add work collection");
+            let notes_collection = new_collection_dir(&root.path().to_path_buf(), "notes-wiki");
+            adapter
+                .collection_add(Some("notes"), &notes_collection, Some("wiki"), None, None, true)
+                .expect("add notes collection");
+
+            fs::write(work_collection.join("a.md"), "alpha\n").expect("write work file");
+            fs::write(notes_collection.join("b.md"), "beta\n").expect("write notes file");
+            adapter
+                .update(None, &[], true, false, false)
+                .expect("run update");
+
+            let output = adapter.status(Some("work")).expect("run scoped status");
+            assert!(
+                output.contains("- work (collections: 1"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                !output.contains("- notes (collections: 1"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("total_documents: 1"),
+                "unexpected output: {output}"
+            );
         });
     }
 }

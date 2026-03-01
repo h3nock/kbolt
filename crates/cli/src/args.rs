@@ -17,6 +17,7 @@ pub enum Command {
     Space(SpaceArgs),
     Collection(CollectionArgs),
     Update(UpdateArgs),
+    Status,
 }
 
 #[derive(Debug, Args)]
@@ -107,6 +108,7 @@ mod tests {
             Command::Space(space) => assert_eq!(space.command, SpaceCommand::Current),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -129,6 +131,7 @@ mod tests {
             ),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -160,6 +163,7 @@ mod tests {
             ),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -181,6 +185,7 @@ mod tests {
             ),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -193,6 +198,7 @@ mod tests {
             Command::Space(space) => assert_eq!(space.command, SpaceCommand::Default { name: None }),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -212,6 +218,7 @@ mod tests {
             ),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -230,6 +237,7 @@ mod tests {
             ),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -249,6 +257,7 @@ mod tests {
             ),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -266,6 +275,7 @@ mod tests {
             ),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -278,6 +288,7 @@ mod tests {
             Command::Space(space) => assert_eq!(space.command, SpaceCommand::List),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -295,6 +306,7 @@ mod tests {
             ),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -308,6 +320,7 @@ mod tests {
             Command::Space(space) => assert_eq!(space.command, SpaceCommand::Current),
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -322,6 +335,7 @@ mod tests {
             }
             Command::Space(_) => panic!("unexpected space command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -356,6 +370,7 @@ mod tests {
             ),
             Command::Space(_) => panic!("unexpected space command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -374,6 +389,7 @@ mod tests {
             ),
             Command::Space(_) => panic!("unexpected space command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -394,6 +410,7 @@ mod tests {
             ),
             Command::Space(_) => panic!("unexpected space command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -413,6 +430,7 @@ mod tests {
             ),
             Command::Space(_) => panic!("unexpected space command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -431,6 +449,7 @@ mod tests {
             ),
             Command::Space(_) => panic!("unexpected space command"),
             Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -451,6 +470,7 @@ mod tests {
             ),
             Command::Space(_) => panic!("unexpected space command"),
             Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Status => panic!("unexpected status command"),
         }
     }
 
@@ -482,6 +502,29 @@ mod tests {
             ),
             Command::Space(_) => panic!("unexpected space command"),
             Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Status => panic!("unexpected status command"),
+        }
+    }
+
+    #[test]
+    fn parses_status_command_with_and_without_space() {
+        let parsed = Cli::try_parse_from(["kbolt", "status"]).expect("parse cli");
+        assert_eq!(parsed.space, None);
+        match parsed.command {
+            Command::Status => {}
+            Command::Space(_) => panic!("unexpected space command"),
+            Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
+        }
+
+        let parsed = Cli::try_parse_from(["kbolt", "--space", "work", "status"])
+            .expect("parse cli");
+        assert_eq!(parsed.space.as_deref(), Some("work"));
+        match parsed.command {
+            Command::Status => {}
+            Command::Space(_) => panic!("unexpected space command"),
+            Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Update(_) => panic!("unexpected update command"),
         }
     }
 }
