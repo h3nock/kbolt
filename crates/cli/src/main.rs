@@ -26,6 +26,10 @@ fn run() -> Result<()> {
                 let line = adapter.space_describe(&name, &text)?;
                 println!("{line}");
             }
+            SpaceCommand::Rename { old, new } => {
+                let line = adapter.space_rename(&old, &new)?;
+                println!("{line}");
+            }
             SpaceCommand::Current => {
                 let line = adapter.space_current(cli.space.as_deref())?;
                 println!("{line}");

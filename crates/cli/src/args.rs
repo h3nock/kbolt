@@ -32,6 +32,10 @@ pub enum SpaceCommand {
         name: String,
         text: String,
     },
+    Rename {
+        old: String,
+        new: String,
+    },
     Current,
     Default { name: Option<String> },
     List,
@@ -110,6 +114,23 @@ mod tests {
                 space.command,
                 SpaceCommand::Default {
                     name: Some("work".to_string())
+                }
+            ),
+        }
+    }
+
+    #[test]
+    fn parses_space_rename() {
+        let parsed = Cli::try_parse_from(["kbolt", "space", "rename", "work", "team"])
+            .expect("parse cli");
+        assert_eq!(parsed.space, None);
+
+        match parsed.command {
+            Command::Space(space) => assert_eq!(
+                space.command,
+                SpaceCommand::Rename {
+                    old: "work".to_string(),
+                    new: "team".to_string()
                 }
             ),
         }
