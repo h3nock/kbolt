@@ -18,9 +18,15 @@ fn load_creates_default_config_and_directories() {
     assert!(config_dir.is_dir());
     assert!(cache_dir.is_dir());
     assert_eq!(config.default_space, None);
-    assert_eq!(config.models.embed, DEFAULT_EMBED_MODEL);
-    assert_eq!(config.models.reranker, DEFAULT_RERANKER_MODEL);
-    assert_eq!(config.models.expander, DEFAULT_EXPANDER_MODEL);
+    assert_eq!(config.models.embedder.provider, ModelProvider::HuggingFace);
+    assert_eq!(config.models.embedder.id, DEFAULT_EMBED_MODEL);
+    assert_eq!(config.models.embedder.revision, None);
+    assert_eq!(config.models.reranker.provider, ModelProvider::HuggingFace);
+    assert_eq!(config.models.reranker.id, DEFAULT_RERANKER_MODEL);
+    assert_eq!(config.models.reranker.revision, None);
+    assert_eq!(config.models.expander.provider, ModelProvider::HuggingFace);
+    assert_eq!(config.models.expander.id, DEFAULT_EXPANDER_MODEL);
+    assert_eq!(config.models.expander.revision, None);
     assert_eq!(config.reaping.days, DEFAULT_REAP_DAYS);
 }
 
@@ -37,9 +43,19 @@ fn load_reads_existing_values() {
 default_space = "work"
 
 [models]
-embed = "embed-model"
-reranker = "reranker-model"
-expander = "expander-model"
+
+[models.embedder]
+provider = "hugging-face"
+id = "embed-model"
+revision = "main"
+
+[models.reranker]
+provider = "hugging-face"
+id = "reranker-model"
+
+[models.expander]
+provider = "hugging-face"
+id = "expander-model"
 
 [reaping]
 days = 14
@@ -50,9 +66,15 @@ days = 14
     let config = load_from_file(&config_file, &config_dir, &cache_dir).expect("load config");
 
     assert_eq!(config.default_space.as_deref(), Some("work"));
-    assert_eq!(config.models.embed, "embed-model");
-    assert_eq!(config.models.reranker, "reranker-model");
-    assert_eq!(config.models.expander, "expander-model");
+    assert_eq!(config.models.embedder.provider, ModelProvider::HuggingFace);
+    assert_eq!(config.models.embedder.id, "embed-model");
+    assert_eq!(config.models.embedder.revision.as_deref(), Some("main"));
+    assert_eq!(config.models.reranker.provider, ModelProvider::HuggingFace);
+    assert_eq!(config.models.reranker.id, "reranker-model");
+    assert_eq!(config.models.reranker.revision, None);
+    assert_eq!(config.models.expander.provider, ModelProvider::HuggingFace);
+    assert_eq!(config.models.expander.id, "expander-model");
+    assert_eq!(config.models.expander.revision, None);
     assert_eq!(config.reaping.days, 14);
 }
 
@@ -66,9 +88,21 @@ fn save_writes_index_toml() {
         cache_dir: cache_dir.clone(),
         default_space: Some("notes".to_string()),
         models: ModelConfig {
-            embed: "embed-model".to_string(),
-            reranker: "reranker-model".to_string(),
-            expander: "expander-model".to_string(),
+            embedder: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "embed-model".to_string(),
+                revision: Some("main".to_string()),
+            },
+            reranker: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "reranker-model".to_string(),
+                revision: None,
+            },
+            expander: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "expander-model".to_string(),
+                revision: None,
+            },
         },
         reaping: ReapingConfig { days: 30 },
     };
@@ -78,9 +112,15 @@ fn save_writes_index_toml() {
     let parsed: FileConfig = toml::from_str(&written).expect("parse config");
 
     assert_eq!(parsed.default_space.as_deref(), Some("notes"));
-    assert_eq!(parsed.models.embed, "embed-model");
-    assert_eq!(parsed.models.reranker, "reranker-model");
-    assert_eq!(parsed.models.expander, "expander-model");
+    assert_eq!(parsed.models.embedder.provider, ModelProvider::HuggingFace);
+    assert_eq!(parsed.models.embedder.id, "embed-model");
+    assert_eq!(parsed.models.embedder.revision.as_deref(), Some("main"));
+    assert_eq!(parsed.models.reranker.provider, ModelProvider::HuggingFace);
+    assert_eq!(parsed.models.reranker.id, "reranker-model");
+    assert_eq!(parsed.models.reranker.revision, None);
+    assert_eq!(parsed.models.expander.provider, ModelProvider::HuggingFace);
+    assert_eq!(parsed.models.expander.id, "expander-model");
+    assert_eq!(parsed.models.expander.revision, None);
     assert_eq!(parsed.reaping.days, 30);
     assert!(cache_dir.is_dir());
 }

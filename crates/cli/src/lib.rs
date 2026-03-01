@@ -1329,9 +1329,9 @@ mod tests {
         with_isolated_xdg_dirs(|| {
             let engine = Engine::new(None).expect("create engine");
             let adapter = CliAdapter::new(engine);
-            let embed_model = adapter.engine.config().models.embed.clone();
-            let reranker_model = adapter.engine.config().models.reranker.clone();
-            let expander_model = adapter.engine.config().models.expander.clone();
+            let embed_model = adapter.engine.config().models.embedder.id.clone();
+            let reranker_model = adapter.engine.config().models.reranker.id.clone();
+            let expander_model = adapter.engine.config().models.expander.id.clone();
 
             let output = adapter.models_list().expect("list models");
             assert!(output.contains("models:"), "unexpected output: {output}");
@@ -1364,9 +1364,9 @@ mod tests {
             fs::write(model_dir.join("reranker/model.bin"), b"r").expect("seed reranker");
             fs::write(model_dir.join("expander/model.bin"), b"x").expect("seed expander");
 
-            let embed_model = adapter.engine.config().models.embed.clone();
-            let reranker_model = adapter.engine.config().models.reranker.clone();
-            let expander_model = adapter.engine.config().models.expander.clone();
+            let embed_model = adapter.engine.config().models.embedder.id.clone();
+            let reranker_model = adapter.engine.config().models.reranker.id.clone();
+            let expander_model = adapter.engine.config().models.expander.id.clone();
 
             let output = adapter.models_pull().expect("pull models");
             assert!(output.contains("downloaded: 0"), "unexpected output: {output}");

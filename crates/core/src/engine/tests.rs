@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::sync::{Mutex, OnceLock};
 
-use crate::config::{Config, ModelConfig, ReapingConfig};
+use crate::config::{Config, ModelConfig, ModelProvider, ModelSourceConfig, ReapingConfig};
 use crate::engine::Engine;
 use crate::storage::Storage;
 use crate::ModelPullEvent;
@@ -25,9 +25,21 @@ fn test_engine() -> Engine {
         cache_dir,
         default_space: None,
         models: ModelConfig {
-            embed: "embed-model".to_string(),
-            reranker: "reranker-model".to_string(),
-            expander: "expander-model".to_string(),
+            embedder: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "embed-model".to_string(),
+                revision: None,
+            },
+            reranker: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "reranker-model".to_string(),
+                revision: None,
+            },
+            expander: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "expander-model".to_string(),
+                revision: None,
+            },
         },
         reaping: ReapingConfig { days: 7 },
     };
@@ -46,9 +58,21 @@ fn test_engine_with_default_space(default_space: Option<&str>) -> Engine {
         cache_dir,
         default_space: default_space.map(ToString::to_string),
         models: ModelConfig {
-            embed: "embed-model".to_string(),
-            reranker: "reranker-model".to_string(),
-            expander: "expander-model".to_string(),
+            embedder: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "embed-model".to_string(),
+                revision: None,
+            },
+            reranker: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "reranker-model".to_string(),
+                revision: None,
+            },
+            expander: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "expander-model".to_string(),
+                revision: None,
+            },
         },
         reaping: ReapingConfig { days: 7 },
     };
@@ -174,7 +198,7 @@ fn describe_rename_and_remove_space_delegate_to_storage() {
 fn config_and_storage_accessors_expose_engine_components() {
     let engine = test_engine();
     assert_eq!(
-        engine.config().models.embed,
+        engine.config().models.embedder.id,
         "embed-model",
         "config accessor should expose loaded config"
     );
@@ -1529,9 +1553,9 @@ fn status_reports_space_collection_and_model_counts() {
             engine.storage().count_embedded_chunks(None).unwrap()
         );
 
-        assert_eq!(status.models.embedder.name, engine.config().models.embed);
-        assert_eq!(status.models.reranker.name, engine.config().models.reranker);
-        assert_eq!(status.models.expander.name, engine.config().models.expander);
+        assert_eq!(status.models.embedder.name, engine.config().models.embedder.id);
+        assert_eq!(status.models.reranker.name, engine.config().models.reranker.id);
+        assert_eq!(status.models.expander.name, engine.config().models.expander.id);
         assert!(!status.models.embedder.downloaded);
         assert!(!status.models.reranker.downloaded);
         assert!(!status.models.expander.downloaded);

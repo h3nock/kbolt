@@ -2,7 +2,7 @@ use std::path::Path;
 
 use tempfile::tempdir;
 
-use crate::config::ModelConfig;
+use crate::config::{ModelConfig, ModelProvider, ModelSourceConfig};
 use crate::models::{
     pull_with_downloader, pull_with_downloader_and_progress, status, ModelArtifactProvider,
     ModelPullEvent,
@@ -24,9 +24,21 @@ impl ModelArtifactProvider for FakeDownloader {
 
 fn test_config() -> ModelConfig {
     ModelConfig {
-        embed: "embed-model".to_string(),
-        reranker: "rerank-model".to_string(),
-        expander: "expand-model".to_string(),
+        embedder: ModelSourceConfig {
+            provider: ModelProvider::HuggingFace,
+            id: "embed-model".to_string(),
+            revision: None,
+        },
+        reranker: ModelSourceConfig {
+            provider: ModelProvider::HuggingFace,
+            id: "rerank-model".to_string(),
+            revision: None,
+        },
+        expander: ModelSourceConfig {
+            provider: ModelProvider::HuggingFace,
+            id: "expand-model".to_string(),
+            revision: None,
+        },
     }
 }
 

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use kbolt_types::{ModelInfo, ModelStatus, PullReport};
 
-use crate::config::ModelConfig;
+use crate::config::{ModelConfig, ModelSourceConfig};
 use crate::Result;
 
 mod provider;
@@ -19,7 +19,7 @@ use providers::hf::HfHubDownloader;
 #[derive(Debug, Clone)]
 struct ModelTarget {
     role_dir: &'static str,
-    model_id: String,
+    source: ModelSourceConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,7 +80,7 @@ where
 
     for target in model_targets(config) {
         let role = target.role_dir.to_string();
-        let model = target.model_id.clone();
+        let model = target.source.id.clone();
         let target_dir = model_dir.join(target.role_dir);
         let existing_bytes = dir_size_bytes(&target_dir).unwrap_or(0);
         if existing_bytes > 0 {
@@ -97,7 +97,7 @@ where
             role: role.clone(),
             model: model.clone(),
         });
-        let downloaded_bytes = downloader.download_model(&target.model_id, &target_dir)?;
+        let downloaded_bytes = downloader.download_model(&target.source.id, &target_dir)?;
         on_event(ModelPullEvent::DownloadCompleted {
             role,
             model: model.clone(),
@@ -127,15 +127,15 @@ fn model_targets(config: &ModelConfig) -> [ModelTarget; 3] {
     [
         ModelTarget {
             role_dir: MODEL_DIRNAME_EMBEDDER,
-            model_id: config.embed.clone(),
+            source: config.embedder.clone(),
         },
         ModelTarget {
             role_dir: MODEL_DIRNAME_RERANKER,
-            model_id: config.reranker.clone(),
+            source: config.reranker.clone(),
         },
         ModelTarget {
             role_dir: MODEL_DIRNAME_EXPANDER,
-            model_id: config.expander.clone(),
+            source: config.expander.clone(),
         },
     ]
 }
@@ -144,7 +144,7 @@ fn info_for_target(model_dir: &Path, target: &ModelTarget) -> Result<ModelInfo> 
     let target_dir = model_dir.join(target.role_dir);
     let size = dir_size_bytes(&target_dir)?;
     Ok(ModelInfo {
-        name: target.model_id.clone(),
+        name: target.source.id.clone(),
         downloaded: size > 0,
         size_bytes: if size > 0 { Some(size) } else { None },
         path: Some(target_dir),

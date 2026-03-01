@@ -22,11 +22,45 @@ pub struct Config {
     pub reaping: ReapingConfig,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelConfig {
-    pub embed: String,
-    pub reranker: String,
-    pub expander: String,
+    #[serde(default = "default_embedder_source")]
+    pub embedder: ModelSourceConfig,
+    #[serde(default = "default_reranker_source")]
+    pub reranker: ModelSourceConfig,
+    #[serde(default = "default_expander_source")]
+    pub expander: ModelSourceConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelProvider {
+    HuggingFace,
+}
+
+impl Default for ModelProvider {
+    fn default() -> Self {
+        Self::HuggingFace
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSourceConfig {
+    #[serde(default)]
+    pub provider: ModelProvider,
+    pub id: String,
+    #[serde(default)]
+    pub revision: Option<String>,
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            embedder: default_embedder_source(),
+            reranker: default_reranker_source(),
+            expander: default_expander_source(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,11 +140,7 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
             config_dir: config_dir.to_path_buf(),
             cache_dir: cache_dir.to_path_buf(),
             default_space: None,
-            models: ModelConfig {
-                embed: DEFAULT_EMBED_MODEL.to_string(),
-                reranker: DEFAULT_RERANKER_MODEL.to_string(),
-                expander: DEFAULT_EXPANDER_MODEL.to_string(),
-            },
+            models: ModelConfig::default(),
             reaping: ReapingConfig {
                 days: DEFAULT_REAP_DAYS,
             },
@@ -125,11 +155,7 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
         config_dir: config_dir.to_path_buf(),
         cache_dir: cache_dir.to_path_buf(),
         default_space: file_config.default_space,
-        models: ModelConfig {
-            embed: file_config.models.embed,
-            reranker: file_config.models.reranker,
-            expander: file_config.models.expander,
-        },
+        models: file_config.models,
         reaping: ReapingConfig {
             days: file_config.reaping.days,
         },
@@ -141,29 +167,9 @@ struct FileConfig {
     #[serde(default)]
     default_space: Option<String>,
     #[serde(default)]
-    models: FileModelConfig,
+    models: ModelConfig,
     #[serde(default)]
     reaping: FileReapingConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct FileModelConfig {
-    #[serde(default = "default_embed_model")]
-    embed: String,
-    #[serde(default = "default_reranker_model")]
-    reranker: String,
-    #[serde(default = "default_expander_model")]
-    expander: String,
-}
-
-impl Default for FileModelConfig {
-    fn default() -> Self {
-        Self {
-            embed: default_embed_model(),
-            reranker: default_reranker_model(),
-            expander: default_expander_model(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -184,11 +190,7 @@ impl From<&Config> for FileConfig {
     fn from(value: &Config) -> Self {
         Self {
             default_space: value.default_space.clone(),
-            models: FileModelConfig {
-                embed: value.models.embed.clone(),
-                reranker: value.models.reranker.clone(),
-                expander: value.models.expander.clone(),
-            },
+            models: value.models.clone(),
             reaping: FileReapingConfig {
                 days: value.reaping.days,
             },
@@ -196,16 +198,28 @@ impl From<&Config> for FileConfig {
     }
 }
 
-fn default_embed_model() -> String {
-    DEFAULT_EMBED_MODEL.to_string()
+fn default_embedder_source() -> ModelSourceConfig {
+    ModelSourceConfig {
+        provider: ModelProvider::HuggingFace,
+        id: DEFAULT_EMBED_MODEL.to_string(),
+        revision: None,
+    }
 }
 
-fn default_reranker_model() -> String {
-    DEFAULT_RERANKER_MODEL.to_string()
+fn default_reranker_source() -> ModelSourceConfig {
+    ModelSourceConfig {
+        provider: ModelProvider::HuggingFace,
+        id: DEFAULT_RERANKER_MODEL.to_string(),
+        revision: None,
+    }
 }
 
-fn default_expander_model() -> String {
-    DEFAULT_EXPANDER_MODEL.to_string()
+fn default_expander_source() -> ModelSourceConfig {
+    ModelSourceConfig {
+        provider: ModelProvider::HuggingFace,
+        id: DEFAULT_EXPANDER_MODEL.to_string(),
+        revision: None,
+    }
 }
 
 fn default_reap_days() -> u32 {
