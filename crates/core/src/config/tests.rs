@@ -28,6 +28,13 @@ fn load_creates_default_config_and_directories() {
     assert_eq!(config.models.expander.id, DEFAULT_EXPANDER_MODEL);
     assert_eq!(config.models.expander.revision, None);
     assert_eq!(config.reaping.days, DEFAULT_REAP_DAYS);
+    assert_eq!(config.chunking.defaults.target_tokens, 450);
+    assert_eq!(config.chunking.defaults.soft_max_tokens, 550);
+    assert_eq!(config.chunking.defaults.hard_max_tokens, 750);
+    assert_eq!(config.chunking.defaults.boundary_overlap_tokens, 48);
+    assert_eq!(config.chunking.defaults.neighbor_window, 1);
+    assert!(config.chunking.defaults.contextual_prefix);
+    assert!(config.chunking.profiles.is_empty());
 }
 
 #[test]
@@ -59,6 +66,22 @@ id = "expander-model"
 
 [reaping]
 days = 14
+
+[chunking.defaults]
+target_tokens = 500
+soft_max_tokens = 600
+hard_max_tokens = 800
+boundary_overlap_tokens = 32
+neighbor_window = 2
+contextual_prefix = false
+
+[chunking.profiles.code]
+target_tokens = 320
+soft_max_tokens = 420
+hard_max_tokens = 560
+boundary_overlap_tokens = 24
+neighbor_window = 1
+contextual_prefix = true
 "#,
     )
     .expect("write config file");
@@ -76,6 +99,23 @@ days = 14
     assert_eq!(config.models.expander.id, "expander-model");
     assert_eq!(config.models.expander.revision, None);
     assert_eq!(config.reaping.days, 14);
+    assert_eq!(config.chunking.defaults.target_tokens, 500);
+    assert_eq!(config.chunking.defaults.soft_max_tokens, 600);
+    assert_eq!(config.chunking.defaults.hard_max_tokens, 800);
+    assert_eq!(config.chunking.defaults.boundary_overlap_tokens, 32);
+    assert_eq!(config.chunking.defaults.neighbor_window, 2);
+    assert!(!config.chunking.defaults.contextual_prefix);
+    assert_eq!(
+        config.chunking.profiles.get("code"),
+        Some(&ChunkPolicy {
+            target_tokens: 320,
+            soft_max_tokens: 420,
+            hard_max_tokens: 560,
+            boundary_overlap_tokens: 24,
+            neighbor_window: 1,
+            contextual_prefix: true
+        })
+    );
 }
 
 #[test]
@@ -105,6 +145,29 @@ fn save_writes_index_toml() {
             },
         },
         reaping: ReapingConfig { days: 30 },
+        chunking: ChunkingConfig {
+            defaults: ChunkPolicy {
+                target_tokens: 480,
+                soft_max_tokens: 580,
+                hard_max_tokens: 760,
+                boundary_overlap_tokens: 40,
+                neighbor_window: 2,
+                contextual_prefix: false,
+            },
+            profiles: [(
+                "md".to_string(),
+                ChunkPolicy {
+                    target_tokens: 450,
+                    soft_max_tokens: 550,
+                    hard_max_tokens: 750,
+                    boundary_overlap_tokens: 48,
+                    neighbor_window: 1,
+                    contextual_prefix: true,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        },
     };
 
     save(&config).expect("save config");
@@ -122,6 +185,23 @@ fn save_writes_index_toml() {
     assert_eq!(parsed.models.expander.id, "expander-model");
     assert_eq!(parsed.models.expander.revision, None);
     assert_eq!(parsed.reaping.days, 30);
+    assert_eq!(parsed.chunking.defaults.target_tokens, 480);
+    assert_eq!(parsed.chunking.defaults.soft_max_tokens, 580);
+    assert_eq!(parsed.chunking.defaults.hard_max_tokens, 760);
+    assert_eq!(parsed.chunking.defaults.boundary_overlap_tokens, 40);
+    assert_eq!(parsed.chunking.defaults.neighbor_window, 2);
+    assert!(!parsed.chunking.defaults.contextual_prefix);
+    assert_eq!(
+        parsed.chunking.profiles.get("md"),
+        Some(&ChunkPolicy {
+            target_tokens: 450,
+            soft_max_tokens: 550,
+            hard_max_tokens: 750,
+            boundary_overlap_tokens: 48,
+            neighbor_window: 1,
+            contextual_prefix: true
+        })
+    );
     assert!(cache_dir.is_dir());
 }
 

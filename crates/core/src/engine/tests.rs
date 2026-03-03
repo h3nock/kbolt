@@ -4,7 +4,9 @@ use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::sync::{Mutex, OnceLock};
 
-use crate::config::{Config, ModelConfig, ModelProvider, ModelSourceConfig, ReapingConfig};
+use crate::config::{
+    ChunkingConfig, Config, ModelConfig, ModelProvider, ModelSourceConfig, ReapingConfig,
+};
 use crate::engine::Engine;
 use crate::storage::Storage;
 use crate::ModelPullEvent;
@@ -42,6 +44,7 @@ fn test_engine() -> Engine {
             },
         },
         reaping: ReapingConfig { days: 7 },
+        chunking: ChunkingConfig::default(),
     };
     Engine::from_parts(storage, config)
 }
@@ -75,6 +78,7 @@ fn test_engine_with_default_space(default_space: Option<&str>) -> Engine {
             },
         },
         reaping: ReapingConfig { days: 7 },
+        chunking: ChunkingConfig::default(),
     };
     Engine::from_parts(storage, config)
 }

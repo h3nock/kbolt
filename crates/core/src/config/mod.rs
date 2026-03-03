@@ -27,6 +27,7 @@ pub struct Config {
     pub default_space: Option<String>,
     pub models: ModelConfig,
     pub reaping: ReapingConfig,
+    pub chunking: ChunkingConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,7 +76,7 @@ pub struct ReapingConfig {
     pub days: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkingConfig {
     pub defaults: ChunkPolicy,
     pub profiles: HashMap<String, ChunkPolicy>,
@@ -195,6 +196,7 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
             reaping: ReapingConfig {
                 days: DEFAULT_REAP_DAYS,
             },
+            chunking: ChunkingConfig::default(),
         };
         save(&default_config)?;
     }
@@ -210,6 +212,7 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
         reaping: ReapingConfig {
             days: file_config.reaping.days,
         },
+        chunking: file_config.chunking,
     })
 }
 
@@ -221,6 +224,8 @@ struct FileConfig {
     models: ModelConfig,
     #[serde(default)]
     reaping: FileReapingConfig,
+    #[serde(default)]
+    chunking: ChunkingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -245,6 +250,7 @@ impl From<&Config> for FileConfig {
             reaping: FileReapingConfig {
                 days: value.reaping.days,
             },
+            chunking: value.chunking.clone(),
         }
     }
 }
