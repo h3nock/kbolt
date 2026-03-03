@@ -80,6 +80,12 @@ impl ExtractorRegistry {
     }
 }
 
+pub fn default_registry() -> ExtractorRegistry {
+    let mut registry = ExtractorRegistry::new();
+    registry.register(Arc::new(crate::ingest::plaintext::PlaintextExtractor));
+    registry
+}
+
 fn normalize_extension_key(raw: &str) -> String {
     raw.trim().trim_start_matches('.').to_ascii_lowercase()
 }
@@ -92,7 +98,7 @@ mod tests {
 
     use super::{
         normalize_extension_key, BlockKind, ExtractedBlock, ExtractedDocument, Extractor,
-        ExtractorRegistry,
+        default_registry, ExtractorRegistry,
     };
     use crate::Result;
 
@@ -185,5 +191,18 @@ mod tests {
             .resolve_for_path(Path::new("docs/LICENSE"))
             .expect("resolve fallback extractor");
         assert!(resolved.supports().is_empty());
+    }
+
+    #[test]
+    fn default_registry_resolves_plaintext_extensions() {
+        let registry = default_registry();
+
+        let txt = registry.resolve_for_path(Path::new("notes/readme.txt"));
+        let log = registry.resolve_for_path(Path::new("logs/server.LOG"));
+        let unknown = registry.resolve_for_path(Path::new("notes/image.png"));
+
+        assert!(txt.is_some());
+        assert!(log.is_some());
+        assert!(unknown.is_none());
     }
 }
