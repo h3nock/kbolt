@@ -21,6 +21,14 @@ pub enum FinalChunkKind {
     Mixed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackClass {
+    Narrative,
+    Code,
+    Table,
+    Opaque,
+}
+
 pub trait TokenCounter {
     fn count(&self, text: &str) -> usize;
 }
@@ -193,6 +201,24 @@ fn attach_table_header_attr(block: &ExtractedBlock, table_header: Option<&str>) 
 
 fn is_narrative_block_kind(kind: &BlockKind) -> bool {
     matches!(kind, BlockKind::Paragraph | BlockKind::ListItem | BlockKind::BlockQuote)
+}
+
+fn pack_class_for_kind(kind: &BlockKind) -> PackClass {
+    match kind {
+        BlockKind::Heading
+        | BlockKind::Paragraph
+        | BlockKind::ListItem
+        | BlockKind::BlockQuote => PackClass::Narrative,
+        BlockKind::CodeFence => PackClass::Code,
+        BlockKind::TableHeader | BlockKind::TableRow => PackClass::Table,
+        BlockKind::HtmlBlock => PackClass::Opaque,
+    }
+}
+
+fn can_pack_together(current: &ExtractedBlock, next: &ExtractedBlock) -> bool {
+    let current_class = pack_class_for_kind(&current.kind);
+    let next_class = pack_class_for_kind(&next.kind);
+    current_class == next_class && current_class != PackClass::Opaque
 }
 
 fn split_block_by_tokens(block: &ExtractedBlock, hard_max: usize, overlap: usize) -> Vec<ExtractedBlock> {
@@ -417,7 +443,8 @@ mod tests {
 
     use crate::config::{ChunkPolicy, ChunkingConfig};
     use crate::ingest::chunk::{
-        chunk_document, chunk_document_with_counter, derive_chunk_kind, resolve_policy,
+        can_pack_together, chunk_document, chunk_document_with_counter, derive_chunk_kind,
+        resolve_policy,
         FinalChunkKind, TokenCounter, WhitespaceTokenCounter,
     };
     use crate::ingest::extract::{BlockKind, ExtractedBlock, ExtractedDocument};
@@ -753,5 +780,31 @@ mod tests {
         assert_eq!(chunks[2].offset, 40);
         assert_eq!(chunks[2].length, 15);
         assert!(chunks.iter().all(|chunk| chunk.kind == FinalChunkKind::Table));
+    }
+
+    #[test]
+    fn can_pack_together_allows_same_narrative_family() {
+        let heading = block_with(BlockKind::Heading, "# Intro", 0, &[]);
+        let paragraph = block_with(BlockKind::Paragraph, "text", 10, &[]);
+        assert!(can_pack_together(&heading, &paragraph));
+    }
+
+    #[test]
+    fn can_pack_together_rejects_cross_family_boundaries() {
+        let paragraph = block_with(BlockKind::Paragraph, "text", 0, &[]);
+        let code = block_with(BlockKind::CodeFence, "fn a() {}", 10, &[]);
+        let table = block_with(BlockKind::TableRow, "|a|b|", 20, &[]);
+        assert!(!can_pack_together(&paragraph, &code));
+        assert!(!can_pack_together(&paragraph, &table));
+        assert!(!can_pack_together(&code, &table));
+    }
+
+    #[test]
+    fn can_pack_together_treats_html_as_opaque() {
+        let html = block_with(BlockKind::HtmlBlock, "<div>x</div>", 0, &[]);
+        let html2 = block_with(BlockKind::HtmlBlock, "<div>y</div>", 20, &[]);
+        let paragraph = block_with(BlockKind::Paragraph, "text", 40, &[]);
+        assert!(!can_pack_together(&html, &html2));
+        assert!(!can_pack_together(&html, &paragraph));
     }
 }
