@@ -29,6 +29,13 @@ enum PackClass {
     Opaque,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NarrativeBoundary {
+    Sentence,
+    Clause,
+    TokenWindow,
+}
+
 pub trait TokenCounter {
     fn count(&self, text: &str) -> usize;
 }
@@ -343,6 +350,57 @@ fn token_ends_sentence(token: &str) -> bool {
     trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?')
 }
 
+fn best_narrative_cut(
+    candidates: &[(usize, NarrativeBoundary)],
+    target_tokens: usize,
+    start_token: usize,
+    total_tokens: usize,
+) -> Option<usize> {
+    candidates
+        .iter()
+        .copied()
+        .max_by_key(|(end_token, boundary)| {
+            (
+                score_narrative_cut(
+                    target_tokens,
+                    start_token,
+                    *end_token,
+                    total_tokens,
+                    *boundary,
+                ),
+                *end_token as i64,
+            )
+        })
+        .map(|(end_token, _)| end_token)
+}
+
+fn score_narrative_cut(
+    target_tokens: usize,
+    start_token: usize,
+    end_token: usize,
+    total_tokens: usize,
+    boundary: NarrativeBoundary,
+) -> i64 {
+    let chunk_tokens = end_token.saturating_sub(start_token) as i64;
+    let distance = (chunk_tokens - target_tokens as i64).abs();
+    let boundary_score = match boundary {
+        NarrativeBoundary::Sentence => 30,
+        NarrativeBoundary::Clause => 15,
+        NarrativeBoundary::TokenWindow => 0,
+    };
+    let tiny_tail_penalty = {
+        let tiny_tail_threshold = (target_tokens / 4).max(1);
+        let tail = total_tokens.saturating_sub(end_token);
+        if tail > 0 && tail < tiny_tail_threshold {
+            20
+        } else {
+            0
+        }
+    };
+
+    boundary_score - (distance * 10) - tiny_tail_penalty
+}
+
 fn debug_assert_valid_blocks(blocks: &[ExtractedBlock]) {
     for block in blocks {
         debug_assert_eq!(
@@ -461,8 +519,8 @@ mod tests {
 
     use crate::config::{ChunkPolicy, ChunkingConfig};
     use crate::ingest::chunk::{
-        can_pack_together, chunk_document, chunk_document_with_counter, derive_chunk_kind,
-        resolve_policy,
+        best_narrative_cut, can_pack_together, chunk_document, chunk_document_with_counter,
+        derive_chunk_kind, resolve_policy, score_narrative_cut, NarrativeBoundary,
         FinalChunkKind, TokenCounter, WhitespaceTokenCounter,
     };
     use crate::ingest::extract::{BlockKind, ExtractedBlock, ExtractedDocument};
@@ -904,5 +962,36 @@ mod tests {
         let chunks = chunk_document(&document, &policy);
         assert!(chunks.len() >= 2);
         assert!(chunks.iter().all(|chunk| !chunk.text.is_empty()));
+    }
+
+    #[test]
+    fn score_narrative_cut_prefers_sentence_boundary_over_clause() {
+        let sentence = score_narrative_cut(8, 0, 8, 20, NarrativeBoundary::Sentence);
+        let clause = score_narrative_cut(8, 0, 8, 20, NarrativeBoundary::Clause);
+        let token = score_narrative_cut(8, 0, 8, 20, NarrativeBoundary::TokenWindow);
+        assert!(sentence > clause);
+        assert!(clause > token);
+    }
+
+    #[test]
+    fn score_narrative_cut_prefers_proximity_to_target() {
+        let close = score_narrative_cut(8, 0, 8, 20, NarrativeBoundary::Sentence);
+        let far = score_narrative_cut(8, 0, 5, 20, NarrativeBoundary::Sentence);
+        assert!(close > far);
+    }
+
+    #[test]
+    fn best_narrative_cut_penalizes_tiny_tail_when_choices_are_similar() {
+        let selected = best_narrative_cut(
+            &[
+                (8, NarrativeBoundary::Sentence),
+                (9, NarrativeBoundary::Sentence),
+            ],
+            8,
+            0,
+            10,
+        )
+        .expect("pick best cut");
+        assert_eq!(selected, 8);
     }
 }
