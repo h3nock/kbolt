@@ -1856,6 +1856,58 @@ fn update_code_files_use_code_chunking_profile() {
 }
 
 #[test]
+fn update_preserves_structural_boundaries_across_chunk_kinds() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let markdown = r#"# Intro
+
+alpha beta
+
+```rust
+fn main() {}
+```
+
+gamma delta
+"#;
+        let file_path = collection_path.join("docs/guide.md");
+        write_text_file(&file_path, markdown);
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update markdown");
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.added, 1);
+        assert!(report.errors.is_empty(), "unexpected errors: {:?}", report.errors);
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "docs/guide.md")
+            .expect("query document")
+            .expect("document exists");
+        let chunks = engine
+            .storage()
+            .get_chunks_for_document(doc.id)
+            .expect("load chunks");
+        let kinds = chunks.iter().map(|chunk| chunk.kind.as_str()).collect::<Vec<_>>();
+
+        assert_eq!(kinds, vec!["section", "code", "paragraph"]);
+        assert!(!kinds.contains(&"mixed"));
+    });
+}
+
+#[test]
 fn update_skips_hardcoded_ignored_paths() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
