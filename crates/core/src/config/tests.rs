@@ -34,7 +34,17 @@ fn load_creates_default_config_and_directories() {
     assert_eq!(config.chunking.defaults.boundary_overlap_tokens, 48);
     assert_eq!(config.chunking.defaults.neighbor_window, 1);
     assert!(config.chunking.defaults.contextual_prefix);
-    assert!(config.chunking.profiles.is_empty());
+    assert_eq!(
+        config.chunking.profiles.get("code"),
+        Some(&ChunkPolicy {
+            target_tokens: 320,
+            soft_max_tokens: 420,
+            hard_max_tokens: 560,
+            boundary_overlap_tokens: 24,
+            neighbor_window: 1,
+            contextual_prefix: true
+        })
+    );
 }
 
 #[test]
@@ -241,9 +251,19 @@ fn chunk_policy_default_uses_markdown_tuned_budget() {
 }
 
 #[test]
-fn chunking_config_default_has_empty_profiles() {
+fn chunking_config_default_includes_code_profile() {
     let chunking = ChunkingConfig::default();
 
     assert_eq!(chunking.defaults, ChunkPolicy::default());
-    assert!(chunking.profiles.is_empty());
+    assert_eq!(
+        chunking.profiles.get("code"),
+        Some(&ChunkPolicy {
+            target_tokens: 320,
+            soft_max_tokens: 420,
+            hard_max_tokens: 560,
+            boundary_overlap_tokens: 24,
+            neighbor_window: 1,
+            contextual_prefix: true
+        })
+    );
 }

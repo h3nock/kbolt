@@ -19,6 +19,10 @@ const DEFAULT_CHUNK_HARD_MAX_TOKENS: usize = 750;
 const DEFAULT_CHUNK_BOUNDARY_OVERLAP_TOKENS: usize = 48;
 const DEFAULT_CHUNK_NEIGHBOR_WINDOW: usize = 1;
 const DEFAULT_CHUNK_CONTEXTUAL_PREFIX: bool = true;
+const DEFAULT_CODE_CHUNK_TARGET_TOKENS: usize = 320;
+const DEFAULT_CODE_CHUNK_SOFT_MAX_TOKENS: usize = 420;
+const DEFAULT_CODE_CHUNK_HARD_MAX_TOKENS: usize = 560;
+const DEFAULT_CODE_CHUNK_BOUNDARY_OVERLAP_TOKENS: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -102,7 +106,7 @@ impl Default for ChunkingConfig {
     fn default() -> Self {
         Self {
             defaults: ChunkPolicy::default(),
-            profiles: HashMap::new(),
+            profiles: default_chunk_profiles(),
         }
     }
 }
@@ -305,6 +309,20 @@ fn default_chunk_neighbor_window() -> usize {
 
 fn default_chunk_contextual_prefix() -> bool {
     DEFAULT_CHUNK_CONTEXTUAL_PREFIX
+}
+
+fn default_chunk_profiles() -> HashMap<String, ChunkPolicy> {
+    HashMap::from([(
+        "code".to_string(),
+        ChunkPolicy {
+            target_tokens: DEFAULT_CODE_CHUNK_TARGET_TOKENS,
+            soft_max_tokens: DEFAULT_CODE_CHUNK_SOFT_MAX_TOKENS,
+            hard_max_tokens: DEFAULT_CODE_CHUNK_HARD_MAX_TOKENS,
+            boundary_overlap_tokens: DEFAULT_CODE_CHUNK_BOUNDARY_OVERLAP_TOKENS,
+            neighbor_window: default_chunk_neighbor_window(),
+            contextual_prefix: default_chunk_contextual_prefix(),
+        },
+    )])
 }
 
 #[cfg(test)]
