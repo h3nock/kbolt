@@ -8,7 +8,7 @@ use crate::ingest::chunk::{chunk_document, resolve_policy};
 use crate::ingest::extract::default_registry;
 use crate::lock::{LockMode, OperationLock};
 use crate::models;
-use crate::storage::{ChunkInsert, CollectionRow, DocumentRow, SpaceResolution, TantivyEntry};
+use crate::storage::{ChunkInsert, ChunkRow, CollectionRow, DocumentRow, SpaceResolution, TantivyEntry};
 use crate::storage::Storage;
 use crate::Result;
 use crate::ModelPullEvent;
@@ -585,6 +585,8 @@ impl Engine {
             .collect::<HashMap<_, _>>();
 
         let mut docs_by_id: HashMap<i64, DocumentRow> = HashMap::new();
+        let mut chunks_by_doc: HashMap<i64, Vec<ChunkRow>> = HashMap::new();
+        let neighbor_window = self.config.chunking.defaults.neighbor_window;
         let mut results = Vec::new();
         for (candidate, normalized_score) in selected {
             let Some(chunk) = chunk_by_id.get(&candidate.chunk_id) else {
@@ -611,7 +613,18 @@ impl Engine {
                 Ok(bytes) => bytes,
                 Err(_) => continue,
             };
-            let text = chunk_text_from_bytes(&bytes, chunk.offset, chunk.length);
+            if neighbor_window > 0 && !chunks_by_doc.contains_key(&chunk.doc_id) {
+                chunks_by_doc.insert(
+                    chunk.doc_id,
+                    self.storage.get_chunks_for_document(chunk.doc_id)?,
+                );
+            }
+            let text = search_text_with_neighbors(
+                &bytes,
+                chunk,
+                chunks_by_doc.get(&chunk.doc_id),
+                neighbor_window,
+            );
 
             results.push(SearchResult {
                 docid: short_docid(&document.hash),
@@ -1649,6 +1662,42 @@ fn chunk_text_from_bytes(bytes: &[u8], offset: usize, length: usize) -> String {
     let start = offset.min(bytes.len());
     let end = offset.saturating_add(length).min(bytes.len());
     String::from_utf8_lossy(&bytes[start..end]).into_owned()
+}
+
+fn search_text_with_neighbors(
+    bytes: &[u8],
+    primary: &ChunkRow,
+    doc_chunks: Option<&Vec<ChunkRow>>,
+    neighbor_window: usize,
+) -> String {
+    if neighbor_window == 0 {
+        return chunk_text_from_bytes(bytes, primary.offset, primary.length);
+    }
+
+    let Some(chunks) = doc_chunks else {
+        return chunk_text_from_bytes(bytes, primary.offset, primary.length);
+    };
+
+    let window = neighbor_window.min(i32::MAX as usize) as i32;
+    let min_seq = primary.seq.saturating_sub(window);
+    let max_seq = primary.seq.saturating_add(window);
+    let mut snippets = Vec::new();
+    for chunk in chunks {
+        if chunk.seq < min_seq || chunk.seq > max_seq {
+            continue;
+        }
+
+        let snippet = chunk_text_from_bytes(bytes, chunk.offset, chunk.length);
+        if !snippet.is_empty() {
+            snippets.push(snippet);
+        }
+    }
+
+    if snippets.is_empty() {
+        chunk_text_from_bytes(bytes, primary.offset, primary.length)
+    } else {
+        snippets.join("\n\n")
+    }
 }
 
 #[cfg(test)]

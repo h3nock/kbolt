@@ -1379,6 +1379,53 @@ fn search_keyword_returns_ranked_results_for_targeted_collection() {
 }
 
 #[test]
+fn search_keyword_includes_neighbor_chunks_for_context() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        let left = std::iter::repeat_n("leftctx", 300).collect::<Vec<_>>().join(" ");
+        let middle = std::iter::repeat_n("targetonly", 300).collect::<Vec<_>>().join(" ");
+        let right = std::iter::repeat_n("rightctx", 300).collect::<Vec<_>>().join(" ");
+        let markdown = format!("# Title\n\n{left}\n\n{middle}\n\n{right}\n");
+        write_text_file(&work_path.join("docs/guide.md"), &markdown);
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let response = engine
+            .search(SearchRequest {
+                query: "targetonly".to_string(),
+                mode: SearchMode::Keyword,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 5,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: false,
+            })
+            .expect("run keyword search");
+
+        assert!(!response.results.is_empty(), "expected at least one result");
+        let first = &response.results[0];
+        assert!(first.text.contains("targetonly"));
+        assert!(
+            first.text.contains("leftctx"),
+            "neighbor window should include previous chunk"
+        );
+        assert!(
+            first.text.contains("rightctx"),
+            "neighbor window should include next chunk"
+        );
+    });
+}
+
+#[test]
 fn search_auto_mode_uses_keyword_path_and_scopes_space() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
