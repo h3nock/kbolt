@@ -1748,6 +1748,55 @@ fn update_markdown_uses_structural_chunking_and_heading_metadata() {
 }
 
 #[test]
+fn update_code_files_use_code_chunking_profile() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let repeated_tokens = std::iter::repeat_n("ident", 700).collect::<Vec<_>>().join(" ");
+        let source = format!("fn alpha() {{\n    {repeated_tokens}\n}}\n");
+        let file_path = collection_path.join("src/lib.rs");
+        write_text_file(&file_path, &source);
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update code");
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.added, 1);
+        assert!(report.errors.is_empty(), "unexpected errors: {:?}", report.errors);
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "src/lib.rs")
+            .expect("query document")
+            .expect("document exists");
+        let chunks = engine
+            .storage()
+            .get_chunks_for_document(doc.id)
+            .expect("load chunks");
+
+        assert!(
+            chunks.len() >= 2,
+            "expected hard split from code profile (560 hard max)"
+        );
+        assert!(
+            chunks.iter().all(|chunk| chunk.kind == "code"),
+            "expected code chunk kind for code extractor output"
+        );
+    });
+}
+
+#[test]
 fn update_skips_hardcoded_ignored_paths() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
