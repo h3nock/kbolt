@@ -59,11 +59,12 @@ pub fn chunk_document_with_counter(
     }
 
     let soft_max = normalized_soft_max(policy);
+    let expanded = expand_blocks_for_hard_max(&document.blocks, policy, counter);
     let mut chunks = Vec::new();
     let mut current = Vec::new();
     let mut current_tokens = 0usize;
 
-    for block in &document.blocks {
+    for block in &expanded {
         let block_tokens = counter.count(block.text.as_str());
         let candidate_tokens = current_tokens.saturating_add(block_tokens);
 
@@ -118,6 +119,88 @@ fn count_whitespace_tokens(text: &str) -> usize {
 fn normalized_soft_max(policy: &ChunkPolicy) -> usize {
     let target = policy.target_tokens.max(1);
     policy.soft_max_tokens.max(target)
+}
+
+fn normalized_hard_max(policy: &ChunkPolicy) -> usize {
+    let soft_max = normalized_soft_max(policy);
+    policy.hard_max_tokens.max(soft_max)
+}
+
+fn normalized_overlap(policy: &ChunkPolicy, hard_max: usize) -> usize {
+    policy
+        .boundary_overlap_tokens
+        .min(hard_max.saturating_sub(1))
+}
+
+fn expand_blocks_for_hard_max(
+    blocks: &[ExtractedBlock],
+    policy: &ChunkPolicy,
+    counter: &dyn TokenCounter,
+) -> Vec<ExtractedBlock> {
+    let hard_max = normalized_hard_max(policy);
+    let overlap = normalized_overlap(policy, hard_max);
+    let mut expanded = Vec::new();
+
+    for block in blocks {
+        if counter.count(block.text.as_str()) <= hard_max {
+            expanded.push(block.clone());
+            continue;
+        }
+
+        expanded.extend(split_block_by_tokens(block, hard_max, overlap));
+    }
+
+    expanded
+}
+
+fn split_block_by_tokens(block: &ExtractedBlock, hard_max: usize, overlap: usize) -> Vec<ExtractedBlock> {
+    let spans = token_byte_spans(block.text.as_str());
+    if spans.is_empty() {
+        return vec![block.clone()];
+    }
+
+    let mut out = Vec::new();
+    let mut start_token = 0usize;
+    while start_token < spans.len() {
+        let end_token = (start_token + hard_max).min(spans.len());
+        let byte_start = spans[start_token].0;
+        let byte_end = spans[end_token - 1].1;
+
+        let mut split = block.clone();
+        split.offset = block.offset.saturating_add(byte_start);
+        split.length = byte_end.saturating_sub(byte_start);
+        split.text = block.text[byte_start..byte_end].to_string();
+        out.push(split);
+
+        if end_token == spans.len() {
+            break;
+        }
+
+        start_token = end_token.saturating_sub(overlap);
+    }
+
+    out
+}
+
+fn token_byte_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut token_start: Option<usize> = None;
+
+    for (idx, ch) in text.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(start) = token_start.take() {
+                spans.push((start, idx));
+            }
+        } else if token_start.is_none() {
+            token_start = Some(idx);
+        }
+    }
+
+    if let Some(start) = token_start {
+        spans.push((start, text.len()));
+    }
+
+    spans
 }
 
 fn finalize_chunk(blocks: &[ExtractedBlock]) -> FinalChunk {
@@ -402,5 +485,40 @@ mod tests {
 
         let chunks = chunk_document_with_counter(&document, &policy, &counter);
         assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn chunk_document_splits_oversized_block_at_hard_max_with_overlap() {
+        let policy = ChunkPolicy {
+            target_tokens: 4,
+            soft_max_tokens: 4,
+            hard_max_tokens: 4,
+            boundary_overlap_tokens: 1,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let document = ExtractedDocument {
+            blocks: vec![block_with(
+                BlockKind::Paragraph,
+                "one two three four five six seven eight nine ten",
+                10,
+                &["Doc"],
+            )],
+            metadata: HashMap::new(),
+            title: None,
+        };
+
+        let chunks = chunk_document(&document, &policy);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].text, "one two three four");
+        assert_eq!(chunks[1].text, "four five six seven");
+        assert_eq!(chunks[2].text, "seven eight nine ten");
+
+        assert_eq!(chunks[0].offset, 10);
+        assert_eq!(chunks[0].length, 18);
+        assert_eq!(chunks[1].offset, 24);
+        assert_eq!(chunks[1].length, 19);
+        assert_eq!(chunks[2].offset, 38);
+        assert_eq!(chunks[2].length, 20);
     }
 }
