@@ -196,6 +196,15 @@ fn expand_blocks_for_hard_max(
             }
         }
 
+        if tagged.kind == BlockKind::CodeFence {
+            if let Some(code_splits) =
+                split_code_block_by_blank_lines(&tagged, hard_max, overlap, counter)
+            {
+                expanded.extend(code_splits);
+                continue;
+            }
+        }
+
         expanded.extend(split_block_by_tokens(&tagged, hard_max, overlap));
     }
 
@@ -248,7 +257,12 @@ fn split_block_by_tokens(block: &ExtractedBlock, hard_max: usize, overlap: usize
     let mut start_token = 0usize;
     while start_token < spans.len() {
         let end_token = (start_token + hard_max).min(spans.len());
-        out.push(split_block_range(block, &spans, start_token, end_token));
+        out.push(split_block_range_by_tokens(
+            block,
+            &spans,
+            start_token,
+            end_token,
+        ));
 
         if end_token == spans.len() {
             break;
@@ -258,6 +272,52 @@ fn split_block_by_tokens(block: &ExtractedBlock, hard_max: usize, overlap: usize
     }
 
     out
+}
+
+fn split_code_block_by_blank_lines(
+    block: &ExtractedBlock,
+    hard_max: usize,
+    overlap: usize,
+    counter: &dyn TokenCounter,
+) -> Option<Vec<ExtractedBlock>> {
+    let groups = code_group_ranges(block.text.as_str());
+    if groups.len() <= 1 {
+        return None;
+    }
+
+    let mut packed_ranges = Vec::new();
+    let mut current: Option<(usize, usize, usize)> = None;
+    for (start, end) in groups {
+        let group_tokens = counter.count(&block.text[start..end]);
+        match current {
+            None => {
+                current = Some((start, end, group_tokens));
+            }
+            Some((current_start, current_end, current_tokens)) => {
+                if current_tokens.saturating_add(group_tokens) <= hard_max {
+                    current = Some((current_start, end, current_tokens.saturating_add(group_tokens)));
+                } else {
+                    packed_ranges.push((current_start, current_end));
+                    current = Some((start, end, group_tokens));
+                }
+            }
+        }
+    }
+    if let Some((start, end, _)) = current {
+        packed_ranges.push((start, end));
+    }
+
+    let mut out = Vec::new();
+    for (start, end) in packed_ranges {
+        let split = split_block_range_by_bytes(block, start, end);
+        if counter.count(split.text.as_str()) > hard_max {
+            out.extend(split_block_by_tokens(&split, hard_max, overlap));
+        } else {
+            out.push(split);
+        }
+    }
+
+    (out.len() > 1).then_some(out)
 }
 
 fn split_block_by_sentence_boundaries(
@@ -297,7 +357,12 @@ fn split_block_by_sentence_boundaries(
             used_sentence_boundary = true;
         }
 
-        out.push(split_block_range(block, &spans, start_token, end_token));
+        out.push(split_block_range_by_tokens(
+            block,
+            &spans,
+            start_token,
+            end_token,
+        ));
         if end_token == spans.len() {
             break;
         }
@@ -308,7 +373,7 @@ fn split_block_by_sentence_boundaries(
     used_sentence_boundary.then_some(out)
 }
 
-fn split_block_range(
+fn split_block_range_by_tokens(
     block: &ExtractedBlock,
     spans: &[(usize, usize)],
     start_token: usize,
@@ -318,6 +383,13 @@ fn split_block_range(
     let byte_start = spans[start_token].0;
     let byte_end = spans[end_token - 1].1;
     debug_assert!(byte_end <= block.text.len(), "split range exceeds block text");
+
+    split_block_range_by_bytes(block, byte_start, byte_end)
+}
+
+fn split_block_range_by_bytes(block: &ExtractedBlock, byte_start: usize, byte_end: usize) -> ExtractedBlock {
+    debug_assert!(byte_start < byte_end, "byte range must be non-empty");
+    debug_assert!(byte_end <= block.text.len(), "byte range exceeds block text");
 
     let mut split = block.clone();
     split.offset = block.offset.saturating_add(byte_start);
@@ -410,6 +482,77 @@ fn debug_assert_valid_blocks(blocks: &[ExtractedBlock]) {
             "extractor invariant violated: text byte length and source length differ"
         );
     }
+}
+
+fn code_group_ranges(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut groups = Vec::new();
+    let mut group_start: Option<usize> = None;
+    let mut line_start = 0usize;
+
+    while line_start < bytes.len() {
+        let line_end = next_line_end_bytes(bytes, line_start);
+        let content_end = trim_line_ending_bytes(bytes, line_start, line_end);
+        let is_blank = is_blank_line_bytes(bytes, line_start, content_end);
+
+        match (group_start, is_blank) {
+            (None, false) => {
+                group_start = Some(line_start);
+            }
+            (Some(start), true) => {
+                let end = trim_trailing_newlines_bytes(bytes, line_start);
+                if end > start {
+                    groups.push((start, end));
+                }
+                group_start = None;
+            }
+            _ => {}
+        }
+
+        line_start = line_end;
+    }
+
+    if let Some(start) = group_start {
+        let end = trim_trailing_newlines_bytes(bytes, bytes.len());
+        if end > start {
+            groups.push((start, end));
+        }
+    }
+
+    groups
+}
+
+fn next_line_end_bytes(bytes: &[u8], start: usize) -> usize {
+    let mut index = start;
+    while index < bytes.len() {
+        if bytes[index] == b'\n' {
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn trim_line_ending_bytes(bytes: &[u8], start: usize, end: usize) -> usize {
+    let mut content_end = end;
+    while content_end > start && matches!(bytes[content_end - 1], b'\n' | b'\r') {
+        content_end -= 1;
+    }
+    content_end
+}
+
+fn is_blank_line_bytes(bytes: &[u8], start: usize, end: usize) -> bool {
+    bytes[start..end]
+        .iter()
+        .all(|byte| matches!(byte, b' ' | b'\t'))
+}
+
+fn trim_trailing_newlines_bytes(bytes: &[u8], end: usize) -> usize {
+    let mut result = end;
+    while result > 0 && matches!(bytes[result - 1], b'\n' | b'\r') {
+        result -= 1;
+    }
+    result
 }
 
 fn token_byte_spans(text: &str) -> Vec<(usize, usize)> {
@@ -963,6 +1106,35 @@ mod tests {
         let chunks = chunk_document(&document, &policy);
         assert!(chunks.len() >= 2);
         assert!(chunks.iter().all(|chunk| !chunk.text.is_empty()));
+    }
+
+    #[test]
+    fn code_forced_split_prefers_blank_line_boundaries() {
+        let policy = ChunkPolicy {
+            target_tokens: 4,
+            soft_max_tokens: 4,
+            hard_max_tokens: 6,
+            boundary_overlap_tokens: 0,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let document = ExtractedDocument {
+            blocks: vec![block_with(
+                BlockKind::CodeFence,
+                "a1 a2 a3 a4\n\na5 a6 a7 a8\n\na9 a10 a11 a12",
+                0,
+                &[],
+            )],
+            metadata: HashMap::new(),
+            title: None,
+        };
+
+        let chunks = chunk_document(&document, &policy);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].text, "a1 a2 a3 a4");
+        assert_eq!(chunks[1].text, "a5 a6 a7 a8");
+        assert_eq!(chunks[2].text, "a9 a10 a11 a12");
+        assert!(chunks.iter().all(|chunk| chunk.kind == FinalChunkKind::Code));
     }
 
     #[test]
