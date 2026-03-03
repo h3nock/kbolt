@@ -1,5 +1,5 @@
 use crate::config::{ChunkPolicy, ChunkingConfig};
-use crate::ingest::extract::{BlockKind, ExtractedBlock};
+use crate::ingest::extract::{BlockKind, ExtractedBlock, ExtractedDocument};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalChunk {
@@ -44,6 +44,48 @@ impl FinalChunkKind {
     }
 }
 
+pub fn chunk_document(document: &ExtractedDocument, policy: &ChunkPolicy) -> Vec<FinalChunk> {
+    let counter = WhitespaceTokenCounter;
+    chunk_document_with_counter(document, policy, &counter)
+}
+
+pub fn chunk_document_with_counter(
+    document: &ExtractedDocument,
+    policy: &ChunkPolicy,
+    counter: &dyn TokenCounter,
+) -> Vec<FinalChunk> {
+    if document.blocks.is_empty() {
+        return Vec::new();
+    }
+
+    let soft_max = normalized_soft_max(policy);
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    let mut current_tokens = 0usize;
+
+    for block in &document.blocks {
+        let block_tokens = counter.count(block.text.as_str());
+        let candidate_tokens = current_tokens.saturating_add(block_tokens);
+
+        if current.is_empty() || candidate_tokens <= soft_max {
+            current_tokens = candidate_tokens;
+            current.push(block.clone());
+            continue;
+        }
+
+        chunks.push(finalize_chunk(&current));
+        current.clear();
+        current.push(block.clone());
+        current_tokens = block_tokens;
+    }
+
+    if !current.is_empty() {
+        chunks.push(finalize_chunk(&current));
+    }
+
+    chunks
+}
+
 /// Resolves the effective chunk policy for a file profile.
 /// Precedence: CLI override > profile > defaults.
 pub fn resolve_policy(
@@ -71,6 +113,41 @@ fn normalize_profile_key(raw: &str) -> String {
 
 fn count_whitespace_tokens(text: &str) -> usize {
     text.split_whitespace().count()
+}
+
+fn normalized_soft_max(policy: &ChunkPolicy) -> usize {
+    let target = policy.target_tokens.max(1);
+    policy.soft_max_tokens.max(target)
+}
+
+fn finalize_chunk(blocks: &[ExtractedBlock]) -> FinalChunk {
+    let start = blocks.first().map(|block| block.offset).unwrap_or(0);
+    let end = blocks
+        .last()
+        .map(|block| block.offset.saturating_add(block.length))
+        .unwrap_or(start);
+    let text = blocks
+        .iter()
+        .map(|block| block.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let heading = resolve_heading(blocks);
+    let kind = derive_chunk_kind(blocks);
+
+    FinalChunk {
+        text,
+        offset: start,
+        length: end.saturating_sub(start),
+        heading,
+        kind,
+    }
+}
+
+fn resolve_heading(blocks: &[ExtractedBlock]) -> Option<String> {
+    blocks
+        .iter()
+        .rev()
+        .find_map(|block| (!block.heading_path.is_empty()).then(|| block.heading_path.join(" > ")))
 }
 
 pub fn derive_chunk_kind(blocks: &[ExtractedBlock]) -> FinalChunkKind {
@@ -118,9 +195,10 @@ mod tests {
 
     use crate::config::{ChunkPolicy, ChunkingConfig};
     use crate::ingest::chunk::{
-        derive_chunk_kind, resolve_policy, FinalChunkKind, TokenCounter, WhitespaceTokenCounter,
+        chunk_document, chunk_document_with_counter, derive_chunk_kind, resolve_policy,
+        FinalChunkKind, TokenCounter, WhitespaceTokenCounter,
     };
-    use crate::ingest::extract::{BlockKind, ExtractedBlock};
+    use crate::ingest::extract::{BlockKind, ExtractedBlock, ExtractedDocument};
 
     fn baseline_config() -> ChunkingConfig {
         ChunkingConfig {
@@ -194,6 +272,22 @@ mod tests {
         }
     }
 
+    fn block_with(
+        kind: BlockKind,
+        text: &str,
+        offset: usize,
+        heading_path: &[&str],
+    ) -> ExtractedBlock {
+        ExtractedBlock {
+            text: text.to_string(),
+            offset,
+            length: text.len(),
+            kind,
+            heading_path: heading_path.iter().map(|value| value.to_string()).collect(),
+            attrs: HashMap::new(),
+        }
+    }
+
     #[test]
     fn derive_chunk_kind_code_only_is_code() {
         let blocks = vec![block(BlockKind::CodeFence), block(BlockKind::CodeFence)];
@@ -239,5 +333,74 @@ mod tests {
         assert_eq!(counter.count(""), 0);
         assert_eq!(counter.count("alpha"), 1);
         assert_eq!(counter.count("alpha beta\tgamma\n\ndelta"), 4);
+    }
+
+    #[test]
+    fn chunk_document_packs_adjacent_blocks_within_soft_max() {
+        let policy = ChunkPolicy {
+            target_tokens: 3,
+            soft_max_tokens: 4,
+            hard_max_tokens: 8,
+            boundary_overlap_tokens: 0,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let document = ExtractedDocument {
+            blocks: vec![
+                block_with(BlockKind::Paragraph, "alpha beta", 0, &[]),
+                block_with(BlockKind::Paragraph, "gamma", 12, &[]),
+                block_with(BlockKind::Paragraph, "delta epsilon", 20, &[]),
+            ],
+            metadata: HashMap::new(),
+            title: None,
+        };
+
+        let chunks = chunk_document(&document, &policy);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].text, "alpha beta\n\ngamma");
+        assert_eq!(chunks[0].offset, 0);
+        assert_eq!(chunks[0].length, 17);
+        assert_eq!(chunks[0].kind, FinalChunkKind::Paragraph);
+        assert_eq!(chunks[1].text, "delta epsilon");
+    }
+
+    #[test]
+    fn chunk_document_resolves_heading_from_structural_path() {
+        let policy = ChunkPolicy {
+            target_tokens: 2,
+            soft_max_tokens: 4,
+            hard_max_tokens: 8,
+            boundary_overlap_tokens: 0,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let document = ExtractedDocument {
+            blocks: vec![block_with(
+                BlockKind::Paragraph,
+                "body text",
+                100,
+                &["Guide", "Intro"],
+            )],
+            metadata: HashMap::new(),
+            title: Some("Doc".to_string()),
+        };
+
+        let chunks = chunk_document(&document, &policy);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].heading.as_deref(), Some("Guide > Intro"));
+    }
+
+    #[test]
+    fn chunk_document_with_counter_handles_empty_input() {
+        let policy = ChunkPolicy::default();
+        let document = ExtractedDocument {
+            blocks: vec![],
+            metadata: HashMap::new(),
+            title: None,
+        };
+        let counter = WhitespaceTokenCounter;
+
+        let chunks = chunk_document_with_counter(&document, &policy, &counter);
+        assert!(chunks.is_empty());
     }
 }
