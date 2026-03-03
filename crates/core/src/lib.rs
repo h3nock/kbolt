@@ -1,6 +1,7 @@
 pub mod config;
 pub mod engine;
 pub mod error;
+pub mod ingest;
 mod lock;
 mod models;
 pub mod storage;
