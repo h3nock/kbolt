@@ -4,6 +4,8 @@ use std::time::{Instant, UNIX_EPOCH};
 
 use crate::config;
 use crate::config::Config;
+use crate::ingest::chunk::{chunk_document, resolve_policy};
+use crate::ingest::extract::default_registry;
 use crate::lock::{LockMode, OperationLock};
 use crate::models;
 use crate::storage::{ChunkInsert, CollectionRow, DocumentRow, SpaceResolution, TantivyEntry};
@@ -1165,6 +1167,7 @@ impl Engine {
             &target.space,
             &target.collection.name,
         )?;
+        let extractor_registry = default_registry();
         let mut touched_collection = false;
 
         for entry in WalkDir::new(&target.collection.path)
@@ -1210,6 +1213,11 @@ impl Engine {
                     continue;
                 }
             }
+
+            let Some(extractor) = extractor_registry.resolve_for_path(entry.path()) else {
+                continue;
+            };
+
             report.scanned += 1;
             seen_paths.insert(relative_path.clone());
 
@@ -1251,7 +1259,7 @@ impl Engine {
                 }
             };
             let hash = sha256_hex(&bytes);
-            let title = file_title(entry.path());
+            let mut title = file_title(entry.path());
 
             let existing = docs_by_path.get(&relative_path).cloned();
             if let Some(doc) = existing.as_ref() {
@@ -1280,6 +1288,20 @@ impl Engine {
                 continue;
             }
 
+            let extracted = match extractor.extract(entry.path(), &bytes) {
+                Ok(document) => document,
+                Err(err) => {
+                    report.errors.push(file_error(
+                        Some(entry.path().to_path_buf()),
+                        format!("extract failed: {err}"),
+                    ));
+                    continue;
+                }
+            };
+            if let Some(extracted_title) = extracted.title.as_deref() {
+                title = extracted_title.to_string();
+            }
+
             let doc_id = self.storage.upsert_document(
                 target.collection.id,
                 &relative_path,
@@ -1296,29 +1318,48 @@ impl Engine {
                 }
             }
 
-            let body = String::from_utf8_lossy(&bytes).into_owned();
-            let chunk_ids = self.storage.insert_chunks(
-                doc_id,
-                &[ChunkInsert {
-                    seq: 0,
-                    offset: 0,
-                    length: body.len(),
-                    heading: None,
-                    kind: "section".to_string(),
-                }],
-            )?;
+            let profile_key = entry
+                .path()
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.trim().trim_start_matches('.').to_ascii_lowercase());
+            let policy = resolve_policy(&self.config.chunking, profile_key.as_deref(), None);
+            let final_chunks = chunk_document(&extracted, &policy);
 
-            if let Some(chunk_id) = chunk_ids.first() {
-                self.storage.index_tantivy(
-                    &target.space,
-                    &[TantivyEntry {
+            let chunk_inserts = final_chunks
+                .iter()
+                .enumerate()
+                .map(|(index, chunk)| ChunkInsert {
+                    seq: index as i32,
+                    offset: chunk.offset,
+                    length: chunk.length,
+                    heading: chunk.heading.clone(),
+                    kind: chunk.kind.as_storage_kind().to_string(),
+                })
+                .collect::<Vec<_>>();
+            let body = String::from_utf8_lossy(&bytes).into_owned();
+            let chunk_ids = self.storage.insert_chunks(doc_id, &chunk_inserts)?;
+
+            if !chunk_ids.is_empty() {
+                let entries = chunk_ids
+                    .iter()
+                    .zip(final_chunks.iter())
+                    .map(|(chunk_id, chunk)| TantivyEntry {
                         chunk_id: *chunk_id,
                         doc_id,
                         filepath: relative_path.clone(),
-                        title,
-                        heading: None,
-                        body,
-                    }],
+                        title: title.clone(),
+                        heading: chunk.heading.clone(),
+                        body: if chunk.text.is_empty() {
+                            body.clone()
+                        } else {
+                            chunk.text.clone()
+                        },
+                    })
+                    .collect::<Vec<_>>();
+                self.storage.index_tantivy(
+                    &target.space,
+                    &entries,
                 )?;
                 fts_dirty_by_space
                     .entry(target.space.clone())
