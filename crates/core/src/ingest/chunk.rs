@@ -68,6 +68,8 @@ pub fn chunk_document_with_counter(
         return Vec::new();
     }
 
+    debug_assert_valid_blocks(&document.blocks);
+
     let soft_max = normalized_soft_max(policy);
     let expanded = expand_blocks_for_hard_max(&document.blocks, policy, counter);
     let mut chunks = Vec::new();
@@ -291,8 +293,10 @@ fn split_block_range(
     start_token: usize,
     end_token: usize,
 ) -> ExtractedBlock {
+    debug_assert!(start_token < end_token, "split range must include at least one token");
     let byte_start = spans[start_token].0;
     let byte_end = spans[end_token - 1].1;
+    debug_assert!(byte_end <= block.text.len(), "split range exceeds block text");
 
     let mut split = block.clone();
     split.offset = block.offset.saturating_add(byte_start);
@@ -302,6 +306,7 @@ fn split_block_range(
 }
 
 fn next_start_token(start_token: usize, end_token: usize, overlap: usize) -> usize {
+    debug_assert!(end_token > start_token, "end token must advance beyond start token");
     let next = end_token.saturating_sub(overlap);
     if next <= start_token {
         end_token
@@ -336,6 +341,16 @@ fn last_sentence_end_within(
 fn token_ends_sentence(token: &str) -> bool {
     let trimmed = token.trim_end_matches(|ch: char| matches!(ch, '"' | '\'' | ')' | ']' | '}'));
     trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?')
+}
+
+fn debug_assert_valid_blocks(blocks: &[ExtractedBlock]) {
+    for block in blocks {
+        debug_assert_eq!(
+            block.text.len(),
+            block.length,
+            "extractor invariant violated: text byte length and source length differ"
+        );
+    }
 }
 
 fn token_byte_spans(text: &str) -> Vec<(usize, usize)> {
@@ -837,5 +852,57 @@ mod tests {
         let paragraph = block_with(BlockKind::Paragraph, "text", 40, &[]);
         assert!(!can_pack_together(&html, &html2));
         assert!(!can_pack_together(&html, &paragraph));
+    }
+
+    #[test]
+    fn token_split_makes_progress_when_overlap_exceeds_window() {
+        let policy = ChunkPolicy {
+            target_tokens: 2,
+            soft_max_tokens: 2,
+            hard_max_tokens: 2,
+            boundary_overlap_tokens: 10,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let document = ExtractedDocument {
+            blocks: vec![block_with(
+                BlockKind::CodeFence,
+                "a b c d e f",
+                0,
+                &[],
+            )],
+            metadata: HashMap::new(),
+            title: None,
+        };
+
+        let chunks = chunk_document(&document, &policy);
+        assert_eq!(chunks.len(), 5);
+        assert!(chunks.iter().all(|chunk| !chunk.text.is_empty()));
+    }
+
+    #[test]
+    fn narrative_sentence_split_makes_progress_with_high_overlap() {
+        let policy = ChunkPolicy {
+            target_tokens: 4,
+            soft_max_tokens: 4,
+            hard_max_tokens: 4,
+            boundary_overlap_tokens: 10,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let document = ExtractedDocument {
+            blocks: vec![block_with(
+                BlockKind::Paragraph,
+                "one two. three four. five six. seven eight.",
+                0,
+                &[],
+            )],
+            metadata: HashMap::new(),
+            title: None,
+        };
+
+        let chunks = chunk_document(&document, &policy);
+        assert!(chunks.len() >= 2);
+        assert!(chunks.iter().all(|chunk| !chunk.text.is_empty()));
     }
 }
