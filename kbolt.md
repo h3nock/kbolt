@@ -215,7 +215,7 @@ core/
   ingest/
     mod.rs               # pub fn update() — only public entry point
     extract.rs           # Extractor trait + MarkdownExtractor, PlaintextExtractor, CodeExtractor
-    chunk.rs             # chunking pipeline (budget enforcement, overlap, merging)
+    chunk.rs             # file-independent chunking pipeline (tiered budgets, structural packing, forced-split handling)
     embed.rs             # embedding pipeline (batch embed, USearch insert)
     ignore.rs            # ignore pattern parsing, hardcoded ignores, extension filtering
 
@@ -226,7 +226,7 @@ core/
     generator.rs         # Generator trait + GgufGenerator implementation
 
   config/
-    mod.rs               # Config struct, TOML loading/saving (models + reaping settings only)
+    mod.rs               # Config struct, TOML loading/saving (models, reaping, chunking policy)
 ```
 
 ### Engine (composition root)
@@ -336,7 +336,8 @@ Three separate traits — each defines its own contract because they share nothi
 ```rust
 pub trait Extractor: Send + Sync {
     fn supports(&self) -> &[&str];   // file extensions: ["md", "markdown"]
-    fn extract(&self, path: &Path, bytes: &[u8]) -> Result<ExtractedContent>;
+    fn supports_path(&self, _path: &Path) -> bool { false } // optional fallback for path-based matching
+    fn extract(&self, path: &Path, bytes: &[u8]) -> Result<ExtractedDocument>;
 }
 
 pub trait Embedder: Send + Sync {
@@ -792,6 +793,15 @@ pub struct ChunkInsert {
     pub seq: i32, pub offset: usize, pub length: usize,
     pub heading: Option<String>, pub kind: ChunkKind,
 }
+pub enum ChunkKind {
+    Section,                            // section-scoped narrative chunk
+    Paragraph,                          // paragraph/list/quote narrative chunk
+    Code,                               // markdown code-fence chunk
+    Table,                              // markdown table row-group chunk
+    Mixed,                              // forced merge/split across heterogeneous block kinds
+    Function,                           // code-file function/method chunk
+    Class,                              // code-file class/struct chunk
+}
 pub struct TantivyEntry {
     pub chunk_id: i64, pub doc_id: i64, pub filepath: String, pub title: String,
     pub heading: Option<String>, pub body: String,
@@ -939,6 +949,7 @@ pub struct Config {
     pub default_space: Option<String>,
     pub models: ModelConfig,
     pub reaping: ReapingConfig,
+    pub chunking: ChunkingConfig,
 }
 
 pub struct ModelConfig {
@@ -959,6 +970,11 @@ pub enum ModelProvider {
 
 pub struct ReapingConfig {
     pub days: u32,                         // default: 7
+}
+
+pub struct ChunkingConfig {
+    pub defaults: ChunkPolicy,
+    pub profiles: HashMap<String, ChunkPolicy>,   // md, code, txt
 }
 
 pub fn load(config_path: Option<&Path>) -> Result<Config>;
@@ -1093,7 +1109,7 @@ If none of the above resolve, the command either operates on all spaces (for `up
 | `offset` | INTEGER | Byte position where this chunk starts in the source file |
 | `length` | INTEGER | Byte count of this chunk in the source file |
 | `heading` | TEXT nullable | Heading breadcrumb (e.g. `# Intro > ## Setup`) |
-| `kind` | TEXT | `section`, `function`, `class`, or `paragraph` |
+| `kind` | TEXT | `section`, `paragraph`, `code`, `table`, `mixed`, `function`, or `class` |
 
 UNIQUE constraint on `(doc_id, seq)`. Offset and length define a byte slice into the source file on disk — at query time, the snippet is extracted by reading `length` bytes starting at `offset` from the file at `{collection.path}/{document.path}`. Chunks are immutable: when a document changes, all its chunks are deleted and re-created.
 
@@ -1280,56 +1296,124 @@ Both ignore patterns and `extensions` can filter by extension. They compose — 
 
 ## Extractor System
 
+Decision record: `docs/adr/0001-extraction-and-chunking.md`.
+
 ```rust
-pub struct ExtractedContent {
-    pub chunks: Vec<PreChunk>,               // structural splits from the source
+pub struct ExtractedDocument {
+    pub blocks: Vec<ExtractedBlock>,         // structural blocks from the source
     pub metadata: HashMap<String, String>,   // frontmatter, language, etc.
+    pub title: Option<String>,
 }
 
-pub struct PreChunk {
+pub struct ExtractedBlock {
     pub text: String,
-    pub offset: usize,          // byte offset in source file
-    pub length: usize,          // byte length in source file
-    pub kind: ChunkKind,
-    pub heading: Option<String>, // heading breadcrumb
+    pub offset: usize,                       // byte offset in source file
+    pub length: usize,                       // byte length in source file
+    pub kind: BlockKind,
+    pub heading_path: Vec<String>,           // heading breadcrumb stack
+    pub attrs: HashMap<String, String>,      // code language, table headers, etc.
 }
 
-pub enum ChunkKind {
-    Section,     // markdown section under a heading
-    Function,    // code function/method
-    Class,       // code class/struct
-    Paragraph,   // plaintext paragraph
+pub enum BlockKind {
+    Heading,
+    Paragraph,
+    ListItem,
+    BlockQuote,
+    CodeFence,
+    TableHeader,
+    TableRow,
+    HtmlBlock,
 }
 ```
 
+Extractor output is a stable intermediate representation (IR). The chunker is file-independent and consumes this IR, not raw file bytes.
+
+### Extractor Abstraction
+
+```rust
+pub trait Extractor: Send + Sync {
+    fn supports(&self) -> &[&str]; // fast extension dispatch
+    fn supports_path(&self, _path: &Path) -> bool { false } // optional fallback
+    fn extract(&self, path: &Path, bytes: &[u8]) -> Result<ExtractedDocument>;
+}
+```
+
+Registry dispatch uses `supports()` as the O(1) fast path (`HashMap<extension, extractor>`). `supports_path()` is an optional slower fallback for extractors needing path-aware checks.
+
 ### V1 Extractors
 
-1. **MarkdownExtractor** (pulldown-cmark AST)
-   - Splits on headings (H1-H6), tracks heading breadcrumb stack
-   - Respects code fences — never splits inside
-   - Handles YAML frontmatter (extracted to metadata)
-   - Each section = one PreChunk with heading
+1. **MarkdownExtractor** (CommonMark/GFM parser)
+   - Parses heading hierarchy (H1-H6) and maintains heading breadcrumb stack
+   - Emits typed blocks for paragraphs, list items, quotes, code fences, tables, HTML blocks
+   - Handles frontmatter and surfaces fields in metadata
+   - Preserves source spans (`offset`/`length`) for all emitted blocks
 
-2. **PlaintextExtractor** (paragraph-based)
+2. **PlaintextExtractor** (paragraph-based fallback)
    - Splits on double newlines
-   - Groups small paragraphs up to chunk size
+   - Emits paragraph blocks with source spans
+   - Used for extensions with no richer extractor
 
-3. **CodeExtractor** (tree-sitter AST)
-   - Splits on function/method/class boundaries
-   - Preserves imports as preamble chunk
-   - V1 languages: Rust, Python, TypeScript/JavaScript, Go, C/C++
+3. **CodeExtractor** (baseline V1)
+   - Baseline V1 behavior emits code blocks with language metadata
+   - Language-specific via extension mapping
+   - Structural function/class AST boundaries are deferred beyond baseline V1
 
 ### Chunking Pipeline
 
-Extractors produce PreChunks (structural splits). The chunker enforces token budget:
+Chunking is structure-first and budget-constrained.
 
-1. PreChunk fits within 512 tokens → use as-is
-2. PreChunk too large → sub-split at break points (headings > code blocks > blank lines > sentences), 15% overlap between sub-chunks
-3. PreChunk too small → merge with adjacent PreChunks of same kind until budget is reached
+```rust
+pub struct ChunkPolicy {
+    pub target_tokens: usize,              // preferred packing target
+    pub soft_max_tokens: usize,            // tolerated overrun for clean boundaries
+    pub hard_max_tokens: usize,            // absolute ceiling
+    pub boundary_overlap_tokens: usize,    // overlap only for forced hard splits
+    pub neighbor_window: usize,            // retrieval-time expansion window (default: 1)
+    pub contextual_prefix: bool,           // prepend deterministic context for retrieval/embedding text
+}
+```
 
-Token budget: **512 tokens** per chunk (tighter chunks improve retrieval precision — each chunk represents a more focused semantic unit).
+Policy defaults for markdown (`.md`) in V1:
+- `target_tokens = 450`
+- `soft_max_tokens = 550`
+- `hard_max_tokens = 750`
+- `boundary_overlap_tokens = 48`
+- `neighbor_window = 1`
+- `contextual_prefix = true`
 
-Token counting: HuggingFace `tokenizers` crate with the embedding model's actual tokenizer. Loaded from model config, exact counts, microsecond-fast (native Rust). Token budget matches the model's actual vocabulary.
+Policy resolution precedence (target architecture):
+1. CLI override (experimental)
+2. Collection-level override (deferred in V1)
+3. File-type profile (for example `md`, `code`, `txt`)
+4. Global default
+
+V1 supports levels `1`, `3`, and `4`. Collection-level policy storage is deferred until collection metadata/schema support is added.
+
+Chunking rules:
+1. Pack adjacent extracted blocks from the same structural neighborhood toward `target_tokens`.
+2. Allow overrun to `soft_max_tokens` to avoid splitting at unnatural boundaries.
+3. If a block still exceeds `hard_max_tokens`, split by block-specific fallback order:
+   - paragraph/list/quote: sentence boundaries, then clause boundaries
+   - code fence: blank-line boundaries, then fixed token windows
+   - table: row groups with header carryover in retrieval text
+4. Apply `boundary_overlap_tokens` only when step 3 forces a hard split.
+5. Merge undersized fragments with adjacent compatible fragments when possible.
+
+Final chunk kinds are storage-level labels derived from block composition:
+- code-fence only chunks → `ChunkKind::Code`
+- table-only chunks (header/rows) → `ChunkKind::Table`
+- paragraph/list/quote-only chunks → `ChunkKind::Paragraph`
+- heading-scoped narrative chunks → `ChunkKind::Section`
+- forced heterogeneous merges/splits → `ChunkKind::Mixed`
+
+Each final chunk has two text views:
+1. **source text** — exact file slice from `offset`/`length` for snippets and citation fidelity.
+2. **retrieval text** — optional contextualized prefix + source text for BM25/reranker/embedding.
+
+Contextualized prefixes are deterministic and derived from indexed metadata (document title, heading path, selected frontmatter fields, code language, table header summary). Prefixes never mutate stored source spans.
+The retrieval text view is computed from source text + metadata at indexing/query time and is not persisted as a second chunks-table text column.
+
+Token counting: baseline V1 uses a deterministic whitespace token counter inside the chunker. Model-tokenizer-based counting is planned as a follow-up.
 
 ---
 
@@ -1387,8 +1471,8 @@ Phase 1: Scan + Extract + Chunk + FTS Index (single-threaded, per file)
     │      ├── Hash unchanged → update stored mtime, skip re-indexing
     │      │
     │      └── Hash changed OR new file:
-    │          Run extractor (Markdown/Code/Plaintext) → PreChunks
-    │          Run chunker (enforce 512-token budget) → final Chunks
+    │          Run extractor (Markdown/Code/Plaintext) → ExtractedBlocks
+    │          Run file-independent chunker (target/soft_max/hard_max policy) → final Chunks
     │          In a single SQLite transaction:
     │          │  UPSERT document row (set fts_dirty = 1)
     │          │  DELETE old chunks for this document (CASCADE clears embeddings)
@@ -1561,7 +1645,7 @@ Both signals operate on the same unit: individual chunks.
 
 Both run in parallel threads. Because both operate at chunk granularity, RRF fusion compares equivalent units.
 
-**Cross-space search**: When searching across multiple spaces (no `--space` specified), each space's Tantivy index and USearch file are queried independently. Candidate lists from all spaces are concatenated before entering fusion. The reranker (Stage 7) normalizes scores across spaces — since it scores each (query, chunk) pair independently, it doesn't matter which space the chunk came from.
+**Cross-space search**: When searching across multiple spaces (no `--space` specified), each space's Tantivy index and USearch file are queried independently. Candidate lists from all spaces are concatenated before entering fusion. The reranker (Stage 8) normalizes scores across spaces — since it scores each (query, chunk) pair independently, it doesn't matter which space the chunk came from.
 
 ### Stage 5: Fusion (RRF)
 
@@ -1577,14 +1661,23 @@ Defaults: `k=60`, `w_bm25=1.0`, `w_dense=1.0`. Agreement bonus: 1.2x multiplier 
 
 Multiple chunks from the same document → keep only the highest-scoring chunk per document. Remaining slots filled by next-best results from other documents.
 
-### Stage 7: Reranking
+### Stage 7: Context Expansion
+
+For each surviving hit chunk, fetch neighboring chunks from the same document by `seq`:
+- default window: `±1` chunk (`neighbor_window = 1`)
+- configurable per chunking profile
+- expansion happens at retrieval time (not as storage-time overlap)
+
+Neighbor expansion is used for answer context in result assembly. It does not change the primary ranking unit.
+
+### Stage 8: Reranking
 
 Cross-encoder (Qwen3-Reranker 0.6B GGUF) scores top-20 candidates:
-- Input: (query, chunk_text) pairs — chunk text read from disk via offset/length
+- Input: (query, primary-hit-chunk text) pairs — reranker scores the original hit chunk (optionally with deterministic contextual prefix), not neighbor-expanded context
 - Output: relevance score per pair
 - Final score: `0.7 * reranker_score + 0.3 * rrf_score` (blended, weights tunable)
 
-### Stage 8: Result Assembly
+### Stage 9: Result Assembly
 
 Per result:
 - Document metadata from SQLite (title, path, collection name, space name via join)
@@ -1623,7 +1716,25 @@ id = "Qwen/Qwen3-1.7B-q4"
 
 [reaping]
 days = 7    # hard-delete documents deactivated longer than this
+
+[chunking.defaults]
+# Defaults are tuned for markdown-heavy collections.
+target_tokens = 450
+soft_max_tokens = 550
+hard_max_tokens = 750
+boundary_overlap_tokens = 48
+neighbor_window = 1
+contextual_prefix = true
+
+# Optional per-type override; only specify fields that differ.
+[chunking.profiles.code]
+target_tokens = 320
+soft_max_tokens = 420
+hard_max_tokens = 560
+boundary_overlap_tokens = 24
 ```
+
+Collection-level chunking overrides are deferred in V1. When implemented, they will be stored with collection metadata in SQLite and resolved between CLI overrides and profile/default settings.
 
 ---
 
@@ -1780,11 +1891,11 @@ collection = "notes"
 ## Implementation Order
 
 1. **types/** — shared request/response structs (including Space types)
-2. **core/config** — TOML loading/saving (models, reaping, default space)
+2. **core/config** — TOML loading/saving (models, reaping, chunking policy, default space)
 3. **core/storage** — Storage struct, SQLite schema (spaces, collections, documents, chunks, embeddings, cache), per-space Tantivy/USearch indexes
 4. **core/ingest/ignore** — hardcoded ignores, ignore pattern parser (internal storage), extension filtering
 5. **core/ingest/extract** — Extractor trait + Markdown, plaintext, code extractors
-6. **core/ingest/chunk** — chunking pipeline (token budget, overlap, merging)
+6. **core/ingest/chunk** — chunking pipeline (target/soft/hard budgets, structural packing, forced-split fallback)
 7. **core/ingest** — `update` flow (scan → filter → extract → chunk → store → FTS index)
 8. **core/models** — model registry, HuggingFace download, Embedder/Reranker/Generator traits + impls
 9. **core/ingest/embed** — embedding within update flow (chunks → embed → USearch insert)
@@ -1800,7 +1911,7 @@ collection = "notes"
 
 ## Verification Plan
 
-**Unit tests**: Each extractor (chunk boundaries, heading breadcrumbs, edge cases), chunking (token budget, overlap, break points), storage CRUD (all tables including spaces, collections), ignore rules (hardcoded + internal ignore patterns + extensions), RRF scoring, query parsing, space resolution logic.
+**Unit tests**: Each extractor (typed block emission, heading breadcrumbs, source spans, edge cases), chunking (target/soft/hard budget behavior, block-specific forced-split rules, boundary overlap on forced splits only), storage CRUD (all tables including spaces, collections), ignore rules (hardcoded + internal ignore patterns + extensions), RRF scoring, query parsing, neighbor expansion logic, space resolution logic.
 
 **Integration tests**: Full ingest pipeline (file on disk → filter → extract → chunk → store → search → result), hybrid search fusion, deep search expansion, cross-space search, space management (add/remove/rename with CASCADE to collections), collection management (add/remove/rename with CASCADE), soft delete + reaping lifecycle, snippet extraction from disk, ignore pattern management.
 
