@@ -1,4 +1,35 @@
 use crate::config::{ChunkPolicy, ChunkingConfig};
+use crate::ingest::extract::{BlockKind, ExtractedBlock};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalChunk {
+    pub text: String,
+    pub offset: usize,
+    pub length: usize,
+    pub heading: Option<String>,
+    pub kind: FinalChunkKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalChunkKind {
+    Section,
+    Paragraph,
+    Code,
+    Table,
+    Mixed,
+}
+
+impl FinalChunkKind {
+    pub fn as_storage_kind(self) -> &'static str {
+        match self {
+            Self::Section => "section",
+            Self::Paragraph => "paragraph",
+            Self::Code => "code",
+            Self::Table => "table",
+            Self::Mixed => "mixed",
+        }
+    }
+}
 
 /// Resolves the effective chunk policy for a file profile.
 /// Precedence: CLI override > profile > defaults.
@@ -25,12 +56,52 @@ fn normalize_profile_key(raw: &str) -> String {
     raw.trim().trim_start_matches('.').to_ascii_lowercase()
 }
 
+pub fn derive_chunk_kind(blocks: &[ExtractedBlock]) -> FinalChunkKind {
+    if blocks.is_empty() {
+        return FinalChunkKind::Mixed;
+    }
+
+    if blocks.iter().all(|block| block.kind == BlockKind::CodeFence) {
+        return FinalChunkKind::Code;
+    }
+
+    if blocks
+        .iter()
+        .all(|block| matches!(block.kind, BlockKind::TableHeader | BlockKind::TableRow))
+    {
+        return FinalChunkKind::Table;
+    }
+
+    if blocks.iter().all(|block| {
+        matches!(
+            block.kind,
+            BlockKind::Paragraph | BlockKind::ListItem | BlockKind::BlockQuote
+        )
+    }) {
+        return FinalChunkKind::Paragraph;
+    }
+
+    if blocks.iter().any(|block| block.kind == BlockKind::Heading)
+        && blocks.iter().all(|block| {
+            matches!(
+                block.kind,
+                BlockKind::Heading | BlockKind::Paragraph | BlockKind::ListItem | BlockKind::BlockQuote
+            )
+        })
+    {
+        return FinalChunkKind::Section;
+    }
+
+    FinalChunkKind::Mixed
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use crate::config::{ChunkPolicy, ChunkingConfig};
-    use crate::ingest::chunk::resolve_policy;
+    use crate::ingest::chunk::{derive_chunk_kind, resolve_policy, FinalChunkKind};
+    use crate::ingest::extract::{BlockKind, ExtractedBlock};
 
     fn baseline_config() -> ChunkingConfig {
         ChunkingConfig {
@@ -91,5 +162,55 @@ mod tests {
 
         let resolved = resolve_policy(&config, Some("txt"), None);
         assert_eq!(resolved, config.defaults);
+    }
+
+    fn block(kind: BlockKind) -> ExtractedBlock {
+        ExtractedBlock {
+            text: "x".to_string(),
+            offset: 0,
+            length: 1,
+            kind,
+            heading_path: vec![],
+            attrs: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn derive_chunk_kind_code_only_is_code() {
+        let blocks = vec![block(BlockKind::CodeFence), block(BlockKind::CodeFence)];
+        assert_eq!(derive_chunk_kind(&blocks), FinalChunkKind::Code);
+    }
+
+    #[test]
+    fn derive_chunk_kind_table_only_is_table() {
+        let blocks = vec![block(BlockKind::TableHeader), block(BlockKind::TableRow)];
+        assert_eq!(derive_chunk_kind(&blocks), FinalChunkKind::Table);
+    }
+
+    #[test]
+    fn derive_chunk_kind_narrative_without_heading_is_paragraph() {
+        let blocks = vec![block(BlockKind::Paragraph), block(BlockKind::ListItem)];
+        assert_eq!(derive_chunk_kind(&blocks), FinalChunkKind::Paragraph);
+    }
+
+    #[test]
+    fn derive_chunk_kind_heading_scoped_narrative_is_section() {
+        let blocks = vec![block(BlockKind::Heading), block(BlockKind::Paragraph)];
+        assert_eq!(derive_chunk_kind(&blocks), FinalChunkKind::Section);
+    }
+
+    #[test]
+    fn derive_chunk_kind_mixed_content_is_mixed() {
+        let blocks = vec![block(BlockKind::CodeFence), block(BlockKind::Paragraph)];
+        assert_eq!(derive_chunk_kind(&blocks), FinalChunkKind::Mixed);
+    }
+
+    #[test]
+    fn chunk_kind_storage_labels_are_stable() {
+        assert_eq!(FinalChunkKind::Section.as_storage_kind(), "section");
+        assert_eq!(FinalChunkKind::Paragraph.as_storage_kind(), "paragraph");
+        assert_eq!(FinalChunkKind::Code.as_storage_kind(), "code");
+        assert_eq!(FinalChunkKind::Table.as_storage_kind(), "table");
+        assert_eq!(FinalChunkKind::Mixed.as_storage_kind(), "mixed");
     }
 }
