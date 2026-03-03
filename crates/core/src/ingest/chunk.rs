@@ -332,11 +332,12 @@ fn split_block_by_sentence_boundaries(
     }
 
     let sentence_end_tokens = sentence_end_token_indices(block.text.as_str(), &spans);
-    if sentence_end_tokens.is_empty() {
+    let clause_end_tokens = clause_end_token_indices(block.text.as_str(), &spans);
+    if sentence_end_tokens.is_empty() && clause_end_tokens.is_empty() {
         return None;
     }
 
-    let mut used_sentence_boundary = false;
+    let mut used_structural_boundary = false;
     let mut out = Vec::new();
     let mut start_token = 0usize;
     while start_token < spans.len() {
@@ -347,14 +348,25 @@ fn split_block_by_sentence_boundaries(
             .filter(|index| *index >= start_token && (*index + 1) <= max_end)
             .map(|index| (index + 1, NarrativeBoundary::Sentence))
             .collect::<Vec<_>>();
+        candidates.extend(
+            clause_end_tokens
+                .iter()
+                .copied()
+                .filter(|index| *index >= start_token && (*index + 1) <= max_end)
+                .map(|index| (index + 1, NarrativeBoundary::Clause)),
+        );
         candidates.push((max_end, NarrativeBoundary::TokenWindow));
         let end_token =
             best_narrative_cut(&candidates, target_tokens, start_token, spans.len()).unwrap_or(max_end);
-        if sentence_end_tokens
-            .iter()
-            .any(|index| (*index + 1) == end_token && *index >= start_token && (*index + 1) <= max_end)
+        if matches!(
+            candidates
+                .iter()
+                .find(|(candidate_end, _)| *candidate_end == end_token)
+                .map(|(_, boundary)| *boundary),
+            Some(NarrativeBoundary::Sentence | NarrativeBoundary::Clause)
+        )
         {
-            used_sentence_boundary = true;
+            used_structural_boundary = true;
         }
 
         out.push(split_block_range_by_tokens(
@@ -370,7 +382,7 @@ fn split_block_by_sentence_boundaries(
         start_token = next_start_token(start_token, end_token, overlap);
     }
 
-    used_sentence_boundary.then_some(out)
+    used_structural_boundary.then_some(out)
 }
 
 fn split_block_range_by_tokens(
@@ -418,9 +430,24 @@ fn sentence_end_token_indices(text: &str, spans: &[(usize, usize)]) -> Vec<usize
         .collect()
 }
 
+fn clause_end_token_indices(text: &str, spans: &[(usize, usize)]) -> Vec<usize> {
+    spans
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (start, end))| {
+            token_ends_clause(&text[*start..*end]).then_some(index)
+        })
+        .collect()
+}
+
 fn token_ends_sentence(token: &str) -> bool {
     let trimmed = token.trim_end_matches(|ch: char| matches!(ch, '"' | '\'' | ')' | ']' | '}'));
     trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?')
+}
+
+fn token_ends_clause(token: &str) -> bool {
+    let trimmed = token.trim_end_matches(|ch: char| matches!(ch, '"' | '\'' | ')' | ']' | '}'));
+    trimmed.ends_with(',') || trimmed.ends_with(';') || trimmed.ends_with(':')
 }
 
 fn best_narrative_cut(
@@ -1135,6 +1162,35 @@ mod tests {
         assert_eq!(chunks[1].text, "a5 a6 a7 a8");
         assert_eq!(chunks[2].text, "a9 a10 a11 a12");
         assert!(chunks.iter().all(|chunk| chunk.kind == FinalChunkKind::Code));
+    }
+
+    #[test]
+    fn narrative_forced_split_uses_clause_boundaries_when_sentences_absent() {
+        let policy = ChunkPolicy {
+            target_tokens: 3,
+            soft_max_tokens: 3,
+            hard_max_tokens: 3,
+            boundary_overlap_tokens: 0,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let document = ExtractedDocument {
+            blocks: vec![block_with(
+                BlockKind::Paragraph,
+                "alpha beta, gamma delta, epsilon zeta, eta theta",
+                0,
+                &[],
+            )],
+            metadata: HashMap::new(),
+            title: None,
+        };
+
+        let chunks = chunk_document(&document, &policy);
+        assert_eq!(chunks.len(), 4);
+        assert_eq!(chunks[0].text, "alpha beta,");
+        assert_eq!(chunks[1].text, "gamma delta,");
+        assert_eq!(chunks[2].text, "epsilon zeta,");
+        assert_eq!(chunks[3].text, "eta theta");
     }
 
     #[test]
