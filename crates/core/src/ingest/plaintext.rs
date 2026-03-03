@@ -11,7 +11,18 @@ impl Extractor for PlaintextExtractor {
         &["txt", "text", "log"]
     }
 
+    fn supports_path(&self, _path: &Path) -> bool {
+        true
+    }
+
     fn extract(&self, _path: &Path, bytes: &[u8]) -> Result<ExtractedDocument> {
+        if let Err(err) = std::str::from_utf8(bytes) {
+            return Err(
+                kbolt_types::KboltError::InvalidInput(format!("non-utf8 plaintext input: {err}"))
+                    .into(),
+            );
+        }
+
         let mut blocks = Vec::new();
         for (offset, end) in paragraph_ranges(bytes) {
             let text = String::from_utf8_lossy(&bytes[offset..end]).to_string();
@@ -143,5 +154,21 @@ mod tests {
         assert_eq!(doc.blocks[2].text, "last line");
         assert_eq!(doc.blocks[2].offset, 39);
         assert_eq!(doc.blocks[2].length, 9);
+    }
+
+    #[test]
+    fn supports_path_acts_as_generic_text_fallback() {
+        let extractor = PlaintextExtractor;
+        assert!(extractor.supports_path(Path::new("docs/readme.md")));
+        assert!(extractor.supports_path(Path::new("src/main.rs")));
+    }
+
+    #[test]
+    fn rejects_non_utf8_bytes() {
+        let extractor = PlaintextExtractor;
+        let err = extractor
+            .extract(Path::new("notes/data.bin"), &[0xff, 0xfe, 0xfd])
+            .expect_err("invalid utf8 should fail");
+        assert!(err.to_string().contains("non-utf8 plaintext input"));
     }
 }

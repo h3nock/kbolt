@@ -199,10 +199,10 @@ mod tests {
 
         let txt = registry.resolve_for_path(Path::new("notes/readme.txt"));
         let log = registry.resolve_for_path(Path::new("logs/server.LOG"));
-        let unknown = registry.resolve_for_path(Path::new("notes/image.png"));
+        let unknown = registry.resolve_for_path(Path::new("notes/readme.md"));
 
         assert!(txt.is_some());
         assert!(log.is_some());
-        assert!(unknown.is_none());
+        assert!(unknown.is_some());
     }
 }
