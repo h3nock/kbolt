@@ -135,6 +135,7 @@ pub fn load(config_path: Option<&Path>) -> Result<Config> {
 pub fn save(config: &Config) -> Result<()> {
     fs::create_dir_all(&config.config_dir)?;
     fs::create_dir_all(&config.cache_dir)?;
+    validate_chunking(&config.chunking)?;
 
     let file_config = FileConfig::from(config);
     let serialized = toml::to_string_pretty(&file_config)?;
@@ -207,6 +208,7 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
 
     let raw = fs::read_to_string(config_file)?;
     let file_config: FileConfig = toml::from_str(&raw)?;
+    validate_chunking(&file_config.chunking)?;
 
     Ok(Config {
         config_dir: config_dir.to_path_buf(),
@@ -218,6 +220,48 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
         },
         chunking: file_config.chunking,
     })
+}
+
+fn validate_chunking(chunking: &ChunkingConfig) -> Result<()> {
+    validate_chunk_policy("chunking.defaults", &chunking.defaults)?;
+    for (profile, policy) in &chunking.profiles {
+        validate_chunk_policy(format!("chunking.profiles.{profile}").as_str(), policy)?;
+    }
+    Ok(())
+}
+
+fn validate_chunk_policy(scope: &str, policy: &ChunkPolicy) -> Result<()> {
+    if policy.target_tokens == 0 || policy.soft_max_tokens == 0 || policy.hard_max_tokens == 0 {
+        return Err(
+            KboltError::Config(format!(
+                "{scope} token caps must be greater than zero (target={}, soft_max={}, hard_max={})",
+                policy.target_tokens, policy.soft_max_tokens, policy.hard_max_tokens
+            ))
+            .into(),
+        );
+    }
+
+    if policy.target_tokens > policy.soft_max_tokens {
+        return Err(
+            KboltError::Config(format!(
+                "{scope} is invalid: target_tokens ({}) cannot exceed soft_max_tokens ({})",
+                policy.target_tokens, policy.soft_max_tokens
+            ))
+            .into(),
+        );
+    }
+
+    if policy.soft_max_tokens > policy.hard_max_tokens {
+        return Err(
+            KboltError::Config(format!(
+                "{scope} is invalid: soft_max_tokens ({}) cannot exceed hard_max_tokens ({})",
+                policy.soft_max_tokens, policy.hard_max_tokens
+            ))
+            .into(),
+        );
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

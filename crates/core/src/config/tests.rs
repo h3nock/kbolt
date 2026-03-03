@@ -267,3 +267,56 @@ fn chunking_config_default_includes_code_profile() {
         })
     );
 }
+
+#[test]
+fn load_rejects_invalid_chunking_budget_order() {
+    let tmp = tempdir().expect("create tempdir");
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    let config_file = config_dir.join(CONFIG_FILENAME);
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        &config_file,
+        r#"
+[chunking.defaults]
+target_tokens = 600
+soft_max_tokens = 550
+hard_max_tokens = 750
+
+[chunking.profiles]
+"#,
+    )
+    .expect("write config file");
+
+    let err = load_from_file(&config_file, &config_dir, &cache_dir)
+        .expect_err("invalid chunking order should fail");
+    assert!(err.to_string().contains("target_tokens"));
+}
+
+#[test]
+fn load_rejects_zero_chunking_caps() {
+    let tmp = tempdir().expect("create tempdir");
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    let config_file = config_dir.join(CONFIG_FILENAME);
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        &config_file,
+        r#"
+[chunking.defaults]
+target_tokens = 450
+soft_max_tokens = 550
+hard_max_tokens = 750
+
+[chunking.profiles.md]
+target_tokens = 0
+soft_max_tokens = 550
+hard_max_tokens = 750
+"#,
+    )
+    .expect("write config file");
+
+    let err = load_from_file(&config_file, &config_dir, &cache_dir)
+        .expect_err("zero chunking caps should fail");
+    assert!(err.to_string().contains("must be greater than zero"));
+}
