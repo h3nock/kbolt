@@ -19,6 +19,19 @@ pub enum FinalChunkKind {
     Mixed,
 }
 
+pub trait TokenCounter {
+    fn count(&self, text: &str) -> usize;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WhitespaceTokenCounter;
+
+impl TokenCounter for WhitespaceTokenCounter {
+    fn count(&self, text: &str) -> usize {
+        count_whitespace_tokens(text)
+    }
+}
+
 impl FinalChunkKind {
     pub fn as_storage_kind(self) -> &'static str {
         match self {
@@ -54,6 +67,10 @@ pub fn resolve_policy(
 
 fn normalize_profile_key(raw: &str) -> String {
     raw.trim().trim_start_matches('.').to_ascii_lowercase()
+}
+
+fn count_whitespace_tokens(text: &str) -> usize {
+    text.split_whitespace().count()
 }
 
 pub fn derive_chunk_kind(blocks: &[ExtractedBlock]) -> FinalChunkKind {
@@ -100,7 +117,9 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::config::{ChunkPolicy, ChunkingConfig};
-    use crate::ingest::chunk::{derive_chunk_kind, resolve_policy, FinalChunkKind};
+    use crate::ingest::chunk::{
+        derive_chunk_kind, resolve_policy, FinalChunkKind, TokenCounter, WhitespaceTokenCounter,
+    };
     use crate::ingest::extract::{BlockKind, ExtractedBlock};
 
     fn baseline_config() -> ChunkingConfig {
@@ -212,5 +231,13 @@ mod tests {
         assert_eq!(FinalChunkKind::Code.as_storage_kind(), "code");
         assert_eq!(FinalChunkKind::Table.as_storage_kind(), "table");
         assert_eq!(FinalChunkKind::Mixed.as_storage_kind(), "mixed");
+    }
+
+    #[test]
+    fn whitespace_token_counter_counts_word_boundaries() {
+        let counter = WhitespaceTokenCounter;
+        assert_eq!(counter.count(""), 0);
+        assert_eq!(counter.count("alpha"), 1);
+        assert_eq!(counter.count("alpha beta\tgamma\n\ndelta"), 4);
     }
 }
