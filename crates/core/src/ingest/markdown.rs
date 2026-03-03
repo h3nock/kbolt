@@ -13,6 +13,10 @@ impl Extractor for MarkdownExtractor {
         &["md", "markdown", "mdown", "mkd"]
     }
 
+    fn profile_key(&self) -> &'static str {
+        "md"
+    }
+
     fn extract(&self, _path: &Path, bytes: &[u8]) -> Result<ExtractedDocument> {
         let source = std::str::from_utf8(bytes).map_err(|err| {
             kbolt_types::KboltError::InvalidInput(format!("non-utf8 markdown input: {err}"))
@@ -211,6 +215,7 @@ mod tests {
     #[test]
     fn extracts_heading_paths_for_nested_sections() {
         let extractor = MarkdownExtractor;
+        assert_eq!(extractor.profile_key(), "md");
         let markdown = br#"# Title
 Intro paragraph.
 

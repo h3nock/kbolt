@@ -1318,12 +1318,11 @@ impl Engine {
                 }
             }
 
-            let profile_key = entry
-                .path()
-                .extension()
-                .and_then(|value| value.to_str())
-                .map(|value| value.trim().trim_start_matches('.').to_ascii_lowercase());
-            let policy = resolve_policy(&self.config.chunking, profile_key.as_deref(), None);
+            let policy = resolve_policy(
+                &self.config.chunking,
+                Some(extractor.profile_key()),
+                None,
+            );
             let final_chunks = chunk_document(&extracted, &policy);
 
             let chunk_inserts = final_chunks

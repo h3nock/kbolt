@@ -11,6 +11,10 @@ impl Extractor for PlaintextExtractor {
         &["txt", "text", "log"]
     }
 
+    fn profile_key(&self) -> &'static str {
+        "txt"
+    }
+
     fn supports_path(&self, _path: &Path) -> bool {
         true
     }
@@ -159,6 +163,7 @@ mod tests {
     #[test]
     fn supports_path_acts_as_generic_text_fallback() {
         let extractor = PlaintextExtractor;
+        assert_eq!(extractor.profile_key(), "txt");
         assert!(extractor.supports_path(Path::new("docs/readme.md")));
         assert!(extractor.supports_path(Path::new("src/main.rs")));
     }

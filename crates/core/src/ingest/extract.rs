@@ -36,6 +36,10 @@ pub enum BlockKind {
 pub trait Extractor: Send + Sync {
     fn supports(&self) -> &[&str];
 
+    fn profile_key(&self) -> &'static str {
+        "txt"
+    }
+
     fn supports_path(&self, _path: &Path) -> bool {
         false
     }
@@ -150,6 +154,12 @@ mod tests {
     fn extractor_default_supports_path_is_false() {
         let extractor = DummyExtractor;
         assert!(!extractor.supports_path(Path::new("notes/readme.txt")));
+    }
+
+    #[test]
+    fn extractor_default_profile_key_is_txt() {
+        let extractor = DummyExtractor;
+        assert_eq!(extractor.profile_key(), "txt");
     }
 
     #[test]
