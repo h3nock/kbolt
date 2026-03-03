@@ -77,8 +77,11 @@ pub fn chunk_document_with_counter(
     for block in &expanded {
         let block_tokens = counter.count(block.text.as_str());
         let candidate_tokens = current_tokens.saturating_add(block_tokens);
+        let structurally_compatible = current
+            .last()
+            .is_none_or(|last| can_pack_together(last, block));
 
-        if current.is_empty() || candidate_tokens <= soft_max {
+        if current.is_empty() || (structurally_compatible && candidate_tokens <= soft_max) {
             current_tokens = candidate_tokens;
             current.push(block.clone());
             continue;
@@ -780,6 +783,34 @@ mod tests {
         assert_eq!(chunks[2].offset, 40);
         assert_eq!(chunks[2].length, 15);
         assert!(chunks.iter().all(|chunk| chunk.kind == FinalChunkKind::Table));
+    }
+
+    #[test]
+    fn chunk_document_flushes_on_structural_boundary_even_under_budget() {
+        let policy = ChunkPolicy {
+            target_tokens: 20,
+            soft_max_tokens: 30,
+            hard_max_tokens: 30,
+            boundary_overlap_tokens: 0,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let document = ExtractedDocument {
+            blocks: vec![
+                block_with(BlockKind::Heading, "# Intro", 0, &[]),
+                block_with(BlockKind::Paragraph, "alpha beta", 8, &["Intro"]),
+                block_with(BlockKind::CodeFence, "fn alpha() {}", 20, &["Intro"]),
+                block_with(BlockKind::Paragraph, "gamma delta", 34, &["Intro"]),
+            ],
+            metadata: HashMap::new(),
+            title: None,
+        };
+
+        let chunks = chunk_document(&document, &policy);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].kind, FinalChunkKind::Section);
+        assert_eq!(chunks[1].kind, FinalChunkKind::Code);
+        assert_eq!(chunks[2].kind, FinalChunkKind::Paragraph);
     }
 
     #[test]
