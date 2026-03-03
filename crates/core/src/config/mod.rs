@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,12 @@ const DEFAULT_EMBED_MODEL: &str = "google/EmbeddingGemma-256";
 const DEFAULT_RERANKER_MODEL: &str = "ExpedientFalcon/qwen3-reranker-0.6b-q8";
 const DEFAULT_EXPANDER_MODEL: &str = "Qwen/Qwen3-1.7B-q4";
 const DEFAULT_REAP_DAYS: u32 = 7;
+const DEFAULT_CHUNK_TARGET_TOKENS: usize = 450;
+const DEFAULT_CHUNK_SOFT_MAX_TOKENS: usize = 550;
+const DEFAULT_CHUNK_HARD_MAX_TOKENS: usize = 750;
+const DEFAULT_CHUNK_BOUNDARY_OVERLAP_TOKENS: usize = 48;
+const DEFAULT_CHUNK_NEIGHBOR_WINDOW: usize = 1;
+const DEFAULT_CHUNK_CONTEXTUAL_PREFIX: bool = true;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -66,6 +73,50 @@ impl Default for ModelConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReapingConfig {
     pub days: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkingConfig {
+    pub defaults: ChunkPolicy,
+    pub profiles: HashMap<String, ChunkPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkPolicy {
+    #[serde(default = "default_chunk_target_tokens")]
+    pub target_tokens: usize,
+    #[serde(default = "default_chunk_soft_max_tokens")]
+    pub soft_max_tokens: usize,
+    #[serde(default = "default_chunk_hard_max_tokens")]
+    pub hard_max_tokens: usize,
+    #[serde(default = "default_chunk_boundary_overlap_tokens")]
+    pub boundary_overlap_tokens: usize,
+    #[serde(default = "default_chunk_neighbor_window")]
+    pub neighbor_window: usize,
+    #[serde(default = "default_chunk_contextual_prefix")]
+    pub contextual_prefix: bool,
+}
+
+impl Default for ChunkingConfig {
+    fn default() -> Self {
+        Self {
+            defaults: ChunkPolicy::default(),
+            profiles: HashMap::new(),
+        }
+    }
+}
+
+impl Default for ChunkPolicy {
+    fn default() -> Self {
+        Self {
+            target_tokens: default_chunk_target_tokens(),
+            soft_max_tokens: default_chunk_soft_max_tokens(),
+            hard_max_tokens: default_chunk_hard_max_tokens(),
+            boundary_overlap_tokens: default_chunk_boundary_overlap_tokens(),
+            neighbor_window: default_chunk_neighbor_window(),
+            contextual_prefix: default_chunk_contextual_prefix(),
+        }
+    }
 }
 
 pub fn load(config_path: Option<&Path>) -> Result<Config> {
@@ -224,6 +275,30 @@ fn default_expander_source() -> ModelSourceConfig {
 
 fn default_reap_days() -> u32 {
     DEFAULT_REAP_DAYS
+}
+
+fn default_chunk_target_tokens() -> usize {
+    DEFAULT_CHUNK_TARGET_TOKENS
+}
+
+fn default_chunk_soft_max_tokens() -> usize {
+    DEFAULT_CHUNK_SOFT_MAX_TOKENS
+}
+
+fn default_chunk_hard_max_tokens() -> usize {
+    DEFAULT_CHUNK_HARD_MAX_TOKENS
+}
+
+fn default_chunk_boundary_overlap_tokens() -> usize {
+    DEFAULT_CHUNK_BOUNDARY_OVERLAP_TOKENS
+}
+
+fn default_chunk_neighbor_window() -> usize {
+    DEFAULT_CHUNK_NEIGHBOR_WINDOW
+}
+
+fn default_chunk_contextual_prefix() -> bool {
+    DEFAULT_CHUNK_CONTEXTUAL_PREFIX
 }
 
 #[cfg(test)]

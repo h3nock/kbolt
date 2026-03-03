@@ -147,3 +147,23 @@ fn resolve_config_dir_rejects_nonstandard_toml_filename() {
         "error should mention expected filename"
     );
 }
+
+#[test]
+fn chunk_policy_default_uses_markdown_tuned_budget() {
+    let policy = ChunkPolicy::default();
+
+    assert_eq!(policy.target_tokens, 450);
+    assert_eq!(policy.soft_max_tokens, 550);
+    assert_eq!(policy.hard_max_tokens, 750);
+    assert_eq!(policy.boundary_overlap_tokens, 48);
+    assert_eq!(policy.neighbor_window, 1);
+    assert!(policy.contextual_prefix);
+}
+
+#[test]
+fn chunking_config_default_has_empty_profiles() {
+    let chunking = ChunkingConfig::default();
+
+    assert_eq!(chunking.defaults, ChunkPolicy::default());
+    assert!(chunking.profiles.is_empty());
+}
