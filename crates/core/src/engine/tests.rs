@@ -7,7 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::config::{
     ChunkingConfig, Config, ModelConfig, ModelProvider, ModelSourceConfig, ReapingConfig,
 };
-use crate::engine::Engine;
+use crate::engine::{retrieval_text_with_prefix, Engine};
 use crate::storage::Storage;
 use crate::ModelPullEvent;
 use kbolt_types::{
@@ -130,6 +130,18 @@ fn write_text_file(path: &std::path::Path, text: &str) {
         std::fs::create_dir_all(parent).expect("create parent directories");
     }
     std::fs::write(path, text).expect("write file");
+}
+
+#[test]
+fn retrieval_text_with_prefix_adds_title_and_heading_context() {
+    let text = retrieval_text_with_prefix("body text", "Guide", Some("Setup > Install"), true);
+    assert_eq!(text, "title: Guide\nheading: Setup > Install\n\nbody text");
+}
+
+#[test]
+fn retrieval_text_with_prefix_respects_disabled_flag() {
+    let text = retrieval_text_with_prefix("body text", "Guide", Some("Setup"), false);
+    assert_eq!(text, "body text");
 }
 
 const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";

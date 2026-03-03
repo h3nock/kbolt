@@ -1362,11 +1362,16 @@ impl Engine {
                         filepath: relative_path.clone(),
                         title: title.clone(),
                         heading: chunk.heading.clone(),
-                        body: if chunk.text.is_empty() {
-                            body.clone()
-                        } else {
-                            chunk.text.clone()
-                        },
+                        body: retrieval_text_with_prefix(
+                            if chunk.text.is_empty() {
+                                body.as_str()
+                            } else {
+                                chunk.text.as_str()
+                            },
+                            title.as_str(),
+                            chunk.heading.as_deref(),
+                            policy.contextual_prefix,
+                        ),
                     })
                     .collect::<Vec<_>>();
                 self.storage.index_tantivy(
@@ -1697,6 +1702,36 @@ fn search_text_with_neighbors(
         chunk_text_from_bytes(bytes, primary.offset, primary.length)
     } else {
         snippets.join("\n\n")
+    }
+}
+
+pub(crate) fn retrieval_text_with_prefix(
+    source_text: &str,
+    title: &str,
+    heading: Option<&str>,
+    contextual_prefix: bool,
+) -> String {
+    if !contextual_prefix {
+        return source_text.to_string();
+    }
+
+    let mut lines = Vec::new();
+    let normalized_title = title.trim();
+    if !normalized_title.is_empty() {
+        lines.push(format!("title: {normalized_title}"));
+    }
+
+    if let Some(raw_heading) = heading {
+        let normalized_heading = raw_heading.trim();
+        if !normalized_heading.is_empty() {
+            lines.push(format!("heading: {normalized_heading}"));
+        }
+    }
+
+    if lines.is_empty() {
+        source_text.to_string()
+    } else {
+        format!("{}\n\n{}", lines.join("\n"), source_text)
     }
 }
 
