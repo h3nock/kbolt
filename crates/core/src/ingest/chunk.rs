@@ -1,6 +1,8 @@
 use crate::config::{ChunkPolicy, ChunkingConfig};
 use crate::ingest::extract::{BlockKind, ExtractedBlock, ExtractedDocument};
 
+const TABLE_HEADER_ATTR: &str = "__kbolt_table_header";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalChunk {
     pub text: String,
@@ -140,25 +142,53 @@ fn expand_blocks_for_hard_max(
     let hard_max = normalized_hard_max(policy);
     let overlap = normalized_overlap(policy, hard_max);
     let mut expanded = Vec::new();
+    let mut active_table_header: Option<String> = None;
 
     for block in blocks {
-        if counter.count(block.text.as_str()) <= hard_max {
-            expanded.push(block.clone());
+        match block.kind {
+            BlockKind::TableHeader => {
+                active_table_header = Some(block.text.clone());
+            }
+            BlockKind::TableRow => {}
+            _ => {
+                active_table_header = None;
+            }
+        }
+
+        let tagged = attach_table_header_attr(block, active_table_header.as_deref());
+
+        if counter.count(tagged.text.as_str()) <= hard_max {
+            expanded.push(tagged);
             continue;
         }
 
-        if is_narrative_block_kind(&block.kind) {
-            if let Some(sentence_splits) = split_block_by_sentence_boundaries(block, hard_max, overlap)
+        if is_narrative_block_kind(&tagged.kind) {
+            if let Some(sentence_splits) =
+                split_block_by_sentence_boundaries(&tagged, hard_max, overlap)
             {
                 expanded.extend(sentence_splits);
                 continue;
             }
         }
 
-        expanded.extend(split_block_by_tokens(block, hard_max, overlap));
+        expanded.extend(split_block_by_tokens(&tagged, hard_max, overlap));
     }
 
     expanded
+}
+
+fn attach_table_header_attr(block: &ExtractedBlock, table_header: Option<&str>) -> ExtractedBlock {
+    let mut tagged = block.clone();
+    if tagged.kind == BlockKind::TableRow {
+        if let Some(header) = table_header {
+            if !header.trim().is_empty() {
+                tagged
+                    .attrs
+                    .insert(TABLE_HEADER_ATTR.to_string(), header.to_string());
+            }
+        }
+    }
+    tagged
 }
 
 fn is_narrative_block_kind(kind: &BlockKind) -> bool {
@@ -306,13 +336,25 @@ fn finalize_chunk(blocks: &[ExtractedBlock]) -> FinalChunk {
         .last()
         .map(|block| block.offset.saturating_add(block.length))
         .unwrap_or(start);
-    let text = blocks
+    let mut text = blocks
         .iter()
         .map(|block| block.text.as_str())
         .collect::<Vec<_>>()
         .join("\n\n");
     let heading = resolve_heading(blocks);
     let kind = derive_chunk_kind(blocks);
+    if kind == FinalChunkKind::Table {
+        let has_header = blocks.iter().any(|block| block.kind == BlockKind::TableHeader);
+        if !has_header {
+            if let Some(header) = blocks
+                .first()
+                .and_then(|block| block.attrs.get(TABLE_HEADER_ATTR))
+                .map(String::as_str)
+            {
+                text = format!("{header}\n{text}");
+            }
+        }
+    }
 
     FinalChunk {
         text,
@@ -674,5 +716,42 @@ mod tests {
         assert_eq!(chunks[0].text, "alpha. beta gamma delta");
         assert_eq!(chunks[1].text, "epsilon zeta");
         assert!(chunks.iter().all(|chunk| chunk.kind == FinalChunkKind::Code));
+    }
+
+    #[test]
+    fn chunk_document_carries_table_header_for_row_only_chunks() {
+        let policy = ChunkPolicy {
+            target_tokens: 4,
+            soft_max_tokens: 4,
+            hard_max_tokens: 4,
+            boundary_overlap_tokens: 0,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let document = ExtractedDocument {
+            blocks: vec![
+                block_with(BlockKind::TableHeader, "h1 h2 h3 h4", 0, &[]),
+                block_with(BlockKind::TableRow, "r1a r1b r1c r1d", 20, &[]),
+                block_with(BlockKind::TableRow, "r2a r2b r2c r2d", 40, &[]),
+            ],
+            metadata: HashMap::new(),
+            title: None,
+        };
+
+        let chunks = chunk_document(&document, &policy);
+        assert_eq!(chunks.len(), 3);
+
+        assert_eq!(chunks[0].text, "h1 h2 h3 h4");
+        assert_eq!(chunks[0].offset, 0);
+        assert_eq!(chunks[0].length, 11);
+
+        assert_eq!(chunks[1].text, "h1 h2 h3 h4\nr1a r1b r1c r1d");
+        assert_eq!(chunks[1].offset, 20);
+        assert_eq!(chunks[1].length, 15);
+
+        assert_eq!(chunks[2].text, "h1 h2 h3 h4\nr2a r2b r2c r2d");
+        assert_eq!(chunks[2].offset, 40);
+        assert_eq!(chunks[2].length, 15);
+        assert!(chunks.iter().all(|chunk| chunk.kind == FinalChunkKind::Table));
     }
 }
