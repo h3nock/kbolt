@@ -147,10 +147,22 @@ fn expand_blocks_for_hard_max(
             continue;
         }
 
+        if is_narrative_block_kind(&block.kind) {
+            if let Some(sentence_splits) = split_block_by_sentence_boundaries(block, hard_max, overlap)
+            {
+                expanded.extend(sentence_splits);
+                continue;
+            }
+        }
+
         expanded.extend(split_block_by_tokens(block, hard_max, overlap));
     }
 
     expanded
+}
+
+fn is_narrative_block_kind(kind: &BlockKind) -> bool {
+    matches!(kind, BlockKind::Paragraph | BlockKind::ListItem | BlockKind::BlockQuote)
 }
 
 fn split_block_by_tokens(block: &ExtractedBlock, hard_max: usize, overlap: usize) -> Vec<ExtractedBlock> {
@@ -163,23 +175,108 @@ fn split_block_by_tokens(block: &ExtractedBlock, hard_max: usize, overlap: usize
     let mut start_token = 0usize;
     while start_token < spans.len() {
         let end_token = (start_token + hard_max).min(spans.len());
-        let byte_start = spans[start_token].0;
-        let byte_end = spans[end_token - 1].1;
-
-        let mut split = block.clone();
-        split.offset = block.offset.saturating_add(byte_start);
-        split.length = byte_end.saturating_sub(byte_start);
-        split.text = block.text[byte_start..byte_end].to_string();
-        out.push(split);
+        out.push(split_block_range(block, &spans, start_token, end_token));
 
         if end_token == spans.len() {
             break;
         }
 
-        start_token = end_token.saturating_sub(overlap);
+        start_token = next_start_token(start_token, end_token, overlap);
     }
 
     out
+}
+
+fn split_block_by_sentence_boundaries(
+    block: &ExtractedBlock,
+    hard_max: usize,
+    overlap: usize,
+) -> Option<Vec<ExtractedBlock>> {
+    let spans = token_byte_spans(block.text.as_str());
+    if spans.is_empty() {
+        return Some(vec![block.clone()]);
+    }
+
+    let sentence_end_tokens = sentence_end_token_indices(block.text.as_str(), &spans);
+    if sentence_end_tokens.is_empty() {
+        return None;
+    }
+
+    let mut used_sentence_boundary = false;
+    let mut out = Vec::new();
+    let mut start_token = 0usize;
+    while start_token < spans.len() {
+        let max_end = (start_token + hard_max).min(spans.len());
+        let end_token = match last_sentence_end_within(&sentence_end_tokens, start_token, max_end) {
+            Some(boundary_end) => {
+                used_sentence_boundary = true;
+                boundary_end
+            }
+            None => max_end,
+        };
+
+        out.push(split_block_range(block, &spans, start_token, end_token));
+        if end_token == spans.len() {
+            break;
+        }
+
+        start_token = next_start_token(start_token, end_token, overlap);
+    }
+
+    used_sentence_boundary.then_some(out)
+}
+
+fn split_block_range(
+    block: &ExtractedBlock,
+    spans: &[(usize, usize)],
+    start_token: usize,
+    end_token: usize,
+) -> ExtractedBlock {
+    let byte_start = spans[start_token].0;
+    let byte_end = spans[end_token - 1].1;
+
+    let mut split = block.clone();
+    split.offset = block.offset.saturating_add(byte_start);
+    split.length = byte_end.saturating_sub(byte_start);
+    split.text = block.text[byte_start..byte_end].to_string();
+    split
+}
+
+fn next_start_token(start_token: usize, end_token: usize, overlap: usize) -> usize {
+    let next = end_token.saturating_sub(overlap);
+    if next <= start_token {
+        end_token
+    } else {
+        next
+    }
+}
+
+fn sentence_end_token_indices(text: &str, spans: &[(usize, usize)]) -> Vec<usize> {
+    spans
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (start, end))| {
+            token_ends_sentence(&text[*start..*end]).then_some(index)
+        })
+        .collect()
+}
+
+fn last_sentence_end_within(
+    sentence_end_tokens: &[usize],
+    start_token: usize,
+    max_end: usize,
+) -> Option<usize> {
+    sentence_end_tokens
+        .iter()
+        .copied()
+        .filter(|index| *index >= start_token && (*index + 1) <= max_end)
+        .max()
+        .map(|index| index + 1)
+}
+
+fn token_ends_sentence(token: &str) -> bool {
+    let trimmed = token.trim_end_matches(|ch: char| matches!(ch, '"' | '\'' | ')' | ']' | '}'));
+    trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?')
 }
 
 fn token_byte_spans(text: &str) -> Vec<(usize, usize)> {
@@ -520,5 +617,62 @@ mod tests {
         assert_eq!(chunks[1].length, 19);
         assert_eq!(chunks[2].offset, 38);
         assert_eq!(chunks[2].length, 20);
+    }
+
+    #[test]
+    fn chunk_document_prefers_sentence_boundaries_for_narrative_forced_split() {
+        let policy = ChunkPolicy {
+            target_tokens: 4,
+            soft_max_tokens: 4,
+            hard_max_tokens: 4,
+            boundary_overlap_tokens: 0,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let document = ExtractedDocument {
+            blocks: vec![block_with(
+                BlockKind::Paragraph,
+                "alpha one. beta two three. gamma four five. delta six seven.",
+                0,
+                &["Doc"],
+            )],
+            metadata: HashMap::new(),
+            title: None,
+        };
+
+        let chunks = chunk_document(&document, &policy);
+        assert_eq!(chunks.len(), 4);
+        assert_eq!(chunks[0].text, "alpha one.");
+        assert_eq!(chunks[1].text, "beta two three.");
+        assert_eq!(chunks[2].text, "gamma four five.");
+        assert_eq!(chunks[3].text, "delta six seven.");
+    }
+
+    #[test]
+    fn chunk_document_keeps_token_window_split_for_non_narrative_blocks() {
+        let policy = ChunkPolicy {
+            target_tokens: 4,
+            soft_max_tokens: 4,
+            hard_max_tokens: 4,
+            boundary_overlap_tokens: 0,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let document = ExtractedDocument {
+            blocks: vec![block_with(
+                BlockKind::CodeFence,
+                "alpha. beta gamma delta epsilon zeta",
+                0,
+                &[],
+            )],
+            metadata: HashMap::new(),
+            title: None,
+        };
+
+        let chunks = chunk_document(&document, &policy);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].text, "alpha. beta gamma delta");
+        assert_eq!(chunks[1].text, "epsilon zeta");
+        assert!(chunks.iter().all(|chunk| chunk.kind == FinalChunkKind::Code));
     }
 }
