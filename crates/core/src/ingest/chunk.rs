@@ -143,6 +143,10 @@ fn normalized_soft_max(policy: &ChunkPolicy) -> usize {
     policy.soft_max_tokens.max(target)
 }
 
+fn normalized_target(policy: &ChunkPolicy) -> usize {
+    policy.target_tokens.max(1)
+}
+
 fn normalized_hard_max(policy: &ChunkPolicy) -> usize {
     let soft_max = normalized_soft_max(policy);
     policy.hard_max_tokens.max(soft_max)
@@ -160,6 +164,7 @@ fn expand_blocks_for_hard_max(
     counter: &dyn TokenCounter,
 ) -> Vec<ExtractedBlock> {
     let hard_max = normalized_hard_max(policy);
+    let target = normalized_target(policy);
     let overlap = normalized_overlap(policy, hard_max);
     let mut expanded = Vec::new();
     let mut active_table_header: Option<String> = None;
@@ -184,7 +189,7 @@ fn expand_blocks_for_hard_max(
 
         if is_narrative_block_kind(&tagged.kind) {
             if let Some(sentence_splits) =
-                split_block_by_sentence_boundaries(&tagged, hard_max, overlap)
+                split_block_by_sentence_boundaries(&tagged, target, hard_max, overlap)
             {
                 expanded.extend(sentence_splits);
                 continue;
@@ -257,6 +262,7 @@ fn split_block_by_tokens(block: &ExtractedBlock, hard_max: usize, overlap: usize
 
 fn split_block_by_sentence_boundaries(
     block: &ExtractedBlock,
+    target_tokens: usize,
     hard_max: usize,
     overlap: usize,
 ) -> Option<Vec<ExtractedBlock>> {
@@ -275,13 +281,21 @@ fn split_block_by_sentence_boundaries(
     let mut start_token = 0usize;
     while start_token < spans.len() {
         let max_end = (start_token + hard_max).min(spans.len());
-        let end_token = match last_sentence_end_within(&sentence_end_tokens, start_token, max_end) {
-            Some(boundary_end) => {
-                used_sentence_boundary = true;
-                boundary_end
-            }
-            None => max_end,
-        };
+        let mut candidates = sentence_end_tokens
+            .iter()
+            .copied()
+            .filter(|index| *index >= start_token && (*index + 1) <= max_end)
+            .map(|index| (index + 1, NarrativeBoundary::Sentence))
+            .collect::<Vec<_>>();
+        candidates.push((max_end, NarrativeBoundary::TokenWindow));
+        let end_token =
+            best_narrative_cut(&candidates, target_tokens, start_token, spans.len()).unwrap_or(max_end);
+        if sentence_end_tokens
+            .iter()
+            .any(|index| (*index + 1) == end_token && *index >= start_token && (*index + 1) <= max_end)
+        {
+            used_sentence_boundary = true;
+        }
 
         out.push(split_block_range(block, &spans, start_token, end_token));
         if end_token == spans.len() {
@@ -330,19 +344,6 @@ fn sentence_end_token_indices(text: &str, spans: &[(usize, usize)]) -> Vec<usize
             token_ends_sentence(&text[*start..*end]).then_some(index)
         })
         .collect()
-}
-
-fn last_sentence_end_within(
-    sentence_end_tokens: &[usize],
-    start_token: usize,
-    max_end: usize,
-) -> Option<usize> {
-    sentence_end_tokens
-        .iter()
-        .copied()
-        .filter(|index| *index >= start_token && (*index + 1) <= max_end)
-        .max()
-        .map(|index| index + 1)
 }
 
 fn token_ends_sentence(token: &str) -> bool {
