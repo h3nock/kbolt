@@ -1856,6 +1856,73 @@ fn update_code_files_use_code_chunking_profile() {
 }
 
 #[test]
+fn update_code_uses_blank_line_grouping_before_token_fallback() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let g1 = std::iter::repeat_n("g1token", 240).collect::<Vec<_>>().join(" ");
+        let g2 = std::iter::repeat_n("g2token", 240).collect::<Vec<_>>().join(" ");
+        let g3 = std::iter::repeat_n("g3token", 240).collect::<Vec<_>>().join(" ");
+        let source = format!("{g1}\n\n{g2}\n\n{g3}\n");
+        let file_path = collection_path.join("src/lib.rs");
+        write_text_file(&file_path, &source);
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update code");
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.added, 1);
+        assert!(report.errors.is_empty(), "unexpected errors: {:?}", report.errors);
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "src/lib.rs")
+            .expect("query document")
+            .expect("document exists");
+        let chunks = engine
+            .storage()
+            .get_chunks_for_document(doc.id)
+            .expect("load chunks");
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|chunk| chunk.kind == "code"));
+
+        let bytes = std::fs::read(&file_path).expect("read source bytes");
+        let first = {
+            let start = chunks[0].offset.min(bytes.len());
+            let end = chunks[0]
+                .offset
+                .saturating_add(chunks[0].length)
+                .min(bytes.len());
+            String::from_utf8_lossy(&bytes[start..end]).into_owned()
+        };
+        let second = {
+            let start = chunks[1].offset.min(bytes.len());
+            let end = chunks[1]
+                .offset
+                .saturating_add(chunks[1].length)
+                .min(bytes.len());
+            String::from_utf8_lossy(&bytes[start..end]).into_owned()
+        };
+        assert!(first.contains("g1token"));
+        assert!(first.contains("g2token"));
+        assert!(!first.contains("g3token"));
+        assert!(second.contains("g3token"));
+    });
+}
+
+#[test]
 fn update_preserves_structural_boundaries_across_chunk_kinds() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
