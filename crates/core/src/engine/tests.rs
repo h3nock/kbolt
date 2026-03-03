@@ -1698,6 +1698,56 @@ fn update_indexes_new_document_and_skips_unchanged_mtime() {
 }
 
 #[test]
+fn update_markdown_uses_structural_chunking_and_heading_metadata() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let repeated_words = std::iter::repeat_n("chunktoken", 900).collect::<Vec<_>>().join(" ");
+        let markdown = format!("# Title\n\n{repeated_words}\n");
+        let file_path = collection_path.join("docs/guide.md");
+        write_text_file(&file_path, &markdown);
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update markdown");
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.added, 1);
+        assert!(report.errors.is_empty(), "unexpected errors: {:?}", report.errors);
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "docs/guide.md")
+            .expect("query document")
+            .expect("document exists");
+        let chunks = engine
+            .storage()
+            .get_chunks_for_document(doc.id)
+            .expect("load chunks");
+
+        assert!(chunks.len() >= 2, "expected markdown hard-split chunks");
+        assert!(
+            chunks.iter().any(|chunk| chunk.kind == "paragraph"),
+            "expected paragraph chunk kind"
+        );
+        assert!(
+            chunks.iter().any(|chunk| chunk.heading.as_deref() == Some("Title")),
+            "expected heading breadcrumb on narrative chunks"
+        );
+    });
+}
+
+#[test]
 fn update_skips_hardcoded_ignored_paths() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
