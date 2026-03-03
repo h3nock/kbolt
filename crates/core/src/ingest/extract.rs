@@ -82,6 +82,7 @@ impl ExtractorRegistry {
 
 pub fn default_registry() -> ExtractorRegistry {
     let mut registry = ExtractorRegistry::new();
+    registry.register(Arc::new(crate::ingest::markdown::MarkdownExtractor));
     registry.register(Arc::new(crate::ingest::plaintext::PlaintextExtractor));
     registry
 }
@@ -198,11 +199,14 @@ mod tests {
         let registry = default_registry();
 
         let txt = registry.resolve_for_path(Path::new("notes/readme.txt"));
-        let log = registry.resolve_for_path(Path::new("logs/server.LOG"));
-        let unknown = registry.resolve_for_path(Path::new("notes/readme.md"));
+        let md = registry.resolve_for_path(Path::new("notes/readme.md"));
+        let unknown = registry.resolve_for_path(Path::new("notes/readme.rst"));
 
         assert!(txt.is_some());
-        assert!(log.is_some());
+        assert!(
+            md.as_ref()
+                .is_some_and(|extractor| extractor.supports().contains(&"md"))
+        );
         assert!(unknown.is_some());
     }
 }
