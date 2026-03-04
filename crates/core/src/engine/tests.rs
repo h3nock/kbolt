@@ -1457,6 +1457,52 @@ fn multi_get_reports_deleted_files_as_warnings() {
 }
 
 #[test]
+fn multi_get_skips_missing_and_invalid_locators_with_warnings() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        write_text_file(&work_path.join("a.md"), "alpha\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let result = engine
+            .multi_get(MultiGetRequest {
+                locators: vec![
+                    Locator::Path("api/a.md".to_string()),
+                    Locator::Path("api/missing.md".to_string()),
+                    Locator::Path("missing-slash".to_string()),
+                    Locator::DocId("#invalid".to_string()),
+                ],
+                space: Some("work".to_string()),
+                max_files: 10,
+                max_bytes: 51_200,
+            })
+            .expect("run multi_get");
+
+        assert_eq!(result.resolved_count, 1);
+        assert_eq!(result.documents.len(), 1);
+        assert_eq!(result.documents[0].path, "api/a.md");
+        assert!(result.omitted.is_empty());
+        assert_eq!(result.warnings.len(), 3);
+        assert!(result.warnings.iter().any(|warning| warning.contains("api/missing.md")));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("invalid locator: path locator must be '<collection>/<path>'"))
+        );
+        assert!(result.warnings.iter().any(|warning| warning.contains("#invalid")));
+    });
+}
+
+#[test]
 fn search_keyword_returns_ranked_results_for_targeted_collection() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);

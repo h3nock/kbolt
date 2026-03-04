@@ -452,6 +452,33 @@ impl Engine {
                         ));
                         continue;
                     }
+                    KboltError::DocumentNotFound { path } => {
+                        warnings.push(format!("document not found: {path}"));
+                        continue;
+                    }
+                    KboltError::InvalidInput(message) => {
+                        warnings.push(format!("invalid locator: {message}"));
+                        continue;
+                    }
+                    KboltError::InvalidPath(path) => {
+                        warnings.push(format!("invalid locator path: {}", path.display()));
+                        continue;
+                    }
+                    KboltError::AmbiguousSpace { collection, spaces } => {
+                        warnings.push(format!(
+                            "ambiguous locator space for collection '{collection}': {:?}. use --space to disambiguate.",
+                            spaces
+                        ));
+                        continue;
+                    }
+                    KboltError::SpaceNotFound { name } => {
+                        warnings.push(format!("space not found for locator: {name}"));
+                        continue;
+                    }
+                    KboltError::CollectionNotFound { name } => {
+                        warnings.push(format!("collection not found for locator: {name}"));
+                        continue;
+                    }
                     other => return Err(other.into()),
                 },
             };

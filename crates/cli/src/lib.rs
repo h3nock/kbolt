@@ -2373,6 +2373,52 @@ mod tests {
     }
 
     #[test]
+    fn multi_get_reports_missing_and_invalid_locators_as_warnings() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            adapter
+                .space_add("work", None, false, &[])
+                .expect("add work");
+            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            adapter
+                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .expect("add collection");
+
+            fs::write(collection_path.join("a.md"), "alpha\n").expect("write a");
+            adapter
+                .update(Some("work"), &["api".to_string()], true, false, false)
+                .expect("run update");
+
+            let output = adapter
+                .multi_get(
+                    Some("work"),
+                    &[
+                        "api/a.md".to_string(),
+                        "api/missing.md".to_string(),
+                        "api/../bad.md".to_string(),
+                    ],
+                    10,
+                    51_200,
+                )
+                .expect("run multi-get");
+            assert!(output.contains("documents: 1"), "unexpected output: {output}");
+            assert!(output.contains("resolved_count: 1"), "unexpected output: {output}");
+            assert!(output.contains("warnings: 2"), "unexpected output: {output}");
+            assert!(
+                output.contains("document not found: api/missing.md"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("invalid locator: path locator must not traverse directories"),
+                "unexpected output: {output}"
+            );
+        });
+    }
+
+    #[test]
     fn status_reports_spaces_totals_and_models() {
         with_isolated_xdg_dirs(|| {
             let root = tempdir().expect("create collection root");
