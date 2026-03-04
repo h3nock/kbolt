@@ -28,6 +28,8 @@ pub struct Engine {
     storage: Storage,
     config: Config,
     embedder: Option<Arc<dyn models::Embedder>>,
+    reranker: Arc<dyn models::Reranker>,
+    expander: Arc<dyn models::Expander>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,10 +90,15 @@ impl Engine {
         let config = config::load(config_path)?;
         let storage = Storage::new(&config.cache_dir)?;
         let embedder = models::build_embedder(config.embeddings.as_ref())?;
+        let model_dir = config.cache_dir.join("models");
+        let reranker = models::build_reranker(&config.models, &model_dir)?;
+        let expander = models::build_expander(&config.models, &model_dir)?;
         Ok(Self {
             storage,
             config,
             embedder,
+            reranker,
+            expander,
         })
     }
 
@@ -106,10 +113,17 @@ impl Engine {
         config: Config,
         embedder: Option<Arc<dyn models::Embedder>>,
     ) -> Self {
+        let model_dir = config.cache_dir.join("models");
+        let reranker = models::build_reranker(&config.models, &model_dir)
+            .expect("build reranker for test engine");
+        let expander = models::build_expander(&config.models, &model_dir)
+            .expect("build expander for test engine");
         Self {
             storage,
             config,
             embedder,
+            reranker,
+            expander,
         }
     }
 
@@ -866,7 +880,7 @@ impl Engine {
         limit: usize,
         min_score: f32,
     ) -> Result<Vec<RankedChunk>> {
-        let variants = deep_query_variants(query);
+        let variants = self.expander.expand(query)?;
         let mut aggregates: HashMap<i64, RankedChunk> = HashMap::new();
 
         for variant in variants {
@@ -999,11 +1013,20 @@ impl Engine {
 
         if apply_rerank && !candidates.is_empty() {
             let rerank_count = candidates.len().min(20);
-            let raw_scores = candidates
+            let rerank_inputs = candidates
                 .iter()
                 .take(rerank_count)
-                .map(|candidate| lexical_rerank_score(query, &candidate.rerank_input))
+                .map(|candidate| candidate.rerank_input.clone())
                 .collect::<Vec<_>>();
+            let raw_scores = self.reranker.rerank(query, &rerank_inputs)?;
+            if raw_scores.len() != rerank_inputs.len() {
+                return Err(KboltError::Inference(format!(
+                    "reranker returned {} scores for {} candidates",
+                    raw_scores.len(),
+                    rerank_inputs.len()
+                ))
+                .into());
+            }
             let normalized_scores = normalize_scores(&raw_scores);
             for (candidate, reranker_score) in candidates
                 .iter_mut()
@@ -2320,33 +2343,6 @@ fn search_text_with_neighbors(
     }
 }
 
-fn deep_query_variants(query: &str) -> Vec<String> {
-    let normalized = query.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() {
-        return Vec::new();
-    }
-
-    let lexical = tokenize_terms(&normalized).join(" ");
-    let semantic = format!("explain {normalized}");
-    let hyde = format!("this document explains {normalized} with practical details");
-
-    let mut seen = HashSet::new();
-    let mut variants = Vec::new();
-    for variant in [normalized, lexical, semantic, hyde] {
-        let trimmed = variant.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let key = trimmed.to_ascii_lowercase();
-        if seen.insert(key) {
-            variants.push(trimmed.to_string());
-        }
-    }
-
-    variants
-}
-
 fn dense_distance_to_score(distance: f32) -> f32 {
     1.0 / (1.0 + distance.max(0.0))
 }
@@ -2358,43 +2354,6 @@ fn max_option(left: Option<f32>, right: Option<f32>) -> Option<f32> {
         (None, Some(b)) => Some(b),
         (None, None) => None,
     }
-}
-
-fn lexical_rerank_score(query: &str, text: &str) -> f32 {
-    let query_terms = tokenize_terms(query);
-    if query_terms.is_empty() {
-        return 0.0;
-    }
-
-    let doc_terms = tokenize_terms(text).into_iter().collect::<HashSet<_>>();
-    let overlap = query_terms
-        .iter()
-        .filter(|term| doc_terms.contains(*term))
-        .count() as f32
-        / query_terms.len() as f32;
-
-    let query_lower = query.trim().to_ascii_lowercase();
-    let text_lower = text.to_ascii_lowercase();
-    let phrase_bonus = if !query_lower.is_empty() && text_lower.contains(&query_lower) {
-        0.25
-    } else {
-        0.0
-    };
-
-    (0.75 * overlap + phrase_bonus).clamp(0.0, 1.0)
-}
-
-fn tokenize_terms(text: &str) -> Vec<String> {
-    text.split(|ch: char| !ch.is_alphanumeric())
-        .filter_map(|term| {
-            let lowered = term.trim().to_ascii_lowercase();
-            if lowered.is_empty() {
-                None
-            } else {
-                Some(lowered)
-            }
-        })
-        .collect::<Vec<_>>()
 }
 
 fn normalize_scores(scores: &[f32]) -> Vec<f32> {

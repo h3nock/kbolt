@@ -5,8 +5,10 @@ use kbolt_types::KboltError;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::config::{EmbeddingConfig, EmbeddingProvider};
-use crate::models::Embedder;
+use crate::config::{EmbeddingConfig, EmbeddingProvider, ModelConfig};
+use crate::models::expander::HeuristicExpander;
+use crate::models::reranker::HeuristicReranker;
+use crate::models::{Embedder, Expander, Reranker};
 use crate::Result;
 
 #[derive(Debug, Clone)]
@@ -35,6 +37,20 @@ pub(crate) fn build_embedder(
         }),
     };
     Ok(Some(embedder))
+}
+
+pub(crate) fn build_reranker(
+    _config: &ModelConfig,
+    _model_dir: &std::path::Path,
+) -> Result<Arc<dyn Reranker>> {
+    Ok(Arc::new(HeuristicReranker))
+}
+
+pub(crate) fn build_expander(
+    _config: &ModelConfig,
+    _model_dir: &std::path::Path,
+) -> Result<Arc<dyn Expander>> {
+    Ok(Arc::new(HeuristicExpander))
 }
 
 impl Embedder for OpenAiCompatibleEmbedder {
