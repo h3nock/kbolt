@@ -2200,6 +2200,99 @@ fn update_clears_mismatched_dense_state_before_scan() {
 }
 
 #[test]
+fn update_clears_dense_state_when_embedding_model_drifts() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("src/lib.rs");
+        write_text_file(&file_path, "fn alpha() {}\n");
+
+        let first = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("first update");
+        assert_eq!(first.scanned, 1);
+        assert_eq!(first.added, 1);
+        assert!(
+            first.errors.is_empty(),
+            "unexpected errors: {:?}",
+            first.errors
+        );
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(work_space.id, "api")
+            .expect("get api collection");
+        let doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "src/lib.rs")
+            .expect("query document")
+            .expect("document should exist");
+        let chunks = engine
+            .storage()
+            .get_chunks_for_document(doc.id)
+            .expect("load chunks");
+        assert!(!chunks.is_empty(), "expected indexed chunks");
+
+        engine
+            .storage()
+            .insert_embeddings(&[(chunks[0].id, "stale-model")])
+            .expect("insert stale embedding row");
+        engine
+            .storage()
+            .batch_insert_usearch("work", &[(chunks[0].id, &[1.0, 0.0])])
+            .expect("insert stale usearch vector");
+
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(work_space.id))
+                .expect("count embedded chunks before drift reconcile"),
+            1
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_usearch("work")
+                .expect("count usearch vectors before drift reconcile"),
+            1
+        );
+
+        let second = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("second update");
+        assert_eq!(second.scanned, 1);
+        assert_eq!(second.skipped_mtime, 1);
+        assert!(
+            second.errors.is_empty(),
+            "unexpected errors: {:?}",
+            second.errors
+        );
+
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(work_space.id))
+                .expect("count embedded chunks after drift reconcile"),
+            0
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_usearch("work")
+                .expect("count usearch vectors after drift reconcile"),
+            0
+        );
+    });
+}
+
+#[test]
 fn update_embeds_chunks_when_embedder_is_configured() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_embedder(Arc::new(DeterministicEmbedder));

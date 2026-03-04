@@ -947,9 +947,20 @@ impl Engine {
             return Ok(());
         }
 
+        let expected_model = self.embedding_model_key();
         let mut visited_spaces = HashSet::new();
         for target in targets {
             if !visited_spaces.insert(target.collection.space_id) {
+                continue;
+            }
+
+            let models = self
+                .storage
+                .list_embedding_models_in_space(target.collection.space_id)?;
+            if models.iter().any(|model| model != expected_model) {
+                self.storage
+                    .delete_embeddings_for_space(target.collection.space_id)?;
+                self.storage.clear_usearch(&target.space)?;
                 continue;
             }
 
@@ -979,7 +990,7 @@ impl Engine {
             return Ok(());
         };
 
-        let model = self.config.models.embedder.id.as_str();
+        let model = self.embedding_model_key();
         loop {
             let backlog = self.storage.get_unembedded_chunks(model, 64)?;
             if backlog.is_empty() {
@@ -1439,6 +1450,14 @@ impl Engine {
 
     pub fn storage(&self) -> &Storage {
         &self.storage
+    }
+
+    fn embedding_model_key(&self) -> &str {
+        self.config
+            .embeddings
+            .as_ref()
+            .map(|config| config.model.as_str())
+            .unwrap_or(self.config.models.embedder.id.as_str())
     }
 
     fn model_dir(&self) -> std::path::PathBuf {
