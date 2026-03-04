@@ -68,10 +68,11 @@ impl Engine {
     pub fn new(config_path: Option<&Path>) -> Result<Self> {
         let config = config::load(config_path)?;
         let storage = Storage::new(&config.cache_dir)?;
+        let embedder = models::build_embedder(config.embeddings.as_ref())?;
         Ok(Self {
             storage,
             config,
-            embedder: None,
+            embedder,
         })
     }
 
