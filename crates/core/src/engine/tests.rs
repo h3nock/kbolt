@@ -2,7 +2,7 @@ use fs2::FileExt;
 use tempfile::tempdir;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::config::{
     ChunkingConfig, Config, ModelConfig, ModelProvider, ModelSourceConfig, ReapingConfig,
@@ -14,6 +14,22 @@ use kbolt_types::{
     ActiveSpaceSource, AddCollectionRequest, GetRequest, KboltError, Locator, MultiGetRequest,
     OmitReason, SearchMode, SearchRequest, UpdateOptions,
 };
+
+#[derive(Default)]
+struct DeterministicEmbedder;
+
+impl crate::models::Embedder for DeterministicEmbedder {
+    fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
+        Ok(texts
+            .iter()
+            .map(|text| {
+                let token_count = text.split_whitespace().count().max(1) as f32;
+                let byte_count = text.as_bytes().len().max(1) as f32;
+                vec![token_count, byte_count]
+            })
+            .collect())
+    }
+}
 
 fn test_engine() -> Engine {
     let root = tempdir().expect("create temp root");
@@ -47,6 +63,40 @@ fn test_engine() -> Engine {
         chunking: ChunkingConfig::default(),
     };
     Engine::from_parts(storage, config)
+}
+
+fn test_engine_with_embedder(embedder: Arc<dyn crate::models::Embedder>) -> Engine {
+    let root = tempdir().expect("create temp root");
+    let root_path = root.path().to_path_buf();
+    std::mem::forget(root);
+    let config_dir = root_path.join("config");
+    let cache_dir = root_path.join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+    let config = Config {
+        config_dir,
+        cache_dir,
+        default_space: None,
+        models: ModelConfig {
+            embedder: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "embed-model".to_string(),
+                revision: None,
+            },
+            reranker: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "reranker-model".to_string(),
+                revision: None,
+            },
+            expander: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "expander-model".to_string(),
+                revision: None,
+            },
+        },
+        reaping: ReapingConfig { days: 7 },
+        chunking: ChunkingConfig::default(),
+    };
+    Engine::from_parts_with_embedder(storage, config, Some(embedder))
 }
 
 fn test_engine_with_default_space(default_space: Option<&str>) -> Engine {
@@ -2006,6 +2056,55 @@ fn update_clears_mismatched_dense_state_before_scan() {
                 .expect("count usearch vectors after reconcile"),
             0
         );
+    });
+}
+
+#[test]
+fn update_embeds_chunks_when_embedder_is_configured() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_embedder(Arc::new(DeterministicEmbedder));
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("src/lib.rs");
+        write_text_file(&file_path, "fn alpha() {}\n");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update with embedder");
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.added, 1);
+        assert_eq!(report.errors.len(), 0);
+        assert!(
+            report.embedded > 0,
+            "expected embedding phase to process chunks"
+        );
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(work_space.id))
+                .expect("count embedded chunks"),
+            report.embedded
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_usearch("work")
+                .expect("count usearch vectors"),
+            report.embedded
+        );
+
+        let files = engine
+            .list_files(Some("work"), "api", None)
+            .expect("list files");
+        assert_eq!(files.len(), 1);
+        assert!(files[0].embedded, "file should be fully embedded");
     });
 }
 

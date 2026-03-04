@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path};
+use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 
 use crate::config;
@@ -26,6 +27,7 @@ use kbolt_types::{
 pub struct Engine {
     storage: Storage,
     config: Config,
+    embedder: Option<Arc<dyn models::Embedder>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,12 +60,29 @@ impl Engine {
     pub fn new(config_path: Option<&Path>) -> Result<Self> {
         let config = config::load(config_path)?;
         let storage = Storage::new(&config.cache_dir)?;
-        Ok(Self { storage, config })
+        Ok(Self {
+            storage,
+            config,
+            embedder: None,
+        })
     }
 
     #[cfg(test)]
     pub(crate) fn from_parts(storage: Storage, config: Config) -> Self {
-        Self { storage, config }
+        Self::from_parts_with_embedder(storage, config, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_parts_with_embedder(
+        storage: Storage,
+        config: Config,
+        embedder: Option<Arc<dyn models::Embedder>>,
+    ) -> Self {
+        Self {
+            storage,
+            config,
+            embedder,
+        }
     }
 
     pub fn add_space(&self, name: &str, description: Option<&str>) -> Result<SpaceInfo> {
@@ -720,6 +739,8 @@ impl Engine {
                 self.storage.batch_clear_fts_dirty(&ids)?;
             }
 
+            self.embed_pending_chunks(&options, &mut report)?;
+
             let reaped = self.storage.reap_documents(self.config.reaping.days)?;
             report.reaped = reaped.len();
         }
@@ -751,6 +772,99 @@ impl Engine {
             self.storage
                 .delete_embeddings_for_space(target.collection.space_id)?;
             self.storage.clear_usearch(&target.space)?;
+        }
+
+        Ok(())
+    }
+
+    fn embed_pending_chunks(&self, options: &UpdateOptions, report: &mut UpdateReport) -> Result<()> {
+        if options.no_embed || options.dry_run {
+            return Ok(());
+        }
+
+        let Some(embedder) = self.embedder.as_ref() else {
+            return Ok(());
+        };
+
+        let model = self.config.models.embedder.id.as_str();
+        loop {
+            let backlog = self.storage.get_unembedded_chunks(model, 64)?;
+            if backlog.is_empty() {
+                break;
+            }
+
+            let mut chunk_ids = Vec::new();
+            let mut spaces = Vec::new();
+            let mut texts = Vec::new();
+            for record in backlog {
+                let full_path = record.collection_path.join(&record.doc_path);
+                let bytes = match std::fs::read(&full_path) {
+                    Ok(bytes) => bytes,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(err) => {
+                        report.errors.push(file_error(
+                            Some(full_path),
+                            format!("embed read failed: {err}"),
+                        ));
+                        continue;
+                    }
+                };
+
+                let mut text = chunk_text_from_bytes(&bytes, record.offset, record.length);
+                if text.trim().is_empty() {
+                    text = " ".to_string();
+                }
+
+                chunk_ids.push(record.chunk_id);
+                spaces.push(record.space_name);
+                texts.push(text);
+            }
+
+            if chunk_ids.is_empty() {
+                break;
+            }
+
+            let vectors = embedder.embed_batch(&texts)?;
+            if vectors.len() != chunk_ids.len() {
+                return Err(KboltError::Inference(format!(
+                    "embedder returned {} vectors for {} chunks",
+                    vectors.len(),
+                    chunk_ids.len()
+                ))
+                .into());
+            }
+
+            let mut grouped_vectors: HashMap<String, Vec<(i64, Vec<f32>)>> = HashMap::new();
+            let mut embedding_rows = Vec::with_capacity(chunk_ids.len());
+            for ((chunk_id, space), vector) in chunk_ids
+                .iter()
+                .zip(spaces.iter())
+                .zip(vectors.into_iter())
+            {
+                if vector.is_empty() {
+                    return Err(KboltError::Inference(format!(
+                        "embedder returned an empty vector for chunk {chunk_id}"
+                    ))
+                    .into());
+                }
+
+                grouped_vectors
+                    .entry(space.clone())
+                    .or_default()
+                    .push((*chunk_id, vector));
+                embedding_rows.push((*chunk_id, model));
+            }
+
+            for (space, vectors) in grouped_vectors {
+                let refs = vectors
+                    .iter()
+                    .map(|(chunk_id, vector)| (*chunk_id, vector.as_slice()))
+                    .collect::<Vec<_>>();
+                self.storage.batch_insert_usearch(&space, &refs)?;
+            }
+
+            self.storage.insert_embeddings(&embedding_rows)?;
+            report.embedded = report.embedded.saturating_add(chunk_ids.len());
         }
 
         Ok(())

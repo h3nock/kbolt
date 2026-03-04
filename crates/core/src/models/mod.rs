@@ -10,6 +10,7 @@ use crate::Result;
 
 mod provider;
 mod providers;
+mod embedder;
 
 const MODEL_DIRNAME_EMBEDDER: &str = "embedder";
 const MODEL_DIRNAME_RERANKER: &str = "reranker";
@@ -17,6 +18,7 @@ const MODEL_DIRNAME_EXPANDER: &str = "expander";
 const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";
 
 pub(crate) use provider::ModelArtifactProvider;
+pub(crate) use embedder::Embedder;
 use providers::hf::HfHubDownloader;
 
 #[derive(Debug, Clone)]
