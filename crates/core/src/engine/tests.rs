@@ -1757,6 +1757,102 @@ fn update_indexes_new_document_and_skips_unchanged_mtime() {
 }
 
 #[test]
+fn update_replays_fts_dirty_documents_before_mtime_fast_path() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("src/lib.rs");
+        write_text_file(&file_path, "fn alpha() {}\n");
+
+        let first = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("first update");
+        assert_eq!(first.scanned, 1);
+        assert_eq!(first.added, 1);
+        assert!(first.errors.is_empty(), "unexpected errors: {:?}", first.errors);
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(work_space.id, "api")
+            .expect("get api collection");
+        let stored_doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "src/lib.rs")
+            .expect("query document")
+            .expect("document should exist");
+        let chunks = engine
+            .storage()
+            .get_chunks_for_document(stored_doc.id)
+            .expect("load chunks");
+        let chunk_ids = chunks.iter().map(|chunk| chunk.id).collect::<Vec<_>>();
+        assert!(!chunk_ids.is_empty(), "expected indexed chunks");
+
+        engine
+            .storage()
+            .delete_tantivy("work", &chunk_ids)
+            .expect("delete tantivy entries");
+        engine
+            .storage()
+            .commit_tantivy("work")
+            .expect("commit tantivy deletes");
+        let removed_hits = engine
+            .storage()
+            .query_bm25("work", "alpha", &[("body", 1.0)], 10)
+            .expect("query bm25 after delete");
+        assert!(
+            removed_hits.is_empty(),
+            "search should be empty before replay, got {} hits",
+            removed_hits.len()
+        );
+
+        engine
+            .storage()
+            .upsert_document(
+                collection.id,
+                &stored_doc.path,
+                &stored_doc.title,
+                &stored_doc.hash,
+                &stored_doc.modified,
+            )
+            .expect("mark document fts dirty");
+        let dirty_before = engine
+            .storage()
+            .get_fts_dirty_documents()
+            .expect("load dirty docs");
+        assert_eq!(dirty_before.len(), 1);
+        assert_eq!(dirty_before[0].doc_id, stored_doc.id);
+
+        let second = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("second update");
+        assert!(second.errors.is_empty(), "unexpected errors: {:?}", second.errors);
+
+        let replayed_hits = engine
+            .storage()
+            .query_bm25("work", "alpha", &[("body", 1.0)], 10)
+            .expect("query bm25 after replay");
+        assert_eq!(replayed_hits.len(), 1);
+        assert_eq!(replayed_hits[0].chunk_id, chunk_ids[0]);
+
+        let dirty_after = engine
+            .storage()
+            .get_fts_dirty_documents()
+            .expect("load dirty docs after replay");
+        assert!(
+            dirty_after.is_empty(),
+            "expected replay to clear fts_dirty flags"
+        );
+    });
+}
+
+#[test]
 fn update_markdown_uses_structural_chunking_and_heading_metadata() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);

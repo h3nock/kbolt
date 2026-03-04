@@ -691,6 +691,10 @@ impl Engine {
             elapsed_ms: 0,
         };
 
+        if !options.dry_run {
+            self.replay_fts_dirty_documents(&mut report)?;
+        }
+
         let targets = self.resolve_update_targets(&options)?;
         if targets.is_empty() {
             report.elapsed_ms = started.elapsed().as_millis() as u64;
@@ -720,6 +724,81 @@ impl Engine {
 
         report.elapsed_ms = started.elapsed().as_millis() as u64;
         Ok(report)
+    }
+
+    fn replay_fts_dirty_documents(&self, report: &mut UpdateReport) -> Result<()> {
+        let records = self.storage.get_fts_dirty_documents()?;
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        let mut cleared_by_space: HashMap<String, Vec<i64>> = HashMap::new();
+        for record in records {
+            let space_name = record.space_name;
+            let doc_id = record.doc_id;
+
+            if record.chunks.is_empty() {
+                cleared_by_space.entry(space_name).or_default().push(doc_id);
+                continue;
+            }
+
+            let full_path = record.collection_path.join(&record.doc_path);
+            let bytes = match std::fs::read(&full_path) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    report.errors.push(file_error(
+                        Some(full_path),
+                        format!("fts replay read failed: {err}"),
+                    ));
+                    continue;
+                }
+            };
+
+            self.storage.delete_tantivy_by_doc(&space_name, doc_id)?;
+
+            let file_body = String::from_utf8_lossy(&bytes).into_owned();
+            let entries = record
+                .chunks
+                .iter()
+                .map(|chunk| {
+                    let chunk_body = chunk_text_from_bytes(&bytes, chunk.offset, chunk.length);
+                    let source_body = if chunk_body.is_empty() {
+                        file_body.as_str()
+                    } else {
+                        chunk_body.as_str()
+                    };
+                    TantivyEntry {
+                        chunk_id: chunk.id,
+                        doc_id,
+                        filepath: record.doc_path.clone(),
+                        title: record.doc_title.clone(),
+                        heading: chunk.heading.clone(),
+                        body: retrieval_text_with_prefix(
+                            source_body,
+                            record.doc_title.as_str(),
+                            chunk.heading.as_deref(),
+                            self.config.chunking.defaults.contextual_prefix,
+                        ),
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            self.storage.index_tantivy(&space_name, &entries)?;
+            cleared_by_space.entry(space_name).or_default().push(doc_id);
+        }
+
+        for (space_name, mut doc_ids) in cleared_by_space {
+            if doc_ids.is_empty() {
+                continue;
+            }
+
+            doc_ids.sort_unstable();
+            doc_ids.dedup();
+            self.storage.commit_tantivy(&space_name)?;
+            self.storage.batch_clear_fts_dirty(&doc_ids)?;
+        }
+
+        Ok(())
     }
 
     pub fn status(&self, space: Option<&str>) -> Result<StatusResponse> {
