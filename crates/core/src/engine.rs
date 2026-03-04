@@ -673,9 +673,9 @@ impl Engine {
         min_score: f32,
     ) -> Result<Vec<RankedChunk>> {
         let Some(embedder) = self.embedder.as_ref() else {
-            return Err(KboltError::ModelNotAvailable {
-                name: self.config.models.embedder.id.clone(),
-            }
+            return Err(KboltError::InvalidInput(
+                "semantic search requires embeddings configuration. add [embeddings] to index.toml with provider = \"openai_compatible\" or \"voyage\"".to_string(),
+            )
             .into());
         };
 

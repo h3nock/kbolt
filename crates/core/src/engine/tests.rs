@@ -1754,8 +1754,11 @@ fn search_rejects_unimplemented_modes_and_ambiguous_collection_scope() {
             })
             .expect_err("semantic mode should require embedder");
         match KboltError::from(semantic_err) {
-            KboltError::ModelNotAvailable { name } => {
-                assert_eq!(name, "embed-model");
+            KboltError::InvalidInput(message) => {
+                assert!(
+                    message.contains("semantic search requires embeddings configuration"),
+                    "unexpected message: {message}"
+                );
             }
             other => panic!("unexpected error: {other}"),
         }
