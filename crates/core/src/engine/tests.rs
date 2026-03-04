@@ -1488,6 +1488,52 @@ fn search_keyword_includes_neighbor_chunks_for_context() {
 }
 
 #[test]
+fn search_semantic_returns_dense_ranked_results_when_embedder_is_configured() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_embedder(Arc::new(DeterministicEmbedder));
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        write_text_file(
+            &work_path.join("docs/guide.md"),
+            "semantic anchor token appears here\n",
+        );
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update with embeddings");
+
+        let response = engine
+            .search(SearchRequest {
+                query: "semantic anchor token".to_string(),
+                mode: SearchMode::Semantic,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 5,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: true,
+            })
+            .expect("run semantic search");
+
+        assert_eq!(response.mode, SearchMode::Semantic);
+        assert!(!response.results.is_empty(), "expected at least one result");
+        let first = &response.results[0];
+        assert_eq!(first.space, "work");
+        assert_eq!(first.collection, "api");
+        assert!(first.text.contains("semantic anchor token"));
+        assert!(first.score > 0.0);
+        let signals = first.signals.as_ref().expect("debug signals");
+        assert!(signals.bm25.is_none());
+        assert!(signals.dense.is_some());
+        assert!(signals.reranker.is_none());
+    });
+}
+
+#[test]
 fn search_auto_mode_uses_keyword_path_and_scopes_space() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
@@ -1552,10 +1598,10 @@ fn search_rejects_unimplemented_modes_and_ambiguous_collection_scope() {
                 no_rerank: false,
                 debug: false,
             })
-            .expect_err("semantic mode should error");
+            .expect_err("semantic mode should require embedder");
         match KboltError::from(semantic_err) {
-            KboltError::InvalidInput(message) => {
-                assert!(message.contains("semantic mode"), "unexpected message: {message}");
+            KboltError::ModelNotAvailable { name } => {
+                assert_eq!(name, "embed-model");
             }
             other => panic!("unexpected error: {other}"),
         }

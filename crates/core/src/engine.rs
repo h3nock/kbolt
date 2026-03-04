@@ -56,6 +56,14 @@ struct SearchHitCandidate {
     bm25_score: f32,
 }
 
+#[derive(Debug, Clone)]
+struct RankedChunk {
+    chunk_id: i64,
+    score: f32,
+    bm25: Option<f32>,
+    dense: Option<f32>,
+}
+
 impl Engine {
     pub fn new(config_path: Option<&Path>) -> Result<Self> {
         let config = config::load(config_path)?;
@@ -491,12 +499,7 @@ impl Engine {
 
         let mode = match req.mode {
             SearchMode::Auto | SearchMode::Keyword => SearchMode::Keyword,
-            SearchMode::Semantic => {
-                return Err(
-                    KboltError::InvalidInput("semantic mode is not implemented yet".to_string())
-                        .into(),
-                )
-            }
+            SearchMode::Semantic => SearchMode::Semantic,
             SearchMode::Deep => {
                 return Err(KboltError::InvalidInput("deep mode is not implemented yet".to_string()).into())
             }
@@ -538,13 +541,49 @@ impl Engine {
             );
         }
 
+        let ranked_chunks = match mode {
+            SearchMode::Keyword => self.rank_keyword_chunks(&targets, query, req.limit, req.min_score)?,
+            SearchMode::Semantic => {
+                self.rank_semantic_chunks(&targets, query, req.limit, req.min_score)?
+            }
+            SearchMode::Auto | SearchMode::Deep => unreachable!(),
+        };
+
+        if ranked_chunks.is_empty() {
+            return Ok(SearchResponse {
+                results: Vec::new(),
+                query: req.query,
+                mode,
+                staleness_hint,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
+        }
+
+        let results = self.assemble_search_results(ranked_chunks, &collections_by_id, req.debug)?;
+
+        Ok(SearchResponse {
+            results,
+            query: req.query,
+            mode,
+            staleness_hint,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        })
+    }
+
+    fn rank_keyword_chunks(
+        &self,
+        targets: &[UpdateTarget],
+        query: &str,
+        limit: usize,
+        min_score: f32,
+    ) -> Result<Vec<RankedChunk>> {
         let mut candidates = Vec::new();
-        for target in &targets {
+        for target in targets {
             let hits = self.storage.query_bm25(
                 &target.space,
                 query,
                 &[("title", 2.0), ("heading", 1.5), ("body", 1.0), ("filepath", 0.5)],
-                req.limit,
+                limit,
             )?;
             for hit in hits {
                 candidates.push(SearchHitCandidate {
@@ -560,8 +599,8 @@ impl Engine {
             .map(|candidate| candidate.bm25_score)
             .fold(0.0_f32, f32::max);
 
+        let mut ranked = Vec::new();
         let mut seen_chunks = HashSet::new();
-        let mut selected = Vec::new();
         for candidate in candidates {
             if !seen_chunks.insert(candidate.chunk_id) {
                 continue;
@@ -572,30 +611,91 @@ impl Engine {
             } else {
                 0.0
             };
-
-            if normalized_score < req.min_score {
+            if normalized_score < min_score {
                 continue;
             }
 
-            selected.push((candidate, normalized_score));
-            if selected.len() >= req.limit {
+            ranked.push(RankedChunk {
+                chunk_id: candidate.chunk_id,
+                score: normalized_score,
+                bm25: Some(normalized_score),
+                dense: None,
+            });
+            if ranked.len() >= limit {
                 break;
             }
         }
 
-        if selected.is_empty() {
-            return Ok(SearchResponse {
-                results: Vec::new(),
-                query: req.query,
-                mode,
-                staleness_hint,
-                elapsed_ms: started.elapsed().as_millis() as u64,
+        Ok(ranked)
+    }
+
+    fn rank_semantic_chunks(
+        &self,
+        targets: &[UpdateTarget],
+        query: &str,
+        limit: usize,
+        min_score: f32,
+    ) -> Result<Vec<RankedChunk>> {
+        let Some(embedder) = self.embedder.as_ref() else {
+            return Err(KboltError::ModelNotAvailable {
+                name: self.config.models.embedder.id.clone(),
+            }
+            .into());
+        };
+
+        let vectors = embedder.embed_batch(&[query.to_string()])?;
+        if vectors.len() != 1 || vectors[0].is_empty() {
+            return Err(KboltError::Inference(
+                "embedder must return one non-empty query vector".to_string(),
+            )
+            .into());
+        }
+        let query_vector = &vectors[0];
+
+        let mut candidates = Vec::new();
+        for target in targets {
+            let hits = self.storage.query_dense(&target.space, query_vector, limit)?;
+            for hit in hits {
+                candidates.push(hit);
+            }
+        }
+        candidates.sort_by(|left, right| left.distance.total_cmp(&right.distance));
+
+        let mut ranked = Vec::new();
+        let mut seen_chunks = HashSet::new();
+        for candidate in candidates {
+            if !seen_chunks.insert(candidate.chunk_id) {
+                continue;
+            }
+
+            let dense_score = dense_distance_to_score(candidate.distance);
+            if dense_score < min_score {
+                continue;
+            }
+
+            ranked.push(RankedChunk {
+                chunk_id: candidate.chunk_id,
+                score: dense_score,
+                bm25: None,
+                dense: Some(dense_score),
             });
+            if ranked.len() >= limit {
+                break;
+            }
         }
 
-        let chunk_ids = selected
+        Ok(ranked)
+    }
+
+    fn assemble_search_results(
+        &self,
+        ranked_chunks: Vec<RankedChunk>,
+        collections_by_id: &HashMap<i64, SearchCollectionMeta>,
+        debug: bool,
+    ) -> Result<Vec<SearchResult>> {
+        let chunk_ids = ranked_chunks
             .iter()
-            .map(|(candidate, _)| candidate.chunk_id)
+            .map(|candidate| candidate.chunk_id)
             .collect::<Vec<_>>();
         let chunk_rows = self.storage.get_chunks(&chunk_ids)?;
         let chunk_by_id = chunk_rows
@@ -607,8 +707,8 @@ impl Engine {
         let mut chunks_by_doc: HashMap<i64, Vec<ChunkRow>> = HashMap::new();
         let neighbor_window = self.config.chunking.defaults.neighbor_window;
         let mut results = Vec::new();
-        for (candidate, normalized_score) in selected {
-            let Some(chunk) = chunk_by_id.get(&candidate.chunk_id) else {
+        for ranked in ranked_chunks {
+            let Some(chunk) = chunk_by_id.get(&ranked.chunk_id) else {
                 continue;
             };
 
@@ -653,12 +753,12 @@ impl Engine {
                 collection: collection.collection.clone(),
                 heading: chunk.heading.clone(),
                 text,
-                score: normalized_score,
-                signals: if req.debug {
+                score: ranked.score,
+                signals: if debug {
                     Some(SearchSignals {
-                        bm25: Some(normalized_score),
-                        dense: None,
-                        rrf: normalized_score,
+                        bm25: ranked.bm25,
+                        dense: ranked.dense,
+                        rrf: ranked.score,
                         reranker: None,
                     })
                 } else {
@@ -667,13 +767,7 @@ impl Engine {
             });
         }
 
-        Ok(SearchResponse {
-            results,
-            query: req.query,
-            mode,
-            staleness_hint,
-            elapsed_ms: started.elapsed().as_millis() as u64,
-        })
+        Ok(results)
     }
 
     pub fn resolve_space(&self, explicit: Option<&str>) -> Result<String> {
@@ -1930,6 +2024,10 @@ fn search_text_with_neighbors(
     } else {
         snippets.join("\n\n")
     }
+}
+
+fn dense_distance_to_score(distance: f32) -> f32 {
+    1.0 / (1.0 + distance.max(0.0))
 }
 
 pub(crate) fn retrieval_text_with_prefix(
