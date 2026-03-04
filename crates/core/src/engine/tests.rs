@@ -1,8 +1,8 @@
 use fs2::FileExt;
-use tempfile::tempdir;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::sync::{Arc, Mutex, OnceLock};
+use tempfile::tempdir;
 
 use crate::config::{
     ChunkingConfig, Config, ModelConfig, ModelProvider, ModelSourceConfig, ReapingConfig,
@@ -59,6 +59,7 @@ fn test_engine() -> Engine {
                 revision: None,
             },
         },
+        embeddings: None,
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
     };
@@ -93,6 +94,7 @@ fn test_engine_with_embedder(embedder: Arc<dyn crate::models::Embedder>) -> Engi
                 revision: None,
             },
         },
+        embeddings: None,
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
     };
@@ -127,6 +129,7 @@ fn test_engine_with_default_space(default_space: Option<&str>) -> Engine {
                 revision: None,
             },
         },
+        embeddings: None,
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
     };
@@ -283,14 +286,18 @@ fn describe_rename_and_remove_space_delegate_to_storage() {
         .expect("rename work to team");
     let renamed = engine.space_info("team").expect("team should exist");
     assert_eq!(renamed.name, "team");
-    let missing_old = engine.space_info("work").expect_err("work should be missing");
+    let missing_old = engine
+        .space_info("work")
+        .expect_err("work should be missing");
     match KboltError::from(missing_old) {
         KboltError::SpaceNotFound { name } => assert_eq!(name, "work"),
         other => panic!("unexpected error: {other}"),
     }
 
     engine.remove_space("team").expect("remove team");
-    let missing_team = engine.space_info("team").expect_err("team should be missing");
+    let missing_team = engine
+        .space_info("team")
+        .expect_err("team should be missing");
     match KboltError::from(missing_team) {
         KboltError::SpaceNotFound { name } => assert_eq!(name, "team"),
         other => panic!("unexpected error: {other}"),
@@ -629,8 +636,14 @@ fn collection_mutation_wrappers_delegate_to_storage_with_explicit_space() {
         .expect("backend info");
     assert_eq!(renamed.name, "backend");
     let renamed_ignore_path = ignore_dir.join("backend.ignore");
-    assert!(!old_ignore_path.exists(), "old ignore file should be renamed");
-    assert!(renamed_ignore_path.exists(), "renamed ignore file should exist");
+    assert!(
+        !old_ignore_path.exists(),
+        "old ignore file should be renamed"
+    );
+    assert!(
+        renamed_ignore_path.exists(),
+        "renamed ignore file should exist"
+    );
 
     engine
         .remove_collection(Some("work"), "backend")
@@ -683,14 +696,12 @@ fn list_collections_returns_all_or_space_scoped_collections() {
 
     let all = engine.list_collections(None).expect("list all");
     assert_eq!(all.len(), 2);
-    assert!(
-        all.iter()
-            .any(|collection| collection.space == "work" && collection.name == "api")
-    );
-    assert!(
-        all.iter()
-            .any(|collection| collection.space == "notes" && collection.name == "wiki")
-    );
+    assert!(all
+        .iter()
+        .any(|collection| collection.space == "work" && collection.name == "api"));
+    assert!(all
+        .iter()
+        .any(|collection| collection.space == "notes" && collection.name == "wiki"));
 
     let work_only = engine
         .list_collections(Some("work"))
@@ -924,7 +935,9 @@ fn list_collection_ignores_returns_entries_with_pattern_counts_and_space_scope()
             "# comment\n\nbuild/\n",
         );
 
-        let all = engine.list_collection_ignores(None).expect("list all ignores");
+        let all = engine
+            .list_collection_ignores(None)
+            .expect("list all ignores");
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].space, "notes");
         assert_eq!(all[0].collection, "wiki");
@@ -1211,7 +1224,11 @@ fn get_document_errors_for_deleted_file_and_ambiguous_docid() {
             .expect_err("deleted file should error");
         match KboltError::from(deleted_err) {
             KboltError::FileDeleted(path) => {
-                assert!(path.ends_with("src/lib.rs"), "unexpected path: {}", path.display());
+                assert!(
+                    path.ends_with("src/lib.rs"),
+                    "unexpected path: {}",
+                    path.display()
+                );
             }
             other => panic!("unexpected error: {other}"),
         }
@@ -1252,7 +1269,10 @@ fn get_document_errors_for_deleted_file_and_ambiguous_docid() {
             .expect_err("ambiguous docid should fail");
         match KboltError::from(ambiguous) {
             KboltError::InvalidInput(message) => {
-                assert!(message.contains("ambiguous"), "unexpected message: {message}");
+                assert!(
+                    message.contains("ambiguous"),
+                    "unexpected message: {message}"
+                );
             }
             other => panic!("unexpected error: {other}"),
         }
@@ -1329,10 +1349,7 @@ fn multi_get_respects_max_bytes_and_supports_mixed_locators() {
 
         let result = engine
             .multi_get(MultiGetRequest {
-                locators: vec![
-                    Locator::DocId(docid),
-                    Locator::Path("api/b.md".to_string()),
-                ],
+                locators: vec![Locator::DocId(docid), Locator::Path("api/b.md".to_string())],
                 space: Some("work".to_string()),
                 max_files: 10,
                 max_bytes: 7,
@@ -1451,9 +1468,15 @@ fn search_keyword_includes_neighbor_chunks_for_context() {
         std::fs::create_dir_all(&work_path).expect("create collection dir");
         add_collection_fixture(&engine, "work", "api", work_path.clone());
 
-        let left = std::iter::repeat_n("leftctx", 300).collect::<Vec<_>>().join(" ");
-        let middle = std::iter::repeat_n("targetonly", 300).collect::<Vec<_>>().join(" ");
-        let right = std::iter::repeat_n("rightctx", 300).collect::<Vec<_>>().join(" ");
+        let left = std::iter::repeat_n("leftctx", 300)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let middle = std::iter::repeat_n("targetonly", 300)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let right = std::iter::repeat_n("rightctx", 300)
+            .collect::<Vec<_>>()
+            .join(" ");
         let markdown = format!("# Title\n\n{left}\n\n{middle}\n\n{right}\n");
         write_text_file(&work_path.join("docs/guide.md"), &markdown);
         engine
@@ -1658,7 +1681,10 @@ fn search_rejects_unimplemented_modes_and_ambiguous_collection_scope() {
             .expect_err("deep mode should error");
         match KboltError::from(deep_err) {
             KboltError::InvalidInput(message) => {
-                assert!(message.contains("deep mode"), "unexpected message: {message}");
+                assert!(
+                    message.contains("deep mode"),
+                    "unexpected message: {message}"
+                );
             }
             other => panic!("unexpected error: {other}"),
         }
@@ -1705,16 +1731,12 @@ fn resolve_update_targets_returns_all_collections_when_unscoped() {
             .resolve_update_targets(&update_options(None, &[]))
             .expect("resolve update targets");
         assert_eq!(targets.len(), 2);
-        assert!(
-            targets
-                .iter()
-                .any(|target| target.space == "work" && target.collection.name == "api")
-        );
-        assert!(
-            targets
-                .iter()
-                .any(|target| target.space == "notes" && target.collection.name == "wiki")
-        );
+        assert!(targets
+            .iter()
+            .any(|target| target.space == "work" && target.collection.name == "api"));
+        assert!(targets
+            .iter()
+            .any(|target| target.space == "notes" && target.collection.name == "wiki"));
     });
 }
 
@@ -1843,7 +1865,10 @@ fn resolve_update_targets_rejects_empty_collection_names() {
             .expect_err("empty collection names should be rejected");
         match KboltError::from(err) {
             KboltError::InvalidInput(message) => {
-                assert!(message.contains("cannot be empty"), "unexpected message: {message}");
+                assert!(
+                    message.contains("cannot be empty"),
+                    "unexpected message: {message}"
+                );
             }
             other => panic!("unexpected error: {other}"),
         }
@@ -1871,7 +1896,11 @@ fn update_indexes_new_document_and_skips_unchanged_mtime() {
         assert_eq!(first.added, 1);
         assert_eq!(first.updated, 0);
         assert_eq!(first.deactivated, 0);
-        assert!(first.errors.is_empty(), "unexpected errors: {:?}", first.errors);
+        assert!(
+            first.errors.is_empty(),
+            "unexpected errors: {:?}",
+            first.errors
+        );
 
         let hits = engine
             .storage()
@@ -1909,7 +1938,11 @@ fn update_replays_fts_dirty_documents_before_mtime_fast_path() {
             .expect("first update");
         assert_eq!(first.scanned, 1);
         assert_eq!(first.added, 1);
-        assert!(first.errors.is_empty(), "unexpected errors: {:?}", first.errors);
+        assert!(
+            first.errors.is_empty(),
+            "unexpected errors: {:?}",
+            first.errors
+        );
 
         let work_space = engine.storage().get_space("work").expect("get work space");
         let collection = engine
@@ -1966,7 +1999,11 @@ fn update_replays_fts_dirty_documents_before_mtime_fast_path() {
         let second = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("second update");
-        assert!(second.errors.is_empty(), "unexpected errors: {:?}", second.errors);
+        assert!(
+            second.errors.is_empty(),
+            "unexpected errors: {:?}",
+            second.errors
+        );
 
         let replayed_hits = engine
             .storage()
@@ -2007,9 +2044,16 @@ fn update_replay_skips_hash_mismatch_outside_scoped_targets() {
             .update(update_options(None, &[]))
             .expect("index initial fixtures");
         assert_eq!(first.added, 2);
-        assert!(first.errors.is_empty(), "unexpected errors: {:?}", first.errors);
+        assert!(
+            first.errors.is_empty(),
+            "unexpected errors: {:?}",
+            first.errors
+        );
 
-        let notes_space = engine.storage().get_space("notes").expect("get notes space");
+        let notes_space = engine
+            .storage()
+            .get_space("notes")
+            .expect("get notes space");
         let notes_collection = engine
             .storage()
             .get_collection(notes_space.id, "wiki")
@@ -2050,7 +2094,11 @@ fn update_replay_skips_hash_mismatch_outside_scoped_targets() {
         let scoped = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("run scoped update");
-        assert!(scoped.errors.is_empty(), "unexpected errors: {:?}", scoped.errors);
+        assert!(
+            scoped.errors.is_empty(),
+            "unexpected errors: {:?}",
+            scoped.errors
+        );
 
         let notes_new_hits = engine
             .storage()
@@ -2082,7 +2130,11 @@ fn update_clears_mismatched_dense_state_before_scan() {
             .expect("first update");
         assert_eq!(first.scanned, 1);
         assert_eq!(first.added, 1);
-        assert!(first.errors.is_empty(), "unexpected errors: {:?}", first.errors);
+        assert!(
+            first.errors.is_empty(),
+            "unexpected errors: {:?}",
+            first.errors
+        );
 
         let work_space = engine.storage().get_space("work").expect("get work space");
         let collection = engine
@@ -2124,7 +2176,11 @@ fn update_clears_mismatched_dense_state_before_scan() {
             .expect("second update");
         assert_eq!(second.scanned, 1);
         assert_eq!(second.skipped_mtime, 1);
-        assert!(second.errors.is_empty(), "unexpected errors: {:?}", second.errors);
+        assert!(
+            second.errors.is_empty(),
+            "unexpected errors: {:?}",
+            second.errors
+        );
 
         assert_eq!(
             engine
@@ -2203,7 +2259,9 @@ fn update_markdown_uses_structural_chunking_and_heading_metadata() {
         std::fs::create_dir_all(&collection_path).expect("create collection dir");
         add_collection_fixture(&engine, "work", "api", collection_path.clone());
 
-        let repeated_words = std::iter::repeat_n("chunktoken", 900).collect::<Vec<_>>().join(" ");
+        let repeated_words = std::iter::repeat_n("chunktoken", 900)
+            .collect::<Vec<_>>()
+            .join(" ");
         let markdown = format!("# Title\n\n{repeated_words}\n");
         let file_path = collection_path.join("docs/guide.md");
         write_text_file(&file_path, &markdown);
@@ -2213,7 +2271,11 @@ fn update_markdown_uses_structural_chunking_and_heading_metadata() {
             .expect("update markdown");
         assert_eq!(report.scanned, 1);
         assert_eq!(report.added, 1);
-        assert!(report.errors.is_empty(), "unexpected errors: {:?}", report.errors);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
 
         let space = engine.storage().get_space("work").expect("get work space");
         let collection = engine
@@ -2236,7 +2298,9 @@ fn update_markdown_uses_structural_chunking_and_heading_metadata() {
             "expected paragraph chunk kind"
         );
         assert!(
-            chunks.iter().any(|chunk| chunk.heading.as_deref() == Some("Title")),
+            chunks
+                .iter()
+                .any(|chunk| chunk.heading.as_deref() == Some("Title")),
             "expected heading breadcrumb on narrative chunks"
         );
     });
@@ -2253,7 +2317,9 @@ fn update_code_files_use_code_chunking_profile() {
         std::fs::create_dir_all(&collection_path).expect("create collection dir");
         add_collection_fixture(&engine, "work", "api", collection_path.clone());
 
-        let repeated_tokens = std::iter::repeat_n("ident", 700).collect::<Vec<_>>().join(" ");
+        let repeated_tokens = std::iter::repeat_n("ident", 700)
+            .collect::<Vec<_>>()
+            .join(" ");
         let source = format!("fn alpha() {{\n    {repeated_tokens}\n}}\n");
         let file_path = collection_path.join("src/lib.rs");
         write_text_file(&file_path, &source);
@@ -2263,7 +2329,11 @@ fn update_code_files_use_code_chunking_profile() {
             .expect("update code");
         assert_eq!(report.scanned, 1);
         assert_eq!(report.added, 1);
-        assert!(report.errors.is_empty(), "unexpected errors: {:?}", report.errors);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
 
         let space = engine.storage().get_space("work").expect("get work space");
         let collection = engine
@@ -2302,9 +2372,15 @@ fn update_code_uses_blank_line_grouping_before_token_fallback() {
         std::fs::create_dir_all(&collection_path).expect("create collection dir");
         add_collection_fixture(&engine, "work", "api", collection_path.clone());
 
-        let g1 = std::iter::repeat_n("g1token", 240).collect::<Vec<_>>().join(" ");
-        let g2 = std::iter::repeat_n("g2token", 240).collect::<Vec<_>>().join(" ");
-        let g3 = std::iter::repeat_n("g3token", 240).collect::<Vec<_>>().join(" ");
+        let g1 = std::iter::repeat_n("g1token", 240)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let g2 = std::iter::repeat_n("g2token", 240)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let g3 = std::iter::repeat_n("g3token", 240)
+            .collect::<Vec<_>>()
+            .join(" ");
         let source = format!("{g1}\n\n{g2}\n\n{g3}\n");
         let file_path = collection_path.join("src/lib.rs");
         write_text_file(&file_path, &source);
@@ -2314,7 +2390,11 @@ fn update_code_uses_blank_line_grouping_before_token_fallback() {
             .expect("update code");
         assert_eq!(report.scanned, 1);
         assert_eq!(report.added, 1);
-        assert!(report.errors.is_empty(), "unexpected errors: {:?}", report.errors);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
 
         let space = engine.storage().get_space("work").expect("get work space");
         let collection = engine
@@ -2387,7 +2467,11 @@ gamma delta
             .expect("update markdown");
         assert_eq!(report.scanned, 1);
         assert_eq!(report.added, 1);
-        assert!(report.errors.is_empty(), "unexpected errors: {:?}", report.errors);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
 
         let space = engine.storage().get_space("work").expect("get work space");
         let collection = engine
@@ -2403,7 +2487,10 @@ gamma delta
             .storage()
             .get_chunks_for_document(doc.id)
             .expect("load chunks");
-        let kinds = chunks.iter().map(|chunk| chunk.kind.as_str()).collect::<Vec<_>>();
+        let kinds = chunks
+            .iter()
+            .map(|chunk| chunk.kind.as_str())
+            .collect::<Vec<_>>();
 
         assert_eq!(kinds, vec!["section", "code", "paragraph"]);
         assert!(!kinds.contains(&"mixed"));
@@ -2578,7 +2665,11 @@ fn update_creates_global_lock_file() {
             .expect("run update");
 
         let lock_path = engine.config().cache_dir.join("kbolt.lock");
-        assert!(lock_path.exists(), "expected lock file at {}", lock_path.display());
+        assert!(
+            lock_path.exists(),
+            "expected lock file at {}",
+            lock_path.display()
+        );
     });
 }
 
@@ -2695,16 +2786,31 @@ fn status_reports_space_collection_and_model_counts() {
         assert_eq!(status.cache_dir, engine.config().cache_dir);
         assert_eq!(status.config_dir, engine.config().config_dir);
         assert_eq!(status.total_documents, 3);
-        assert_eq!(status.total_documents, engine.storage().count_documents(None).unwrap());
-        assert_eq!(status.total_chunks, engine.storage().count_chunks(None).unwrap());
+        assert_eq!(
+            status.total_documents,
+            engine.storage().count_documents(None).unwrap()
+        );
+        assert_eq!(
+            status.total_chunks,
+            engine.storage().count_chunks(None).unwrap()
+        );
         assert_eq!(
             status.total_embedded,
             engine.storage().count_embedded_chunks(None).unwrap()
         );
 
-        assert_eq!(status.models.embedder.name, engine.config().models.embedder.id);
-        assert_eq!(status.models.reranker.name, engine.config().models.reranker.id);
-        assert_eq!(status.models.expander.name, engine.config().models.expander.id);
+        assert_eq!(
+            status.models.embedder.name,
+            engine.config().models.embedder.id
+        );
+        assert_eq!(
+            status.models.reranker.name,
+            engine.config().models.reranker.id
+        );
+        assert_eq!(
+            status.models.expander.name,
+            engine.config().models.expander.id
+        );
         assert!(!status.models.embedder.downloaded);
         assert!(!status.models.reranker.downloaded);
         assert!(!status.models.expander.downloaded);
@@ -2780,7 +2886,10 @@ fn status_reports_space_collection_and_model_counts() {
             Some(work_collection_status.last_updated.as_str())
         );
 
-        let notes_space = engine.storage().get_space("notes").expect("get notes space");
+        let notes_space = engine
+            .storage()
+            .get_space("notes")
+            .expect("get notes space");
         let notes_collection = engine
             .storage()
             .get_collection(notes_space.id, "wiki")
@@ -2859,7 +2968,10 @@ fn status_scopes_to_requested_space() {
         assert_eq!(scoped.spaces[0].name, "work");
         assert_eq!(
             scoped.total_documents,
-            engine.storage().count_documents(Some(work_space.id)).unwrap()
+            engine
+                .storage()
+                .count_documents(Some(work_space.id))
+                .unwrap()
         );
         assert_eq!(
             scoped.total_chunks,

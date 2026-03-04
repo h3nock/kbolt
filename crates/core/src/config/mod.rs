@@ -23,6 +23,9 @@ const DEFAULT_CODE_CHUNK_TARGET_TOKENS: usize = 320;
 const DEFAULT_CODE_CHUNK_SOFT_MAX_TOKENS: usize = 420;
 const DEFAULT_CODE_CHUNK_HARD_MAX_TOKENS: usize = 560;
 const DEFAULT_CODE_CHUNK_BOUNDARY_OVERLAP_TOKENS: usize = 24;
+const DEFAULT_EMBEDDING_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 32;
+const DEFAULT_EMBEDDING_MAX_RETRIES: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -30,8 +33,32 @@ pub struct Config {
     pub cache_dir: PathBuf,
     pub default_space: Option<String>,
     pub models: ModelConfig,
+    pub embeddings: Option<EmbeddingConfig>,
     pub reaping: ReapingConfig,
     pub chunking: ChunkingConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddingConfig {
+    pub provider: EmbeddingProvider,
+    pub model: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    #[serde(default = "default_embedding_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_embedding_batch_size")]
+    pub batch_size: usize,
+    #[serde(default = "default_embedding_max_retries")]
+    pub max_retries: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EmbeddingProvider {
+    #[serde(rename = "openai_compatible")]
+    OpenAiCompatible,
+    #[serde(rename = "voyage")]
+    Voyage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +163,7 @@ pub fn save(config: &Config) -> Result<()> {
     fs::create_dir_all(&config.config_dir)?;
     fs::create_dir_all(&config.cache_dir)?;
     validate_chunking(&config.chunking)?;
+    validate_embeddings(config.embeddings.as_ref())?;
 
     let file_config = FileConfig::from(config);
     let serialized = toml::to_string_pretty(&file_config)?;
@@ -162,13 +190,11 @@ fn resolve_config_dir(config_path: Option<&Path>) -> Result<PathBuf> {
             }
 
             if path.extension() == Some(OsStr::new("toml")) {
-                return Err(
-                    KboltError::Config(format!(
-                        "config file override must be named {CONFIG_FILENAME}: {}",
-                        path.display()
-                    ))
-                    .into(),
-                );
+                return Err(KboltError::Config(format!(
+                    "config file override must be named {CONFIG_FILENAME}: {}",
+                    path.display()
+                ))
+                .into());
             }
 
             Ok(path.to_path_buf())
@@ -198,6 +224,7 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
             cache_dir: cache_dir.to_path_buf(),
             default_space: None,
             models: ModelConfig::default(),
+            embeddings: None,
             reaping: ReapingConfig {
                 days: DEFAULT_REAP_DAYS,
             },
@@ -209,12 +236,14 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
     let raw = fs::read_to_string(config_file)?;
     let file_config: FileConfig = toml::from_str(&raw)?;
     validate_chunking(&file_config.chunking)?;
+    validate_embeddings(file_config.embeddings.as_ref())?;
 
     Ok(Config {
         config_dir: config_dir.to_path_buf(),
         cache_dir: cache_dir.to_path_buf(),
         default_space: file_config.default_space,
         models: file_config.models,
+        embeddings: file_config.embeddings,
         reaping: ReapingConfig {
             days: file_config.reaping.days,
         },
@@ -230,35 +259,75 @@ fn validate_chunking(chunking: &ChunkingConfig) -> Result<()> {
     Ok(())
 }
 
+fn validate_embeddings(embeddings: Option<&EmbeddingConfig>) -> Result<()> {
+    let Some(embeddings) = embeddings else {
+        return Ok(());
+    };
+
+    if embeddings.model.trim().is_empty() {
+        return Err(KboltError::Config("embeddings.model must not be empty".to_string()).into());
+    }
+
+    if embeddings.base_url.trim().is_empty() {
+        return Err(KboltError::Config("embeddings.base_url must not be empty".to_string()).into());
+    }
+
+    if !embeddings.base_url.starts_with("http://") && !embeddings.base_url.starts_with("https://") {
+        return Err(KboltError::Config(
+            "embeddings.base_url must start with http:// or https://".to_string(),
+        )
+        .into());
+    }
+
+    if embeddings.timeout_ms == 0 {
+        return Err(KboltError::Config(
+            "embeddings.timeout_ms must be greater than zero".to_string(),
+        )
+        .into());
+    }
+
+    if embeddings.batch_size == 0 {
+        return Err(KboltError::Config(
+            "embeddings.batch_size must be greater than zero".to_string(),
+        )
+        .into());
+    }
+
+    if let Some(api_key_env) = embeddings.api_key_env.as_deref() {
+        if api_key_env.trim().is_empty() {
+            return Err(KboltError::Config(
+                "embeddings.api_key_env must not be empty when set".to_string(),
+            )
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_chunk_policy(scope: &str, policy: &ChunkPolicy) -> Result<()> {
     if policy.target_tokens == 0 || policy.soft_max_tokens == 0 || policy.hard_max_tokens == 0 {
-        return Err(
-            KboltError::Config(format!(
-                "{scope} token caps must be greater than zero (target={}, soft_max={}, hard_max={})",
-                policy.target_tokens, policy.soft_max_tokens, policy.hard_max_tokens
-            ))
-            .into(),
-        );
+        return Err(KboltError::Config(format!(
+            "{scope} token caps must be greater than zero (target={}, soft_max={}, hard_max={})",
+            policy.target_tokens, policy.soft_max_tokens, policy.hard_max_tokens
+        ))
+        .into());
     }
 
     if policy.target_tokens > policy.soft_max_tokens {
-        return Err(
-            KboltError::Config(format!(
-                "{scope} is invalid: target_tokens ({}) cannot exceed soft_max_tokens ({})",
-                policy.target_tokens, policy.soft_max_tokens
-            ))
-            .into(),
-        );
+        return Err(KboltError::Config(format!(
+            "{scope} is invalid: target_tokens ({}) cannot exceed soft_max_tokens ({})",
+            policy.target_tokens, policy.soft_max_tokens
+        ))
+        .into());
     }
 
     if policy.soft_max_tokens > policy.hard_max_tokens {
-        return Err(
-            KboltError::Config(format!(
-                "{scope} is invalid: soft_max_tokens ({}) cannot exceed hard_max_tokens ({})",
-                policy.soft_max_tokens, policy.hard_max_tokens
-            ))
-            .into(),
-        );
+        return Err(KboltError::Config(format!(
+            "{scope} is invalid: soft_max_tokens ({}) cannot exceed hard_max_tokens ({})",
+            policy.soft_max_tokens, policy.hard_max_tokens
+        ))
+        .into());
     }
 
     Ok(())
@@ -270,6 +339,8 @@ struct FileConfig {
     default_space: Option<String>,
     #[serde(default)]
     models: ModelConfig,
+    #[serde(default)]
+    embeddings: Option<EmbeddingConfig>,
     #[serde(default)]
     reaping: FileReapingConfig,
     #[serde(default)]
@@ -295,6 +366,7 @@ impl From<&Config> for FileConfig {
         Self {
             default_space: value.default_space.clone(),
             models: value.models.clone(),
+            embeddings: value.embeddings.clone(),
             reaping: FileReapingConfig {
                 days: value.reaping.days,
             },
@@ -367,6 +439,18 @@ fn default_chunk_profiles() -> HashMap<String, ChunkPolicy> {
             contextual_prefix: default_chunk_contextual_prefix(),
         },
     )])
+}
+
+fn default_embedding_timeout_ms() -> u64 {
+    DEFAULT_EMBEDDING_TIMEOUT_MS
+}
+
+fn default_embedding_batch_size() -> usize {
+    DEFAULT_EMBEDDING_BATCH_SIZE
+}
+
+fn default_embedding_max_retries() -> u32 {
+    DEFAULT_EMBEDDING_MAX_RETRIES
 }
 
 #[cfg(test)]

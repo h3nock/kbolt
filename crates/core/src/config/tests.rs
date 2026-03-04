@@ -27,6 +27,7 @@ fn load_creates_default_config_and_directories() {
     assert_eq!(config.models.expander.provider, ModelProvider::HuggingFace);
     assert_eq!(config.models.expander.id, DEFAULT_EXPANDER_MODEL);
     assert_eq!(config.models.expander.revision, None);
+    assert_eq!(config.embeddings, None);
     assert_eq!(config.reaping.days, DEFAULT_REAP_DAYS);
     assert_eq!(config.chunking.defaults.target_tokens, 450);
     assert_eq!(config.chunking.defaults.soft_max_tokens, 550);
@@ -74,6 +75,15 @@ id = "reranker-model"
 provider = "huggingface"
 id = "expander-model"
 
+[embeddings]
+provider = "openai_compatible"
+model = "text-embedding-3-small"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+timeout_ms = 25000
+batch_size = 48
+max_retries = 3
+
 [reaping]
 days = 14
 
@@ -108,6 +118,18 @@ contextual_prefix = true
     assert_eq!(config.models.expander.provider, ModelProvider::HuggingFace);
     assert_eq!(config.models.expander.id, "expander-model");
     assert_eq!(config.models.expander.revision, None);
+    assert_eq!(
+        config.embeddings,
+        Some(EmbeddingConfig {
+            provider: EmbeddingProvider::OpenAiCompatible,
+            model: "text-embedding-3-small".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            timeout_ms: 25000,
+            batch_size: 48,
+            max_retries: 3,
+        })
+    );
     assert_eq!(config.reaping.days, 14);
     assert_eq!(config.chunking.defaults.target_tokens, 500);
     assert_eq!(config.chunking.defaults.soft_max_tokens, 600);
@@ -154,6 +176,15 @@ fn save_writes_index_toml() {
                 revision: None,
             },
         },
+        embeddings: Some(EmbeddingConfig {
+            provider: EmbeddingProvider::Voyage,
+            model: "voyage-4-large".to_string(),
+            base_url: "https://api.voyageai.com/v1".to_string(),
+            api_key_env: Some("VOYAGE_API_KEY".to_string()),
+            timeout_ms: 20000,
+            batch_size: 24,
+            max_retries: 4,
+        }),
         reaping: ReapingConfig { days: 30 },
         chunking: ChunkingConfig {
             defaults: ChunkPolicy {
@@ -194,6 +225,18 @@ fn save_writes_index_toml() {
     assert_eq!(parsed.models.expander.provider, ModelProvider::HuggingFace);
     assert_eq!(parsed.models.expander.id, "expander-model");
     assert_eq!(parsed.models.expander.revision, None);
+    assert_eq!(
+        parsed.embeddings,
+        Some(EmbeddingConfig {
+            provider: EmbeddingProvider::Voyage,
+            model: "voyage-4-large".to_string(),
+            base_url: "https://api.voyageai.com/v1".to_string(),
+            api_key_env: Some("VOYAGE_API_KEY".to_string()),
+            timeout_ms: 20000,
+            batch_size: 24,
+            max_retries: 4,
+        })
+    );
     assert_eq!(parsed.reaping.days, 30);
     assert_eq!(parsed.chunking.defaults.target_tokens, 480);
     assert_eq!(parsed.chunking.defaults.soft_max_tokens, 580);
@@ -319,4 +362,27 @@ hard_max_tokens = 750
     let err = load_from_file(&config_file, &config_dir, &cache_dir)
         .expect_err("zero chunking caps should fail");
     assert!(err.to_string().contains("must be greater than zero"));
+}
+
+#[test]
+fn load_rejects_invalid_embeddings_config() {
+    let tmp = tempdir().expect("create tempdir");
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    let config_file = config_dir.join(CONFIG_FILENAME);
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        &config_file,
+        r#"
+[embeddings]
+provider = "openai_compatible"
+model = "text-embedding-3-small"
+base_url = "api.openai.com/v1"
+"#,
+    )
+    .expect("write config file");
+
+    let err = load_from_file(&config_file, &config_dir, &cache_dir)
+        .expect_err("invalid embeddings config should fail");
+    assert!(err.to_string().contains("embeddings.base_url"));
 }
