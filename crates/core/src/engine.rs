@@ -554,9 +554,7 @@ impl Engine {
             }
             SearchMode::Keyword => SearchMode::Keyword,
             SearchMode::Semantic => SearchMode::Semantic,
-            SearchMode::Deep => {
-                return Err(KboltError::InvalidInput("deep mode is not implemented yet".to_string()).into())
-            }
+            SearchMode::Deep => SearchMode::Deep,
         };
         let rerank_enabled = matches!(mode, SearchMode::Auto | SearchMode::Deep) && !req.no_rerank;
 
@@ -609,7 +607,14 @@ impl Engine {
             SearchMode::Semantic => {
                 self.rank_semantic_chunks(&targets, query, req.limit, req.min_score)?
             }
-            SearchMode::Deep => unreachable!(),
+            SearchMode::Deep => {
+                let retrieval_limit = if rerank_enabled {
+                    req.limit.max(20).saturating_mul(4)
+                } else {
+                    req.limit.max(20)
+                };
+                self.rank_deep_chunks(&targets, query, retrieval_limit, req.min_score)?
+            }
         };
 
         if ranked_chunks.is_empty() {
@@ -834,6 +839,55 @@ impl Engine {
                 dense: dense_score.get(&chunk_id).copied(),
             });
         }
+        fused.sort_by(|left, right| right.score.total_cmp(&left.score));
+
+        let max_score = fused
+            .iter()
+            .map(|item| item.score)
+            .fold(0.0_f32, f32::max);
+        if max_score > 0.0 {
+            for item in &mut fused {
+                item.score /= max_score;
+                item.rrf = item.score;
+            }
+        }
+
+        Ok(fused
+            .into_iter()
+            .filter(|item| item.score >= min_score)
+            .take(limit)
+            .collect())
+    }
+
+    fn rank_deep_chunks(
+        &self,
+        targets: &[UpdateTarget],
+        query: &str,
+        limit: usize,
+        min_score: f32,
+    ) -> Result<Vec<RankedChunk>> {
+        let variants = deep_query_variants(query);
+        let mut aggregates: HashMap<i64, RankedChunk> = HashMap::new();
+
+        for variant in variants {
+            let ranked = self.rank_auto_chunks(targets, &variant, limit, 0.0)?;
+            for (index, item) in ranked.into_iter().enumerate() {
+                let variant_rrf = 1.0 / (40.0 + (index + 1) as f32);
+                let entry = aggregates.entry(item.chunk_id).or_insert_with(|| RankedChunk {
+                    chunk_id: item.chunk_id,
+                    score: 0.0,
+                    rrf: 0.0,
+                    reranker: None,
+                    bm25: None,
+                    dense: None,
+                });
+                entry.score += variant_rrf;
+                entry.bm25 = max_option(entry.bm25, item.bm25);
+                entry.dense = max_option(entry.dense, item.dense);
+            }
+        }
+
+        let mut fused = aggregates.into_values().collect::<Vec<_>>();
         fused.sort_by(|left, right| right.score.total_cmp(&left.score));
 
         let max_score = fused
@@ -2266,8 +2320,44 @@ fn search_text_with_neighbors(
     }
 }
 
+fn deep_query_variants(query: &str) -> Vec<String> {
+    let normalized = query.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+
+    let lexical = tokenize_terms(&normalized).join(" ");
+    let semantic = format!("explain {normalized}");
+    let hyde = format!("this document explains {normalized} with practical details");
+
+    let mut seen = HashSet::new();
+    let mut variants = Vec::new();
+    for variant in [normalized, lexical, semantic, hyde] {
+        let trimmed = variant.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let key = trimmed.to_ascii_lowercase();
+        if seen.insert(key) {
+            variants.push(trimmed.to_string());
+        }
+    }
+
+    variants
+}
+
 fn dense_distance_to_score(distance: f32) -> f32 {
     1.0 / (1.0 + distance.max(0.0))
+}
+
+fn max_option(left: Option<f32>, right: Option<f32>) -> Option<f32> {
+    match (left, right) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
 }
 
 fn lexical_rerank_score(query: &str, text: &str) -> f32 {

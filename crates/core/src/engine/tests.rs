@@ -1766,7 +1766,48 @@ fn search_auto_mode_honors_no_rerank_flag() {
 }
 
 #[test]
-fn search_rejects_unimplemented_modes_and_ambiguous_collection_scope() {
+fn search_deep_mode_returns_results_with_reranker_signal() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_embedder(Arc::new(DeterministicEmbedder));
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        write_text_file(
+            &work_path.join("guide.md"),
+            "# Setup\n\nThis document explains setup steps and install details.\n",
+        );
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let response = engine
+            .search(SearchRequest {
+                query: "setup install".to_string(),
+                mode: SearchMode::Deep,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 10,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: true,
+            })
+            .expect("run deep search");
+
+        assert_eq!(response.mode, SearchMode::Deep);
+        assert!(!response.results.is_empty(), "expected at least one result");
+        let first = &response.results[0];
+        let signals = first.signals.as_ref().expect("debug signals");
+        assert!(signals.bm25.is_some() || signals.dense.is_some());
+        assert!(signals.reranker.is_some());
+    });
+}
+
+#[test]
+fn search_validates_semantic_and_collection_scope() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
         engine.add_space("work", None).expect("add work");
@@ -1802,7 +1843,7 @@ fn search_rejects_unimplemented_modes_and_ambiguous_collection_scope() {
             other => panic!("unexpected error: {other}"),
         }
 
-        let deep_err = engine
+        let deep = engine
             .search(SearchRequest {
                 query: "test".to_string(),
                 mode: SearchMode::Deep,
@@ -1813,16 +1854,9 @@ fn search_rejects_unimplemented_modes_and_ambiguous_collection_scope() {
                 no_rerank: false,
                 debug: false,
             })
-            .expect_err("deep mode should error");
-        match KboltError::from(deep_err) {
-            KboltError::InvalidInput(message) => {
-                assert!(
-                    message.contains("deep mode"),
-                    "unexpected message: {message}"
-                );
-            }
-            other => panic!("unexpected error: {other}"),
-        }
+            .expect("deep mode should execute");
+        assert_eq!(deep.mode, SearchMode::Deep);
+        assert!(deep.results.is_empty());
 
         let ambiguous_err = engine
             .search(SearchRequest {
