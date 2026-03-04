@@ -244,7 +244,29 @@ fn pack_class_for_kind(kind: &BlockKind) -> PackClass {
 fn can_pack_together(current: &ExtractedBlock, next: &ExtractedBlock) -> bool {
     let current_class = pack_class_for_kind(&current.kind);
     let next_class = pack_class_for_kind(&next.kind);
-    current_class == next_class && current_class != PackClass::Opaque
+    current_class == next_class
+        && current_class != PackClass::Opaque
+        && heading_scopes_compatible(current, next)
+}
+
+fn heading_scopes_compatible(current: &ExtractedBlock, next: &ExtractedBlock) -> bool {
+    let current_class = pack_class_for_kind(&current.kind);
+    let next_class = pack_class_for_kind(&next.kind);
+    if current_class != PackClass::Narrative || next_class != PackClass::Narrative {
+        return true;
+    }
+
+    // Start each heading in a fresh chunk to keep section-level locality.
+    if next.kind == BlockKind::Heading {
+        return false;
+    }
+
+    // Allow heading + body packing inside the newly started section.
+    if current.kind == BlockKind::Heading {
+        return true;
+    }
+
+    current.heading_path == next.heading_path
 }
 
 fn split_block_by_tokens(block: &ExtractedBlock, hard_max: usize, overlap: usize) -> Vec<ExtractedBlock> {
@@ -1058,6 +1080,66 @@ mod tests {
     }
 
     #[test]
+    fn chunk_document_flushes_on_heading_transition_even_under_budget() {
+        let policy = ChunkPolicy {
+            target_tokens: 20,
+            soft_max_tokens: 50,
+            hard_max_tokens: 50,
+            boundary_overlap_tokens: 0,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let document = ExtractedDocument {
+            blocks: vec![
+                block_with(BlockKind::Heading, "# Intro", 0, &[]),
+                block_with(BlockKind::Paragraph, "alpha beta", 8, &["Intro"]),
+                block_with(BlockKind::Heading, "## Setup", 20, &["Intro"]),
+                block_with(
+                    BlockKind::Paragraph,
+                    "gamma delta",
+                    30,
+                    &["Intro", "Setup"],
+                ),
+            ],
+            metadata: HashMap::new(),
+            title: None,
+        };
+
+        let chunks = chunk_document(&document, &policy);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].kind, FinalChunkKind::Section);
+        assert_eq!(chunks[0].heading.as_deref(), Some("Intro"));
+        assert_eq!(chunks[1].kind, FinalChunkKind::Section);
+        assert_eq!(chunks[1].heading.as_deref(), Some("Intro > Setup"));
+    }
+
+    #[test]
+    fn chunk_document_flushes_when_narrative_heading_path_changes() {
+        let policy = ChunkPolicy {
+            target_tokens: 20,
+            soft_max_tokens: 50,
+            hard_max_tokens: 50,
+            boundary_overlap_tokens: 0,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let document = ExtractedDocument {
+            blocks: vec![
+                block_with(BlockKind::Paragraph, "alpha beta", 0, &["Intro"]),
+                block_with(BlockKind::Paragraph, "gamma delta", 12, &["Setup"]),
+            ],
+            metadata: HashMap::new(),
+            title: None,
+        };
+
+        let chunks = chunk_document(&document, &policy);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.kind == FinalChunkKind::Paragraph));
+    }
+
+    #[test]
     fn can_pack_together_allows_same_narrative_family() {
         let heading = block_with(BlockKind::Heading, "# Intro", 0, &[]);
         let paragraph = block_with(BlockKind::Paragraph, "text", 10, &[]);
@@ -1072,6 +1154,20 @@ mod tests {
         assert!(!can_pack_together(&paragraph, &code));
         assert!(!can_pack_together(&paragraph, &table));
         assert!(!can_pack_together(&code, &table));
+    }
+
+    #[test]
+    fn can_pack_together_rejects_heading_start_when_chunk_is_open() {
+        let paragraph = block_with(BlockKind::Paragraph, "text", 0, &["Intro"]);
+        let heading = block_with(BlockKind::Heading, "## Setup", 10, &["Intro"]);
+        assert!(!can_pack_together(&paragraph, &heading));
+    }
+
+    #[test]
+    fn can_pack_together_rejects_narrative_heading_path_mismatch() {
+        let intro = block_with(BlockKind::Paragraph, "alpha", 0, &["Intro"]);
+        let setup = block_with(BlockKind::Paragraph, "beta", 10, &["Setup"]);
+        assert!(!can_pack_together(&intro, &setup));
     }
 
     #[test]

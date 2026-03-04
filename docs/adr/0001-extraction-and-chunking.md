@@ -73,6 +73,8 @@ Markdown extraction:
 Markdown chunking:
 
 1. Pack adjacent compatible blocks toward `target_tokens`.
+   - Narrative packing is heading-scoped: a new heading always starts a fresh chunk.
+   - Heading + narrative body may pack together inside that section.
 2. Allow growth to `soft_max_tokens` if it preserves clean boundaries.
 3. If still over `hard_max_tokens`, split by block-specific fallback:
    - paragraph/list/quote: sentence then clause boundaries
