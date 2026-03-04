@@ -1260,6 +1260,27 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         Ok(deleted)
     }
 
+    pub fn delete_embeddings_for_space(&self, space_id: i64) -> Result<usize> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let _space_name = lookup_space_name(&conn, space_id)?;
+
+        let deleted = conn.execute(
+            "DELETE FROM embeddings
+             WHERE chunk_id IN (
+                 SELECT c.id
+                 FROM chunks c
+                 JOIN documents d ON d.id = c.doc_id
+                 JOIN collections col ON col.id = d.collection_id
+                 WHERE col.space_id = ?1
+             )",
+            params![space_id],
+        )?;
+        Ok(deleted)
+    }
+
     pub fn count_embeddings(&self) -> Result<usize> {
         let conn = self
             .db

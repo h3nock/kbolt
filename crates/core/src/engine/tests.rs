@@ -1930,6 +1930,86 @@ fn update_replay_skips_hash_mismatch_outside_scoped_targets() {
 }
 
 #[test]
+fn update_clears_mismatched_dense_state_before_scan() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("src/lib.rs");
+        write_text_file(&file_path, "fn alpha() {}\n");
+
+        let first = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("first update");
+        assert_eq!(first.scanned, 1);
+        assert_eq!(first.added, 1);
+        assert!(first.errors.is_empty(), "unexpected errors: {:?}", first.errors);
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(work_space.id, "api")
+            .expect("get api collection");
+        let doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "src/lib.rs")
+            .expect("query document")
+            .expect("document should exist");
+        let chunks = engine
+            .storage()
+            .get_chunks_for_document(doc.id)
+            .expect("load chunks");
+        assert!(!chunks.is_empty(), "expected indexed chunks");
+
+        engine
+            .storage()
+            .insert_embeddings(&[(chunks[0].id, "model-a")])
+            .expect("insert synthetic embedding row");
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(work_space.id))
+                .expect("count embedded chunks"),
+            1
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_usearch("work")
+                .expect("count usearch vectors"),
+            0
+        );
+
+        let second = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("second update");
+        assert_eq!(second.scanned, 1);
+        assert_eq!(second.skipped_mtime, 1);
+        assert!(second.errors.is_empty(), "unexpected errors: {:?}", second.errors);
+
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(work_space.id))
+                .expect("count embedded chunks after reconcile"),
+            0
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_usearch("work")
+                .expect("count usearch vectors after reconcile"),
+            0
+        );
+    });
+}
+
+#[test]
 fn update_markdown_uses_structural_chunking_and_heading_metadata() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);

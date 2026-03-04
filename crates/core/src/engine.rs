@@ -701,6 +701,8 @@ impl Engine {
             return Ok(report);
         }
 
+        self.reconcile_dense_integrity(&targets, &options)?;
+
         let mut fts_dirty_by_space: HashMap<String, HashSet<i64>> = HashMap::new();
         for target in &targets {
             self.update_collection_target(target, &options, &mut report, &mut fts_dirty_by_space)?;
@@ -724,6 +726,34 @@ impl Engine {
 
         report.elapsed_ms = started.elapsed().as_millis() as u64;
         Ok(report)
+    }
+
+    fn reconcile_dense_integrity(&self, targets: &[UpdateTarget], options: &UpdateOptions) -> Result<()> {
+        if options.no_embed || options.dry_run {
+            return Ok(());
+        }
+
+        let mut visited_spaces = HashSet::new();
+        for target in targets {
+            if !visited_spaces.insert(target.collection.space_id) {
+                continue;
+            }
+
+            let sqlite_count = self
+                .storage
+                .count_embedded_chunks(Some(target.collection.space_id))?;
+            let usearch_count = self.storage.count_usearch(&target.space)?;
+
+            if sqlite_count == usearch_count {
+                continue;
+            }
+
+            self.storage
+                .delete_embeddings_for_space(target.collection.space_id)?;
+            self.storage.clear_usearch(&target.space)?;
+        }
+
+        Ok(())
     }
 
     fn replay_fts_dirty_documents(&self, report: &mut UpdateReport) -> Result<()> {
