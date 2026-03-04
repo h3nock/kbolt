@@ -1853,6 +1853,83 @@ fn update_replays_fts_dirty_documents_before_mtime_fast_path() {
 }
 
 #[test]
+fn update_replay_skips_hash_mismatch_outside_scoped_targets() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        let notes_path = root.path().join("notes-wiki");
+        std::fs::create_dir_all(&work_path).expect("create work dir");
+        std::fs::create_dir_all(&notes_path).expect("create notes dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+        add_collection_fixture(&engine, "notes", "wiki", notes_path.clone());
+
+        write_text_file(&work_path.join("src/lib.rs"), "worktoken\n");
+        write_text_file(&notes_path.join("docs/guide.md"), "oldtoken\n");
+        let first = engine
+            .update(update_options(None, &[]))
+            .expect("index initial fixtures");
+        assert_eq!(first.added, 2);
+        assert!(first.errors.is_empty(), "unexpected errors: {:?}", first.errors);
+
+        let notes_space = engine.storage().get_space("notes").expect("get notes space");
+        let notes_collection = engine
+            .storage()
+            .get_collection(notes_space.id, "wiki")
+            .expect("get notes collection");
+        let notes_doc = engine
+            .storage()
+            .get_document_by_path(notes_collection.id, "docs/guide.md")
+            .expect("query notes document")
+            .expect("notes document should exist");
+        let note_chunks = engine
+            .storage()
+            .get_chunks_for_document(notes_doc.id)
+            .expect("load note chunks");
+        let note_chunk_ids = note_chunks.iter().map(|chunk| chunk.id).collect::<Vec<_>>();
+        assert!(!note_chunk_ids.is_empty(), "expected note chunks");
+
+        engine
+            .storage()
+            .delete_tantivy("notes", &note_chunk_ids)
+            .expect("delete notes tantivy entries");
+        engine
+            .storage()
+            .commit_tantivy("notes")
+            .expect("commit notes tantivy deletes");
+        engine
+            .storage()
+            .upsert_document(
+                notes_collection.id,
+                &notes_doc.path,
+                &notes_doc.title,
+                &notes_doc.hash,
+                &notes_doc.modified,
+            )
+            .expect("mark notes document fts dirty");
+
+        write_text_file(&notes_path.join("docs/guide.md"), "newtoken\n");
+
+        let scoped = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("run scoped update");
+        assert!(scoped.errors.is_empty(), "unexpected errors: {:?}", scoped.errors);
+
+        let notes_new_hits = engine
+            .storage()
+            .query_bm25("notes", "newtoken", &[("body", 1.0)], 10)
+            .expect("query notes bm25 for newtoken");
+        assert!(
+            notes_new_hits.is_empty(),
+            "hash-mismatched replay should be skipped for out-of-scope collection"
+        );
+    });
+}
+
+#[test]
 fn update_markdown_uses_structural_chunking_and_heading_metadata() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);

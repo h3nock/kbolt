@@ -745,6 +745,7 @@ impl Engine {
             let full_path = record.collection_path.join(&record.doc_path);
             let bytes = match std::fs::read(&full_path) {
                 Ok(bytes) => bytes,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(err) => {
                     report.errors.push(file_error(
                         Some(full_path),
@@ -753,6 +754,9 @@ impl Engine {
                     continue;
                 }
             };
+            if sha256_hex(&bytes) != record.doc_hash {
+                continue;
+            }
 
             self.storage.delete_tantivy_by_doc(&space_name, doc_id)?;
 
