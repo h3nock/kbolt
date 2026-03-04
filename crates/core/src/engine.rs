@@ -498,7 +498,14 @@ impl Engine {
         }
 
         let mode = match req.mode {
-            SearchMode::Auto | SearchMode::Keyword => SearchMode::Keyword,
+            SearchMode::Auto => {
+                if self.embedder.is_some() {
+                    SearchMode::Auto
+                } else {
+                    SearchMode::Keyword
+                }
+            }
+            SearchMode::Keyword => SearchMode::Keyword,
             SearchMode::Semantic => SearchMode::Semantic,
             SearchMode::Deep => {
                 return Err(KboltError::InvalidInput("deep mode is not implemented yet".to_string()).into())
@@ -543,10 +550,11 @@ impl Engine {
 
         let ranked_chunks = match mode {
             SearchMode::Keyword => self.rank_keyword_chunks(&targets, query, req.limit, req.min_score)?,
+            SearchMode::Auto => self.rank_auto_chunks(&targets, query, req.limit, req.min_score)?,
             SearchMode::Semantic => {
                 self.rank_semantic_chunks(&targets, query, req.limit, req.min_score)?
             }
-            SearchMode::Auto | SearchMode::Deep => unreachable!(),
+            SearchMode::Deep => unreachable!(),
         };
 
         if ranked_chunks.is_empty() {
@@ -685,6 +693,96 @@ impl Engine {
         }
 
         Ok(ranked)
+    }
+
+    fn rank_auto_chunks(
+        &self,
+        targets: &[UpdateTarget],
+        query: &str,
+        limit: usize,
+        min_score: f32,
+    ) -> Result<Vec<RankedChunk>> {
+        let candidate_limit = limit.saturating_mul(4).max(limit);
+        let keyword = self.rank_keyword_chunks(targets, query, candidate_limit, 0.0)?;
+        let semantic = if self.embedder.is_some() {
+            self.rank_semantic_chunks(targets, query, candidate_limit, 0.0)?
+        } else {
+            Vec::new()
+        };
+
+        if semantic.is_empty() {
+            return Ok(keyword
+                .into_iter()
+                .filter(|item| item.score >= min_score)
+                .take(limit)
+                .collect());
+        }
+
+        let mut bm25_rank = HashMap::new();
+        let mut bm25_score = HashMap::new();
+        for (index, item) in keyword.iter().enumerate() {
+            bm25_rank.insert(item.chunk_id, index + 1);
+            bm25_score.insert(item.chunk_id, item.score);
+        }
+
+        let mut dense_rank = HashMap::new();
+        let mut dense_score = HashMap::new();
+        for (index, item) in semantic.iter().enumerate() {
+            dense_rank.insert(item.chunk_id, index + 1);
+            dense_score.insert(item.chunk_id, item.score);
+        }
+
+        let mut all_chunk_ids = HashSet::new();
+        for item in &keyword {
+            all_chunk_ids.insert(item.chunk_id);
+        }
+        for item in &semantic {
+            all_chunk_ids.insert(item.chunk_id);
+        }
+
+        let mut fused = Vec::new();
+        for chunk_id in all_chunk_ids {
+            let mut rrf = 0.0_f32;
+            let has_bm25 = if let Some(rank) = bm25_rank.get(&chunk_id) {
+                rrf += 1.0 / (60.0 + *rank as f32);
+                true
+            } else {
+                false
+            };
+            let has_dense = if let Some(rank) = dense_rank.get(&chunk_id) {
+                rrf += 1.0 / (60.0 + *rank as f32);
+                true
+            } else {
+                false
+            };
+            if has_bm25 && has_dense {
+                rrf *= 1.2;
+            }
+
+            fused.push(RankedChunk {
+                chunk_id,
+                score: rrf,
+                bm25: bm25_score.get(&chunk_id).copied(),
+                dense: dense_score.get(&chunk_id).copied(),
+            });
+        }
+        fused.sort_by(|left, right| right.score.total_cmp(&left.score));
+
+        let max_score = fused
+            .iter()
+            .map(|item| item.score)
+            .fold(0.0_f32, f32::max);
+        if max_score > 0.0 {
+            for item in &mut fused {
+                item.score /= max_score;
+            }
+        }
+
+        Ok(fused
+            .into_iter()
+            .filter(|item| item.score >= min_score)
+            .take(limit)
+            .collect())
     }
 
     fn assemble_search_results(
