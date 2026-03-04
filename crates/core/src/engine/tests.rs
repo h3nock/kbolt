@@ -1723,6 +1723,45 @@ fn search_auto_mode_uses_hybrid_signals_when_embedder_is_configured() {
         let signals = first.signals.as_ref().expect("debug signals");
         assert!(signals.bm25.is_some());
         assert!(signals.dense.is_some());
+        assert!(signals.reranker.is_some());
+    });
+}
+
+#[test]
+fn search_auto_mode_honors_no_rerank_flag() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_embedder(Arc::new(DeterministicEmbedder));
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        write_text_file(&work_path.join("guide.md"), "hybrid auto mode token\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let response = engine
+            .search(SearchRequest {
+                query: "hybrid auto mode token".to_string(),
+                mode: SearchMode::Auto,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 10,
+                min_score: 0.0,
+                no_rerank: true,
+                debug: true,
+            })
+            .expect("run auto search");
+
+        assert!(!response.results.is_empty(), "expected at least one result");
+        let first = &response.results[0];
+        let signals = first.signals.as_ref().expect("debug signals");
+        assert!(signals.bm25.is_some());
+        assert!(signals.dense.is_some());
+        assert!(signals.reranker.is_none());
     });
 }
 

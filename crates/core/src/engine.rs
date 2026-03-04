@@ -60,8 +60,27 @@ struct SearchHitCandidate {
 struct RankedChunk {
     chunk_id: i64,
     score: f32,
+    rrf: f32,
+    reranker: Option<f32>,
     bm25: Option<f32>,
     dense: Option<f32>,
+}
+
+#[derive(Debug, Clone)]
+struct AssembledCandidate {
+    docid: String,
+    path: String,
+    title: String,
+    space: String,
+    collection: String,
+    heading: Option<String>,
+    text: String,
+    bm25: Option<f32>,
+    dense: Option<f32>,
+    rrf: f32,
+    reranker: Option<f32>,
+    final_score: f32,
+    rerank_input: String,
 }
 
 impl Engine {
@@ -539,6 +558,7 @@ impl Engine {
                 return Err(KboltError::InvalidInput("deep mode is not implemented yet".to_string()).into())
             }
         };
+        let rerank_enabled = matches!(mode, SearchMode::Auto | SearchMode::Deep) && !req.no_rerank;
 
         let targets = self.resolve_update_targets(&UpdateOptions {
             space: req.space.clone(),
@@ -578,7 +598,14 @@ impl Engine {
 
         let ranked_chunks = match mode {
             SearchMode::Keyword => self.rank_keyword_chunks(&targets, query, req.limit, req.min_score)?,
-            SearchMode::Auto => self.rank_auto_chunks(&targets, query, req.limit, req.min_score)?,
+            SearchMode::Auto => {
+                let retrieval_limit = if rerank_enabled {
+                    req.limit.max(20).saturating_mul(4)
+                } else {
+                    req.limit
+                };
+                self.rank_auto_chunks(&targets, query, retrieval_limit, req.min_score)?
+            }
             SearchMode::Semantic => {
                 self.rank_semantic_chunks(&targets, query, req.limit, req.min_score)?
             }
@@ -595,7 +622,14 @@ impl Engine {
             });
         }
 
-        let results = self.assemble_search_results(ranked_chunks, &collections_by_id, req.debug)?;
+        let results = self.assemble_search_results(
+            query,
+            ranked_chunks,
+            &collections_by_id,
+            req.debug,
+            rerank_enabled,
+            req.limit,
+        )?;
 
         Ok(SearchResponse {
             results,
@@ -654,6 +688,8 @@ impl Engine {
             ranked.push(RankedChunk {
                 chunk_id: candidate.chunk_id,
                 score: normalized_score,
+                rrf: normalized_score,
+                reranker: None,
                 bm25: Some(normalized_score),
                 dense: None,
             });
@@ -712,6 +748,8 @@ impl Engine {
             ranked.push(RankedChunk {
                 chunk_id: candidate.chunk_id,
                 score: dense_score,
+                rrf: dense_score,
+                reranker: None,
                 bm25: None,
                 dense: Some(dense_score),
             });
@@ -790,6 +828,8 @@ impl Engine {
             fused.push(RankedChunk {
                 chunk_id,
                 score: rrf,
+                rrf,
+                reranker: None,
                 bm25: bm25_score.get(&chunk_id).copied(),
                 dense: dense_score.get(&chunk_id).copied(),
             });
@@ -803,6 +843,7 @@ impl Engine {
         if max_score > 0.0 {
             for item in &mut fused {
                 item.score /= max_score;
+                item.rrf = item.score;
             }
         }
 
@@ -815,9 +856,12 @@ impl Engine {
 
     fn assemble_search_results(
         &self,
+        query: &str,
         ranked_chunks: Vec<RankedChunk>,
         collections_by_id: &HashMap<i64, SearchCollectionMeta>,
         debug: bool,
+        apply_rerank: bool,
+        limit: usize,
     ) -> Result<Vec<SearchResult>> {
         let chunk_ids = ranked_chunks
             .iter()
@@ -832,7 +876,7 @@ impl Engine {
         let mut docs_by_id: HashMap<i64, DocumentRow> = HashMap::new();
         let mut chunks_by_doc: HashMap<i64, Vec<ChunkRow>> = HashMap::new();
         let neighbor_window = self.config.chunking.defaults.neighbor_window;
-        let mut results = Vec::new();
+        let mut candidates = Vec::new();
         for ranked in ranked_chunks {
             let Some(chunk) = chunk_by_id.get(&ranked.chunk_id) else {
                 continue;
@@ -870,8 +914,19 @@ impl Engine {
                 chunks_by_doc.get(&chunk.doc_id),
                 neighbor_window,
             );
+            let primary_text = chunk_text_from_bytes(&bytes, chunk.offset, chunk.length);
+            let rerank_input = retrieval_text_with_prefix(
+                if primary_text.trim().is_empty() {
+                    text.as_str()
+                } else {
+                    primary_text.as_str()
+                },
+                document.title.as_str(),
+                chunk.heading.as_deref(),
+                self.config.chunking.defaults.contextual_prefix,
+            );
 
-            results.push(SearchResult {
+            candidates.push(AssembledCandidate {
                 docid: short_docid(&document.hash),
                 path: format!("{}/{}", collection.collection, document.path),
                 title: document.title,
@@ -879,19 +934,59 @@ impl Engine {
                 collection: collection.collection.clone(),
                 heading: chunk.heading.clone(),
                 text,
-                score: ranked.score,
+                bm25: ranked.bm25,
+                dense: ranked.dense,
+                rrf: ranked.rrf,
+                reranker: ranked.reranker,
+                final_score: ranked.score,
+                rerank_input,
+            });
+        }
+
+        if apply_rerank && !candidates.is_empty() {
+            let rerank_count = candidates.len().min(20);
+            let raw_scores = candidates
+                .iter()
+                .take(rerank_count)
+                .map(|candidate| lexical_rerank_score(query, &candidate.rerank_input))
+                .collect::<Vec<_>>();
+            let normalized_scores = normalize_scores(&raw_scores);
+            for (candidate, reranker_score) in candidates
+                .iter_mut()
+                .take(rerank_count)
+                .zip(normalized_scores.into_iter())
+            {
+                candidate.reranker = Some(reranker_score);
+                candidate.final_score = 0.7 * reranker_score + 0.3 * candidate.rrf;
+            }
+        }
+
+        candidates.sort_by(|left, right| right.final_score.total_cmp(&left.final_score));
+        candidates.truncate(limit);
+
+        let results = candidates
+            .into_iter()
+            .map(|candidate| SearchResult {
+                docid: candidate.docid,
+                path: candidate.path,
+                title: candidate.title,
+                space: candidate.space,
+                collection: candidate.collection,
+                heading: candidate.heading,
+                text: candidate.text,
+                score: candidate.final_score,
                 signals: if debug {
                     Some(SearchSignals {
-                        bm25: ranked.bm25,
-                        dense: ranked.dense,
-                        rrf: ranked.score,
-                        reranker: None,
+                        bm25: candidate.bm25,
+                        dense: candidate.dense,
+                        rrf: candidate.rrf,
+                        reranker: candidate.reranker,
                     })
                 } else {
                     None
                 },
-            });
-        }
+            })
+            .collect::<Vec<_>>();
 
         Ok(results)
     }
@@ -2173,6 +2268,60 @@ fn search_text_with_neighbors(
 
 fn dense_distance_to_score(distance: f32) -> f32 {
     1.0 / (1.0 + distance.max(0.0))
+}
+
+fn lexical_rerank_score(query: &str, text: &str) -> f32 {
+    let query_terms = tokenize_terms(query);
+    if query_terms.is_empty() {
+        return 0.0;
+    }
+
+    let doc_terms = tokenize_terms(text).into_iter().collect::<HashSet<_>>();
+    let overlap = query_terms
+        .iter()
+        .filter(|term| doc_terms.contains(*term))
+        .count() as f32
+        / query_terms.len() as f32;
+
+    let query_lower = query.trim().to_ascii_lowercase();
+    let text_lower = text.to_ascii_lowercase();
+    let phrase_bonus = if !query_lower.is_empty() && text_lower.contains(&query_lower) {
+        0.25
+    } else {
+        0.0
+    };
+
+    (0.75 * overlap + phrase_bonus).clamp(0.0, 1.0)
+}
+
+fn tokenize_terms(text: &str) -> Vec<String> {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .filter_map(|term| {
+            let lowered = term.trim().to_ascii_lowercase();
+            if lowered.is_empty() {
+                None
+            } else {
+                Some(lowered)
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
+fn normalize_scores(scores: &[f32]) -> Vec<f32> {
+    if scores.is_empty() {
+        return Vec::new();
+    }
+
+    let min = scores.iter().copied().fold(f32::INFINITY, f32::min);
+    let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    if (max - min).abs() <= f32::EPSILON {
+        return vec![0.5; scores.len()];
+    }
+
+    scores
+        .iter()
+        .map(|score| ((score - min) / (max - min)).clamp(0.0, 1.0))
+        .collect::<Vec<_>>()
 }
 
 pub(crate) fn retrieval_text_with_prefix(
