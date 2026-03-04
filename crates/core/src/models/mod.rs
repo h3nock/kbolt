@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use kbolt_types::KboltError;
 use kbolt_types::{ModelInfo, ModelStatus, PullReport};
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +25,21 @@ struct ModelTarget {
     source: ModelSourceConfig,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelRole {
+    Embedder,
+    Reranker,
+    Expander,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedModelArtifact {
+    pub role: ModelRole,
+    pub source: ModelSourceConfig,
+    pub path: std::path::PathBuf,
+    pub size_bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ModelManifest {
     provider: ModelProvider,
@@ -43,6 +59,24 @@ impl ModelManifest {
 
     fn matches_source(&self, source: &ModelSourceConfig) -> bool {
         self.provider == source.provider && self.id == source.id && self.revision == source.revision
+    }
+}
+
+impl ModelRole {
+    fn role_dir(self) -> &'static str {
+        match self {
+            Self::Embedder => MODEL_DIRNAME_EMBEDDER,
+            Self::Reranker => MODEL_DIRNAME_RERANKER,
+            Self::Expander => MODEL_DIRNAME_EXPANDER,
+        }
+    }
+
+    fn source(self, config: &ModelConfig) -> &ModelSourceConfig {
+        match self {
+            Self::Embedder => &config.embedder,
+            Self::Reranker => &config.reranker,
+            Self::Expander => &config.expander,
+        }
     }
 }
 
@@ -148,6 +182,28 @@ pub fn status(config: &ModelConfig, model_dir: &Path) -> Result<ModelStatus> {
         embedder,
         reranker,
         expander,
+    })
+}
+
+pub(crate) fn resolve_model_artifact(
+    config: &ModelConfig,
+    model_dir: &Path,
+    role: ModelRole,
+) -> Result<ResolvedModelArtifact> {
+    let source = role.source(config);
+    let path = model_dir.join(role.role_dir());
+    let Some(size_bytes) = model_payload_size_bytes(&path, source)? else {
+        return Err(KboltError::ModelNotAvailable {
+            name: source.id.clone(),
+        }
+        .into());
+    };
+
+    Ok(ResolvedModelArtifact {
+        role,
+        source: source.clone(),
+        path,
+        size_bytes,
     })
 }
 

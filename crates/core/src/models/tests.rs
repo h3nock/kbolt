@@ -5,8 +5,8 @@ use tempfile::tempdir;
 
 use crate::config::{ModelConfig, ModelProvider, ModelSourceConfig};
 use crate::models::{
-    pull_with_downloader, pull_with_downloader_and_progress, status, ModelArtifactProvider,
-    ModelPullEvent,
+    pull_with_downloader, pull_with_downloader_and_progress, resolve_model_artifact, status,
+    ModelArtifactProvider, ModelPullEvent, ModelRole,
 };
 use crate::Result;
 
@@ -208,4 +208,58 @@ fn pull_redownloads_model_when_manifest_does_not_match_source() {
         vec!["rerank-model".to_string(), "expand-model".to_string()]
     );
     assert_eq!(report.total_bytes, 5);
+}
+
+#[test]
+fn resolve_model_artifact_returns_metadata_for_matching_manifest() {
+    let root = tempdir().expect("create temp root");
+    let config = test_config();
+    seed_model(root.path(), "embedder", &config.embedder, b"payload");
+    seed_model(root.path(), "reranker", &config.reranker, b"rerank");
+    seed_model(root.path(), "expander", &config.expander, b"expand");
+
+    let resolved = resolve_model_artifact(&config, root.path(), ModelRole::Embedder)
+        .expect("resolve embedder artifact");
+    assert_eq!(resolved.role, ModelRole::Embedder);
+    assert_eq!(resolved.source, config.embedder);
+    assert_eq!(resolved.path, root.path().join("embedder"));
+    assert_eq!(resolved.size_bytes, 7);
+
+    let reranker = resolve_model_artifact(&config, root.path(), ModelRole::Reranker)
+        .expect("resolve reranker artifact");
+    assert_eq!(reranker.role, ModelRole::Reranker);
+    assert_eq!(reranker.source, config.reranker);
+    assert_eq!(reranker.path, root.path().join("reranker"));
+    assert_eq!(reranker.size_bytes, 6);
+
+    let expander = resolve_model_artifact(&config, root.path(), ModelRole::Expander)
+        .expect("resolve expander artifact");
+    assert_eq!(expander.role, ModelRole::Expander);
+    assert_eq!(expander.source, config.expander);
+    assert_eq!(expander.path, root.path().join("expander"));
+    assert_eq!(expander.size_bytes, 6);
+}
+
+#[test]
+fn resolve_model_artifact_errors_when_manifest_is_missing_or_mismatched() {
+    let root = tempdir().expect("create temp root");
+    let config = test_config();
+
+    let missing = resolve_model_artifact(&config, root.path(), ModelRole::Embedder)
+        .expect_err("missing model should fail");
+    assert!(
+        missing.to_string().contains("model not available"),
+        "unexpected error: {missing}"
+    );
+
+    let mut mismatched = config.embedder.clone();
+    mismatched.id = "other-model".to_string();
+    seed_model(root.path(), "embedder", &mismatched, b"payload");
+
+    let mismatched_err = resolve_model_artifact(&config, root.path(), ModelRole::Embedder)
+        .expect_err("mismatched manifest should fail");
+    assert!(
+        mismatched_err.to_string().contains("model not available"),
+        "unexpected error: {mismatched_err}"
+    );
 }
