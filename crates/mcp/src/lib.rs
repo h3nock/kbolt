@@ -24,6 +24,7 @@ pub enum McpToolCall {
         collection: Option<String>,
         limit: Option<usize>,
         mode: Option<String>,
+        no_rerank: Option<bool>,
     },
     Get {
         identifier: String,
@@ -126,7 +127,8 @@ impl McpAdapter {
                         "space": { "type": "string" },
                         "collection": { "type": "string" },
                         "limit": { "type": "integer", "minimum": 1 },
-                        "mode": { "type": "string", "enum": ["auto", "deep", "keyword", "semantic"] }
+                        "mode": { "type": "string", "enum": ["auto", "deep", "keyword", "semantic"] },
+                        "no_rerank": { "type": "boolean" }
                     }
                 }),
             },
@@ -199,6 +201,7 @@ impl McpAdapter {
                 collection,
                 limit,
                 mode,
+                no_rerank,
             } => {
                 let mode = parse_tool_search_mode(mode.as_deref())?;
                 let collections = match collection {
@@ -222,7 +225,7 @@ impl McpAdapter {
                     collections,
                     limit: limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
                     min_score: 0.0,
-                    no_rerank: false,
+                    no_rerank: no_rerank.unwrap_or(false),
                     debug: false,
                 })?;
                 Ok(McpToolResponse::Search(response))
@@ -348,6 +351,8 @@ struct SearchToolArgs {
     limit: Option<usize>,
     #[serde(default)]
     mode: Option<String>,
+    #[serde(default)]
+    no_rerank: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -397,6 +402,7 @@ fn parse_tool_call_json(name: &str, args: Value) -> Result<McpToolCall> {
                 collection: parsed.collection,
                 limit: parsed.limit,
                 mode: parsed.mode,
+                no_rerank: parsed.no_rerank,
             })
         }
         "get" => {
@@ -932,6 +938,7 @@ mod tests {
                     collection: Some("api".to_string()),
                     limit: None,
                     mode: None,
+                    no_rerank: None,
                 })
                 .expect("run tool search");
 
@@ -1022,6 +1029,7 @@ mod tests {
                     collection: None,
                     limit: None,
                     mode: Some("invalid".to_string()),
+                    no_rerank: None,
                 })
                 .expect_err("invalid mode should fail");
             assert!(
@@ -1083,6 +1091,30 @@ mod tests {
             assert_eq!(results[0]["space"], "work");
             assert_eq!(results[0]["path"], "api/a.md");
         });
+    }
+
+    #[test]
+    fn parse_tool_call_json_search_accepts_no_rerank_flag() {
+        let parsed = super::parse_tool_call_json(
+            "search",
+            json!({
+                "query": "alpha",
+                "no_rerank": true
+            }),
+        )
+        .expect("parse search args");
+
+        assert_eq!(
+            parsed,
+            McpToolCall::Search {
+                query: "alpha".to_string(),
+                space: None,
+                collection: None,
+                limit: None,
+                mode: None,
+                no_rerank: Some(true),
+            }
+        );
     }
 
     #[test]
