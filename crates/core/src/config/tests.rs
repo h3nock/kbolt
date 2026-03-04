@@ -151,6 +151,38 @@ contextual_prefix = true
 }
 
 #[test]
+fn load_reports_config_path_for_invalid_schema() {
+    let tmp = tempdir().expect("create tempdir");
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    let config_file = config_dir.join(CONFIG_FILENAME);
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        &config_file,
+        r#"
+[models]
+embedder = "google/EmbeddingGemma-256"
+reranker = "ExpedientFalcon/qwen3-reranker-0.6b-q8"
+expander = "Qwen/Qwen3-1.7B-q4"
+"#,
+    )
+    .expect("write invalid config file");
+
+    let err = load_from_file(&config_file, &config_dir, &cache_dir)
+        .expect_err("invalid schema should fail");
+    let message = err.to_string();
+
+    assert!(
+        message.contains("invalid config file"),
+        "unexpected message: {message}"
+    );
+    assert!(
+        message.contains(&config_file.display().to_string()),
+        "unexpected message: {message}"
+    );
+}
+
+#[test]
 fn save_writes_index_toml() {
     let tmp = tempdir().expect("create tempdir");
     let config_dir = tmp.path().join("config");

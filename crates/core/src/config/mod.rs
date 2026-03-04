@@ -234,7 +234,12 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
     }
 
     let raw = fs::read_to_string(config_file)?;
-    let file_config: FileConfig = toml::from_str(&raw)?;
+    let file_config: FileConfig = toml::from_str(&raw).map_err(|err| {
+        KboltError::Config(format!(
+            "invalid config file {}: {err}",
+            config_file.display()
+        ))
+    })?;
     validate_chunking(&file_config.chunking)?;
     validate_embeddings(file_config.embeddings.as_ref())?;
 
