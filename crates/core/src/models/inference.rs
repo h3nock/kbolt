@@ -3,9 +3,11 @@ use std::time::Duration;
 
 use kbolt_types::KboltError;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
-use crate::config::{EmbeddingConfig, EmbeddingProvider, ModelConfig};
+use crate::config::{
+    EmbeddingConfig, EmbeddingProvider, TextInferenceConfig, TextInferenceProvider,
+};
 use crate::models::expander::HeuristicExpander;
 use crate::models::reranker::HeuristicReranker;
 use crate::models::{Embedder, Expander, Reranker};
@@ -19,6 +21,16 @@ struct OpenAiCompatibleEmbedder {
 #[derive(Debug, Clone)]
 struct VoyageEmbedder {
     config: EmbeddingConfig,
+}
+
+#[derive(Debug, Clone)]
+struct OpenAiCompatibleReranker {
+    config: TextInferenceConfig,
+}
+
+#[derive(Debug, Clone)]
+struct OpenAiCompatibleExpander {
+    config: TextInferenceConfig,
 }
 
 pub(crate) fn build_embedder(
@@ -39,18 +51,28 @@ pub(crate) fn build_embedder(
     Ok(Some(embedder))
 }
 
-pub(crate) fn build_reranker(
-    _config: &ModelConfig,
-    _model_dir: &std::path::Path,
-) -> Result<Arc<dyn Reranker>> {
-    Ok(Arc::new(HeuristicReranker))
+pub(crate) fn build_reranker(config: Option<&TextInferenceConfig>) -> Result<Arc<dyn Reranker>> {
+    let reranker: Arc<dyn Reranker> = match config {
+        Some(config) => match config.provider {
+            TextInferenceProvider::OpenAiCompatible => Arc::new(OpenAiCompatibleReranker {
+                config: config.clone(),
+            }),
+        },
+        None => Arc::new(HeuristicReranker),
+    };
+    Ok(reranker)
 }
 
-pub(crate) fn build_expander(
-    _config: &ModelConfig,
-    _model_dir: &std::path::Path,
-) -> Result<Arc<dyn Expander>> {
-    Ok(Arc::new(HeuristicExpander))
+pub(crate) fn build_expander(config: Option<&TextInferenceConfig>) -> Result<Arc<dyn Expander>> {
+    let expander: Arc<dyn Expander> = match config {
+        Some(config) => match config.provider {
+            TextInferenceProvider::OpenAiCompatible => Arc::new(OpenAiCompatibleExpander {
+                config: config.clone(),
+            }),
+        },
+        None => Arc::new(HeuristicExpander),
+    };
+    Ok(expander)
 }
 
 impl Embedder for OpenAiCompatibleEmbedder {
@@ -62,6 +84,86 @@ impl Embedder for OpenAiCompatibleEmbedder {
 impl Embedder for VoyageEmbedder {
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         embed_with_http_api(&self.config, "voyage", texts)
+    }
+}
+
+impl Reranker for OpenAiCompatibleReranker {
+    fn rerank(&self, query: &str, docs: &[String]) -> Result<Vec<f32>> {
+        if docs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let system = "You are a retrieval reranker. Return JSON only as {\"scores\":[number,...]} with one score per document, each score between 0 and 1.";
+        let mut user = format!("Query:\n{query}\n\nDocuments:\n");
+        for (index, doc) in docs.iter().enumerate() {
+            user.push_str(&format!("[{index}] {doc}\n"));
+        }
+        user.push_str("\nRespond with exactly one score per document, in order.");
+
+        let content = request_chat_completion(
+            &self.config,
+            "openai_compatible",
+            system,
+            &user,
+            self.config.max_retries,
+        )?;
+        let parsed: RerankerResponse = parse_json_payload("reranker response", &content)?;
+        let mut scores = parsed.into_scores();
+        if scores.len() != docs.len() {
+            return Err(KboltError::Inference(format!(
+                "reranker response size mismatch: expected {}, got {}",
+                docs.len(),
+                scores.len()
+            ))
+            .into());
+        }
+
+        for score in &mut scores {
+            *score = score.clamp(0.0, 1.0);
+        }
+        Ok(scores)
+    }
+}
+
+impl Expander for OpenAiCompatibleExpander {
+    fn expand(&self, query: &str) -> Result<Vec<String>> {
+        let normalized = query.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let system = "You generate search query rewrites. Return JSON only as {\"variants\":[string,...]} with 2 to 4 concise variants.";
+        let user = format!(
+            "Original query:\n{normalized}\n\nGenerate variants that improve lexical recall, semantic recall, and one HyDE-style descriptive query."
+        );
+        let content = request_chat_completion(
+            &self.config,
+            "openai_compatible",
+            system,
+            &user,
+            self.config.max_retries,
+        )?;
+        let parsed: ExpanderResponse = parse_json_payload("expander response", &content)?;
+
+        let mut seen = std::collections::HashSet::new();
+        let mut variants = Vec::new();
+        let normalized_key = normalized.to_ascii_lowercase();
+        seen.insert(normalized_key);
+        variants.push(normalized);
+
+        for variant in parsed.into_variants() {
+            let trimmed = variant.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let key = trimmed.to_ascii_lowercase();
+            if seen.insert(key) {
+                variants.push(trimmed.to_string());
+            }
+        }
+
+        Ok(variants)
     }
 }
 
@@ -159,11 +261,198 @@ fn embeddings_endpoint(base_url: &str) -> String {
     }
 }
 
+fn chat_completions_endpoint(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/chat/completions") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/chat/completions")
+    }
+}
+
+fn request_chat_completion(
+    config: &TextInferenceConfig,
+    provider_name: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    max_retries: u32,
+) -> Result<String> {
+    let endpoint = chat_completions_endpoint(&config.base_url);
+    let payload = json!({
+        "model": config.model,
+        "temperature": 0,
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": user_prompt,
+            }
+        ]
+    });
+    let timeout = Duration::from_millis(config.timeout_ms);
+    let agent = ureq::AgentBuilder::new().timeout(timeout).build();
+
+    let mut attempt = 0_u32;
+    loop {
+        let mut request = agent
+            .post(&endpoint)
+            .set("content-type", "application/json");
+
+        if let Some(api_key_env) = config.api_key_env.as_deref() {
+            let api_key = std::env::var(api_key_env).map_err(|_| {
+                KboltError::Inference(format!(
+                    "inference API key env var is not set: {api_key_env}"
+                ))
+            })?;
+            request = request.set("authorization", &format!("Bearer {api_key}"));
+        }
+
+        match request.send_json(payload.clone()) {
+            Ok(response) => {
+                let parsed: ChatCompletionResponse = response.into_json().map_err(|err| {
+                    KboltError::Inference(format!(
+                        "failed to decode {provider_name} chat completion response: {err}"
+                    ))
+                })?;
+                let content = parsed.into_text()?;
+                return Ok(content);
+            }
+            Err(ureq::Error::Status(status, response)) => {
+                let body = response
+                    .into_string()
+                    .unwrap_or_else(|_| "<unreadable body>".to_string());
+                let can_retry = status >= 500 && attempt < max_retries;
+                if can_retry {
+                    attempt = attempt.saturating_add(1);
+                    continue;
+                }
+                return Err(KboltError::Inference(format!(
+                    "{provider_name} chat completion request failed ({status}): {body}"
+                ))
+                .into());
+            }
+            Err(ureq::Error::Transport(err)) => {
+                if attempt < max_retries {
+                    attempt = attempt.saturating_add(1);
+                    continue;
+                }
+                return Err(KboltError::Inference(format!(
+                    "{provider_name} chat completion transport error: {err}"
+                ))
+                .into());
+            }
+        }
+    }
+}
+
+fn parse_json_payload<T>(label: &str, content: &str) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    serde_json::from_str(content).map_err(|err| {
+        KboltError::Inference(format!("failed to parse {label} as JSON: {err}; payload={content}"))
+            .into()
+    })
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum EmbeddingResponseEnvelope {
     OpenAiLike { data: Vec<EmbeddingItem> },
     VoyageLike { embeddings: Vec<Vec<f32>> },
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionResponse {
+    choices: Vec<ChatChoice>,
+}
+
+impl ChatCompletionResponse {
+    fn into_text(self) -> Result<String> {
+        let Some(choice) = self.choices.into_iter().next() else {
+            return Err(KboltError::Inference(
+                "chat completion response is missing choices".to_string(),
+            )
+            .into());
+        };
+
+        extract_text(choice.message.content)
+            .ok_or_else(|| {
+                KboltError::Inference(
+                    "chat completion response did not contain text content".to_string(),
+                )
+                .into()
+            })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatChoice {
+    message: ChatMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatMessage {
+    content: Value,
+}
+
+fn extract_text(value: Value) -> Option<String> {
+    match value {
+        Value::String(content) => Some(content),
+        Value::Array(parts) => {
+            let mut text = String::new();
+            for part in parts {
+                match part {
+                    Value::String(segment) => text.push_str(&segment),
+                    Value::Object(map) => {
+                        if let Some(Value::String(segment)) = map.get("text") {
+                            text.push_str(segment);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if text.is_empty() { None } else { Some(text) }
+        }
+        Value::Object(map) => map.get("text").and_then(|item| item.as_str()).map(ToString::to_string),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RerankerResponse {
+    Scores(Vec<f32>),
+    Wrapped { scores: Vec<f32> },
+}
+
+impl RerankerResponse {
+    fn into_scores(self) -> Vec<f32> {
+        match self {
+            Self::Scores(scores) => scores,
+            Self::Wrapped { scores } => scores,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ExpanderResponse {
+    Variants(Vec<String>),
+    Wrapped { variants: Vec<String> },
+}
+
+impl ExpanderResponse {
+    fn into_variants(self) -> Vec<String> {
+        match self {
+            Self::Variants(variants) => variants,
+            Self::Wrapped { variants } => variants,
+        }
+    }
 }
 
 impl EmbeddingResponseEnvelope {
@@ -221,6 +510,17 @@ mod tests {
             api_key_env: None,
             timeout_ms: 5_000,
             batch_size: 64,
+            max_retries: 0,
+        }
+    }
+
+    fn base_text_config(base_url: String) -> TextInferenceConfig {
+        TextInferenceConfig {
+            provider: TextInferenceProvider::OpenAiCompatible,
+            model: "text-model".to_string(),
+            base_url,
+            api_key_env: None,
+            timeout_ms: 5_000,
             max_retries: 0,
         }
     }
@@ -356,5 +656,76 @@ mod tests {
         assert!(err
             .to_string()
             .contains("embedding API key env var is not set"));
+    }
+
+    #[test]
+    fn build_reranker_uses_heuristic_when_inference_config_is_missing() {
+        let reranker = build_reranker(None).expect("build reranker");
+        let scores = reranker
+            .rerank(
+                "rust traits",
+                &[
+                    "Rust traits and impl examples".to_string(),
+                    "Python decorators".to_string(),
+                ],
+            )
+            .expect("rerank docs");
+        assert_eq!(scores.len(), 2);
+        assert!(scores[0] > scores[1]);
+    }
+
+    #[test]
+    fn openai_compatible_reranker_parses_json_scores() {
+        let body = r#"{
+  "choices": [
+    {
+      "message": {
+        "content": "{\"scores\":[0.2,0.9]}"
+      }
+    }
+  ]
+}"#;
+        let base_url = serve_once(200, body);
+        let config = base_text_config(base_url);
+        let reranker = build_reranker(Some(&config)).expect("build reranker");
+
+        let scores = reranker
+            .rerank("query", &["doc one".to_string(), "doc two".to_string()])
+            .expect("rerank docs");
+        assert_eq!(scores, vec![0.2, 0.9]);
+    }
+
+    #[test]
+    fn build_expander_uses_heuristic_when_inference_config_is_missing() {
+        let expander = build_expander(None).expect("build expander");
+        let variants = expander.expand("rust traits").expect("expand query");
+        assert!(!variants.is_empty());
+        assert_eq!(variants[0], "rust traits");
+    }
+
+    #[test]
+    fn openai_compatible_expander_parses_json_variants() {
+        let body = r#"{
+  "choices": [
+    {
+      "message": {
+        "content": "{\"variants\":[\"trait object rust\",\"explain rust traits\"]}"
+      }
+    }
+  ]
+}"#;
+        let base_url = serve_once(200, body);
+        let config = base_text_config(base_url);
+        let expander = build_expander(Some(&config)).expect("build expander");
+
+        let variants = expander.expand("rust traits").expect("expand query");
+        assert_eq!(
+            variants,
+            vec![
+                "rust traits".to_string(),
+                "trait object rust".to_string(),
+                "explain rust traits".to_string(),
+            ]
+        );
     }
 }

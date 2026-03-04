@@ -90,9 +90,8 @@ impl Engine {
         let config = config::load(config_path)?;
         let storage = Storage::new(&config.cache_dir)?;
         let embedder = models::build_embedder(config.embeddings.as_ref())?;
-        let model_dir = config.cache_dir.join("models");
-        let reranker = models::build_reranker(&config.models, &model_dir)?;
-        let expander = models::build_expander(&config.models, &model_dir)?;
+        let reranker = models::build_reranker(config.inference.reranker.as_ref())?;
+        let expander = models::build_expander(config.inference.expander.as_ref())?;
         Ok(Self {
             storage,
             config,
@@ -113,10 +112,9 @@ impl Engine {
         config: Config,
         embedder: Option<Arc<dyn models::Embedder>>,
     ) -> Self {
-        let model_dir = config.cache_dir.join("models");
-        let reranker = models::build_reranker(&config.models, &model_dir)
+        let reranker = models::build_reranker(config.inference.reranker.as_ref())
             .expect("build reranker for test engine");
-        let expander = models::build_expander(&config.models, &model_dir)
+        let expander = models::build_expander(config.inference.expander.as_ref())
             .expect("build expander for test engine");
         Self {
             storage,
