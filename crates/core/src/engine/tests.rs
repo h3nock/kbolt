@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tempfile::tempdir;
 
 use crate::config::{
-    ChunkingConfig, Config, EmbeddingConfig, EmbeddingProvider, ModelConfig, ModelProvider,
-    ModelSourceConfig, ReapingConfig,
+    ChunkingConfig, Config, EmbeddingConfig, EmbeddingProvider, InferenceConfig, ModelConfig,
+    ModelProvider, ModelSourceConfig, ReapingConfig,
 };
 use crate::engine::{retrieval_text_with_prefix, Engine};
 use crate::storage::Storage;
@@ -61,6 +61,7 @@ fn test_engine() -> Engine {
             },
         },
         embeddings: None,
+        inference: InferenceConfig::default(),
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
     };
@@ -96,6 +97,7 @@ fn test_engine_with_embedder(embedder: Arc<dyn crate::models::Embedder>) -> Engi
             },
         },
         embeddings: None,
+        inference: InferenceConfig::default(),
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
     };
@@ -142,6 +144,7 @@ fn test_engine_with_embedder_and_embedding_model(
             batch_size: 32,
             max_retries: 0,
         }),
+        inference: InferenceConfig::default(),
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
     };
@@ -177,6 +180,7 @@ fn test_engine_with_default_space(default_space: Option<&str>) -> Engine {
             },
         },
         embeddings: None,
+        inference: InferenceConfig::default(),
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
     };

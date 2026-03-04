@@ -28,6 +28,7 @@ fn load_creates_default_config_and_directories() {
     assert_eq!(config.models.expander.id, DEFAULT_EXPANDER_MODEL);
     assert_eq!(config.models.expander.revision, None);
     assert_eq!(config.embeddings, None);
+    assert_eq!(config.inference, InferenceConfig::default());
     assert_eq!(config.reaping.days, DEFAULT_REAP_DAYS);
     assert_eq!(config.chunking.defaults.target_tokens, 450);
     assert_eq!(config.chunking.defaults.soft_max_tokens, 550);
@@ -84,6 +85,22 @@ timeout_ms = 25000
 batch_size = 48
 max_retries = 3
 
+[inference.reranker]
+provider = "openai_compatible"
+model = "rerank-1"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+timeout_ms = 18000
+max_retries = 1
+
+[inference.expander]
+provider = "openai_compatible"
+model = "expand-1"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+timeout_ms = 22000
+max_retries = 2
+
 [reaping]
 days = 14
 
@@ -129,6 +146,27 @@ contextual_prefix = true
             batch_size: 48,
             max_retries: 3,
         })
+    );
+    assert_eq!(
+        config.inference,
+        InferenceConfig {
+            reranker: Some(TextInferenceConfig {
+                provider: TextInferenceProvider::OpenAiCompatible,
+                model: "rerank-1".to_string(),
+                base_url: "https://api.openai.com/v1".to_string(),
+                api_key_env: Some("OPENAI_API_KEY".to_string()),
+                timeout_ms: 18000,
+                max_retries: 1,
+            }),
+            expander: Some(TextInferenceConfig {
+                provider: TextInferenceProvider::OpenAiCompatible,
+                model: "expand-1".to_string(),
+                base_url: "https://api.openai.com/v1".to_string(),
+                api_key_env: Some("OPENAI_API_KEY".to_string()),
+                timeout_ms: 22000,
+                max_retries: 2,
+            }),
+        }
     );
     assert_eq!(config.reaping.days, 14);
     assert_eq!(config.chunking.defaults.target_tokens, 500);
@@ -217,6 +255,24 @@ fn save_writes_index_toml() {
             batch_size: 24,
             max_retries: 4,
         }),
+        inference: InferenceConfig {
+            reranker: Some(TextInferenceConfig {
+                provider: TextInferenceProvider::OpenAiCompatible,
+                model: "rerank-1".to_string(),
+                base_url: "https://api.openai.com/v1".to_string(),
+                api_key_env: Some("OPENAI_API_KEY".to_string()),
+                timeout_ms: 18000,
+                max_retries: 1,
+            }),
+            expander: Some(TextInferenceConfig {
+                provider: TextInferenceProvider::OpenAiCompatible,
+                model: "expand-1".to_string(),
+                base_url: "https://api.openai.com/v1".to_string(),
+                api_key_env: Some("OPENAI_API_KEY".to_string()),
+                timeout_ms: 22000,
+                max_retries: 2,
+            }),
+        },
         reaping: ReapingConfig { days: 30 },
         chunking: ChunkingConfig {
             defaults: ChunkPolicy {
@@ -268,6 +324,27 @@ fn save_writes_index_toml() {
             batch_size: 24,
             max_retries: 4,
         })
+    );
+    assert_eq!(
+        parsed.inference,
+        InferenceConfig {
+            reranker: Some(TextInferenceConfig {
+                provider: TextInferenceProvider::OpenAiCompatible,
+                model: "rerank-1".to_string(),
+                base_url: "https://api.openai.com/v1".to_string(),
+                api_key_env: Some("OPENAI_API_KEY".to_string()),
+                timeout_ms: 18000,
+                max_retries: 1,
+            }),
+            expander: Some(TextInferenceConfig {
+                provider: TextInferenceProvider::OpenAiCompatible,
+                model: "expand-1".to_string(),
+                base_url: "https://api.openai.com/v1".to_string(),
+                api_key_env: Some("OPENAI_API_KEY".to_string()),
+                timeout_ms: 22000,
+                max_retries: 2,
+            }),
+        }
     );
     assert_eq!(parsed.reaping.days, 30);
     assert_eq!(parsed.chunking.defaults.target_tokens, 480);
@@ -417,4 +494,27 @@ base_url = "api.openai.com/v1"
     let err = load_from_file(&config_file, &config_dir, &cache_dir)
         .expect_err("invalid embeddings config should fail");
     assert!(err.to_string().contains("embeddings.base_url"));
+}
+
+#[test]
+fn load_rejects_invalid_inference_config() {
+    let tmp = tempdir().expect("create tempdir");
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    let config_file = config_dir.join(CONFIG_FILENAME);
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        &config_file,
+        r#"
+[inference.reranker]
+provider = "openai_compatible"
+model = "rerank-1"
+base_url = "api.openai.com/v1"
+"#,
+    )
+    .expect("write config file");
+
+    let err = load_from_file(&config_file, &config_dir, &cache_dir)
+        .expect_err("invalid inference config should fail");
+    assert!(err.to_string().contains("inference.reranker.base_url"));
 }

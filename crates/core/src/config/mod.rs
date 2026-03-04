@@ -26,6 +26,8 @@ const DEFAULT_CODE_CHUNK_BOUNDARY_OVERLAP_TOKENS: usize = 24;
 const DEFAULT_EMBEDDING_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 32;
 const DEFAULT_EMBEDDING_MAX_RETRIES: u32 = 2;
+const DEFAULT_INFERENCE_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_INFERENCE_MAX_RETRIES: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -34,6 +36,7 @@ pub struct Config {
     pub default_space: Option<String>,
     pub models: ModelConfig,
     pub embeddings: Option<EmbeddingConfig>,
+    pub inference: InferenceConfig,
     pub reaping: ReapingConfig,
     pub chunking: ChunkingConfig,
 }
@@ -59,6 +62,33 @@ pub enum EmbeddingProvider {
     OpenAiCompatible,
     #[serde(rename = "voyage")]
     Voyage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InferenceConfig {
+    #[serde(default)]
+    pub reranker: Option<TextInferenceConfig>,
+    #[serde(default)]
+    pub expander: Option<TextInferenceConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextInferenceConfig {
+    pub provider: TextInferenceProvider,
+    pub model: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    #[serde(default = "default_inference_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_inference_max_retries")]
+    pub max_retries: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextInferenceProvider {
+    #[serde(rename = "openai_compatible")]
+    OpenAiCompatible,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +194,7 @@ pub fn save(config: &Config) -> Result<()> {
     fs::create_dir_all(&config.cache_dir)?;
     validate_chunking(&config.chunking)?;
     validate_embeddings(config.embeddings.as_ref())?;
+    validate_inference(&config.inference)?;
 
     let file_config = FileConfig::from(config);
     let serialized = toml::to_string_pretty(&file_config)?;
@@ -225,6 +256,7 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
             default_space: None,
             models: ModelConfig::default(),
             embeddings: None,
+            inference: InferenceConfig::default(),
             reaping: ReapingConfig {
                 days: DEFAULT_REAP_DAYS,
             },
@@ -242,6 +274,7 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
     })?;
     validate_chunking(&file_config.chunking)?;
     validate_embeddings(file_config.embeddings.as_ref())?;
+    validate_inference(&file_config.inference)?;
 
     Ok(Config {
         config_dir: config_dir.to_path_buf(),
@@ -249,6 +282,7 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
         default_space: file_config.default_space,
         models: file_config.models,
         embeddings: file_config.embeddings,
+        inference: file_config.inference,
         reaping: ReapingConfig {
             days: file_config.reaping.days,
         },
@@ -310,6 +344,51 @@ fn validate_embeddings(embeddings: Option<&EmbeddingConfig>) -> Result<()> {
     Ok(())
 }
 
+fn validate_inference(inference: &InferenceConfig) -> Result<()> {
+    validate_text_inference("inference.reranker", inference.reranker.as_ref())?;
+    validate_text_inference("inference.expander", inference.expander.as_ref())?;
+    Ok(())
+}
+
+fn validate_text_inference(scope: &str, config: Option<&TextInferenceConfig>) -> Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+
+    if config.model.trim().is_empty() {
+        return Err(KboltError::Config(format!("{scope}.model must not be empty")).into());
+    }
+
+    if config.base_url.trim().is_empty() {
+        return Err(KboltError::Config(format!("{scope}.base_url must not be empty")).into());
+    }
+
+    if !config.base_url.starts_with("http://") && !config.base_url.starts_with("https://") {
+        return Err(KboltError::Config(format!(
+            "{scope}.base_url must start with http:// or https://"
+        ))
+        .into());
+    }
+
+    if config.timeout_ms == 0 {
+        return Err(KboltError::Config(format!(
+            "{scope}.timeout_ms must be greater than zero"
+        ))
+        .into());
+    }
+
+    if let Some(api_key_env) = config.api_key_env.as_deref() {
+        if api_key_env.trim().is_empty() {
+            return Err(KboltError::Config(format!(
+                "{scope}.api_key_env must not be empty when set"
+            ))
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_chunk_policy(scope: &str, policy: &ChunkPolicy) -> Result<()> {
     if policy.target_tokens == 0 || policy.soft_max_tokens == 0 || policy.hard_max_tokens == 0 {
         return Err(KboltError::Config(format!(
@@ -347,6 +426,8 @@ struct FileConfig {
     #[serde(default)]
     embeddings: Option<EmbeddingConfig>,
     #[serde(default)]
+    inference: InferenceConfig,
+    #[serde(default)]
     reaping: FileReapingConfig,
     #[serde(default)]
     chunking: ChunkingConfig,
@@ -372,6 +453,7 @@ impl From<&Config> for FileConfig {
             default_space: value.default_space.clone(),
             models: value.models.clone(),
             embeddings: value.embeddings.clone(),
+            inference: value.inference.clone(),
             reaping: FileReapingConfig {
                 days: value.reaping.days,
             },
@@ -456,6 +538,14 @@ fn default_embedding_batch_size() -> usize {
 
 fn default_embedding_max_retries() -> u32 {
     DEFAULT_EMBEDDING_MAX_RETRIES
+}
+
+fn default_inference_timeout_ms() -> u64 {
+    DEFAULT_INFERENCE_TIMEOUT_MS
+}
+
+fn default_inference_max_retries() -> u32 {
+    DEFAULT_INFERENCE_MAX_RETRIES
 }
 
 #[cfg(test)]
