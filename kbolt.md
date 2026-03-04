@@ -1002,6 +1002,10 @@ pub struct PullReport {
 
 Model download is delegated through a provider abstraction (for example, HuggingFace, local filesystem mirrors, or cloud object storage). The core model module must not hardcode provider-specific assumptions in orchestration logic.
 
+Embedding inference provider scope is separate from model artifact download:
+- V1 providers: `openai_compatible`, `voyage`
+- V2 consideration: native Google embeddings provider (keep out of V1 unless native-only controls are required)
+
 ---
 
 ## Entity Model
@@ -1620,6 +1624,15 @@ id = "ExpedientFalcon/qwen3-reranker-0.6b-q8"
 [models.expander]
 provider = "huggingface"
 id = "Qwen/Qwen3-1.7B-q4"
+
+[embeddings]
+provider = "openai_compatible"   # V1: openai_compatible | voyage
+model = "text-embedding-3-small"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+timeout_ms = 30000
+batch_size = 32
+max_retries = 2
 
 [reaping]
 days = 7    # hard-delete documents deactivated longer than this

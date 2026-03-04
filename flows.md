@@ -50,6 +50,10 @@ kbolt models pull
 
 Downloads embedding model (~600MB), reranker (~700MB), and query expander (~1.2GB) via the configured model provider (default: HuggingFace Hub) to `~/.cache/kbolt/models/{role}/` (`embedder`, `reranker`, `expander`). The command reports per-model progress events and a final download summary.
 
+Embedding inference provider scope (V1):
+- supported: `openai_compatible`, `voyage`
+- deferred to V2: native Google embeddings API provider (add only if we need native-only controls/parity)
+
 If models are missing when a command needs them (search, update with embedding), prompt/fallback behavior is CLI-only:
 - interactive CLI (TTY): kbolt prompts "Models not downloaded. Download now and continue? (Y/n)".
 - non-interactive CLI: no prompt; command fails with actionable guidance.
