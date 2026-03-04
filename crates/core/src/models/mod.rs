@@ -8,17 +8,19 @@ use serde::{Deserialize, Serialize};
 use crate::config::{ModelConfig, ModelProvider, ModelSourceConfig};
 use crate::Result;
 
+mod embedder;
+mod inference;
 mod provider;
 mod providers;
-mod embedder;
 
 const MODEL_DIRNAME_EMBEDDER: &str = "embedder";
 const MODEL_DIRNAME_RERANKER: &str = "reranker";
 const MODEL_DIRNAME_EXPANDER: &str = "expander";
 const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";
 
-pub(crate) use provider::ModelArtifactProvider;
 pub(crate) use embedder::Embedder;
+pub(crate) use inference::build_embedder;
+pub(crate) use provider::ModelArtifactProvider;
 use providers::hf::HfHubDownloader;
 
 #[derive(Debug, Clone)]

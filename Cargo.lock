@@ -1287,6 +1287,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
+ "ureq",
  "usearch",
  "walkdir",
 ]

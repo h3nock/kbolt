@@ -5,8 +5,8 @@ use tempfile::tempdir;
 
 use crate::config::{ModelConfig, ModelProvider, ModelSourceConfig};
 use crate::models::{
-    pull_with_downloader, pull_with_downloader_and_progress, resolve_model_artifact, status,
-    ModelArtifactProvider, ModelPullEvent, ModelRole,
+    build_embedder, pull_with_downloader, pull_with_downloader_and_progress,
+    resolve_model_artifact, status, ModelArtifactProvider, ModelPullEvent, ModelRole,
 };
 use crate::Result;
 
@@ -262,4 +262,10 @@ fn resolve_model_artifact_errors_when_manifest_is_missing_or_mismatched() {
         mismatched_err.to_string().contains("model not available"),
         "unexpected error: {mismatched_err}"
     );
+}
+
+#[test]
+fn build_embedder_returns_none_without_embedding_config() {
+    let embedder = build_embedder(None).expect("build embedder");
+    assert!(embedder.is_none());
 }

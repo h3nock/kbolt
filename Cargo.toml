@@ -22,4 +22,5 @@ tantivy = "0.24"
 thiserror = "2.0"
 toml = "0.9"
 usearch = "2.23"
+ureq = { version = "2.12", features = ["json"] }
 walkdir = "2.5"
