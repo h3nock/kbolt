@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tempfile::tempdir;
 
 use crate::config::{
-    ChunkingConfig, Config, ModelConfig, ModelProvider, ModelSourceConfig, ReapingConfig,
+    ChunkingConfig, Config, EmbeddingConfig, EmbeddingProvider, ModelConfig, ModelProvider,
+    ModelSourceConfig, ReapingConfig,
 };
 use crate::engine::{retrieval_text_with_prefix, Engine};
 use crate::storage::Storage;
@@ -95,6 +96,52 @@ fn test_engine_with_embedder(embedder: Arc<dyn crate::models::Embedder>) -> Engi
             },
         },
         embeddings: None,
+        reaping: ReapingConfig { days: 7 },
+        chunking: ChunkingConfig::default(),
+    };
+    Engine::from_parts_with_embedder(storage, config, Some(embedder))
+}
+
+fn test_engine_with_embedder_and_embedding_model(
+    embedder: Arc<dyn crate::models::Embedder>,
+    model: &str,
+) -> Engine {
+    let root = tempdir().expect("create temp root");
+    let root_path = root.path().to_path_buf();
+    std::mem::forget(root);
+    let config_dir = root_path.join("config");
+    let cache_dir = root_path.join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+    let config = Config {
+        config_dir,
+        cache_dir,
+        default_space: None,
+        models: ModelConfig {
+            embedder: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "embed-model".to_string(),
+                revision: None,
+            },
+            reranker: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "reranker-model".to_string(),
+                revision: None,
+            },
+            expander: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "expander-model".to_string(),
+                revision: None,
+            },
+        },
+        embeddings: Some(EmbeddingConfig {
+            provider: EmbeddingProvider::OpenAiCompatible,
+            model: model.to_string(),
+            base_url: "https://example.test/v1".to_string(),
+            api_key_env: None,
+            timeout_ms: 30_000,
+            batch_size: 32,
+            max_retries: 0,
+        }),
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
     };
@@ -2338,6 +2385,40 @@ fn update_embeds_chunks_when_embedder_is_configured() {
             .expect("list files");
         assert_eq!(files.len(), 1);
         assert!(files[0].embedded, "file should be fully embedded");
+    });
+}
+
+#[test]
+fn update_records_embeddings_with_configured_embedding_model_key() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_embedder_and_embedding_model(
+            Arc::new(DeterministicEmbedder),
+            "configured-model",
+        );
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("src/lib.rs");
+        write_text_file(&file_path, "fn alpha() {}\n");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update with embedder");
+        assert!(
+            report.embedded > 0,
+            "expected embedding phase to process chunks"
+        );
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        let models = engine
+            .storage()
+            .list_embedding_models_in_space(work_space.id)
+            .expect("list embedding models in space");
+        assert_eq!(models, vec!["configured-model".to_string()]);
     });
 }
 
