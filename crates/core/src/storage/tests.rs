@@ -2113,6 +2113,126 @@ fn insert_count_and_delete_embeddings_by_model() {
 }
 
 #[test]
+fn list_embedding_models_in_space_returns_distinct_sorted_models() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let work_space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let notes_space_id = storage
+        .create_space("notes", None)
+        .expect("create notes space");
+
+    let work_collection_id = storage
+        .create_collection(
+            work_space_id,
+            "api",
+            std::path::Path::new("/tmp/work-api"),
+            None,
+            None,
+        )
+        .expect("create work collection");
+    let notes_collection_id = storage
+        .create_collection(
+            notes_space_id,
+            "wiki",
+            std::path::Path::new("/tmp/notes-wiki"),
+            None,
+            None,
+        )
+        .expect("create notes collection");
+
+    let work_doc_id = storage
+        .upsert_document(
+            work_collection_id,
+            "src/lib.rs",
+            "lib",
+            "hash-work",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert work doc");
+    let notes_doc_id = storage
+        .upsert_document(
+            notes_collection_id,
+            "README.md",
+            "readme",
+            "hash-notes",
+            "2026-03-01T10:01:00Z",
+        )
+        .expect("insert notes doc");
+
+    let work_chunk_ids = storage
+        .insert_chunks(
+            work_doc_id,
+            &[
+                super::ChunkInsert {
+                    seq: 0,
+                    offset: 0,
+                    length: 10,
+                    heading: None,
+                    kind: "section".to_string(),
+                },
+                super::ChunkInsert {
+                    seq: 1,
+                    offset: 10,
+                    length: 12,
+                    heading: None,
+                    kind: "section".to_string(),
+                },
+            ],
+        )
+        .expect("insert work chunks");
+    let notes_chunk_ids = storage
+        .insert_chunks(
+            notes_doc_id,
+            &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 7,
+                heading: None,
+                kind: "section".to_string(),
+            }],
+        )
+        .expect("insert notes chunks");
+
+    storage
+        .insert_embeddings(&[
+            (work_chunk_ids[0], "model-b"),
+            (work_chunk_ids[0], "model-a"),
+            (work_chunk_ids[1], "model-a"),
+            (notes_chunk_ids[0], "model-z"),
+        ])
+        .expect("insert embeddings");
+
+    let work_models = storage
+        .list_embedding_models_in_space(work_space_id)
+        .expect("list work models");
+    assert_eq!(
+        work_models,
+        vec!["model-a".to_string(), "model-b".to_string()]
+    );
+
+    let notes_models = storage
+        .list_embedding_models_in_space(notes_space_id)
+        .expect("list notes models");
+    assert_eq!(notes_models, vec!["model-z".to_string()]);
+}
+
+#[test]
+fn list_embedding_models_in_space_missing_space_returns_not_found() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+
+    let err = storage
+        .list_embedding_models_in_space(99999)
+        .expect_err("missing space should fail");
+    match KboltError::from(err) {
+        KboltError::SpaceNotFound { name } => assert_eq!(name, "id=99999"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
 fn get_unembedded_chunks_filters_active_and_model_specific_backlog() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");

@@ -1281,6 +1281,27 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         Ok(deleted)
     }
 
+    pub fn list_embedding_models_in_space(&self, space_id: i64) -> Result<Vec<String>> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let _space_name = lookup_space_name(&conn, space_id)?;
+
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT e.model
+             FROM embeddings e
+             JOIN chunks c ON c.id = e.chunk_id
+             JOIN documents d ON d.id = c.doc_id
+             JOIN collections col ON col.id = d.collection_id
+             WHERE col.space_id = ?1
+             ORDER BY e.model ASC",
+        )?;
+        let rows = stmt.query_map(params![space_id], |row| row.get::<_, String>(0))?;
+        let models = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(models)
+    }
+
     pub fn count_embeddings(&self) -> Result<usize> {
         let conn = self
             .db
