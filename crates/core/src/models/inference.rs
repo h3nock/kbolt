@@ -22,7 +22,6 @@ struct HttpApiEmbedder {
     client: HttpJsonClient,
     model: String,
     batch_size: usize,
-    provider_name: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +36,21 @@ struct OpenAiCompatibleExpander {
 
 const MAX_RETRY_AFTER_SECONDS: u64 = 30;
 
+#[derive(Debug, Clone, Copy)]
+enum HttpOperation {
+    Embedding,
+    ChatCompletion,
+}
+
+impl HttpOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Embedding => "embedding",
+            Self::ChatCompletion => "chat completion",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct HttpJsonClient {
     agent: ureq::Agent,
@@ -44,6 +58,7 @@ struct HttpJsonClient {
     api_key_env: Option<String>,
     max_retries: u32,
     api_key_scope: &'static str,
+    provider_name: &'static str,
 }
 
 impl HttpJsonClient {
@@ -53,6 +68,7 @@ impl HttpJsonClient {
         timeout_ms: u64,
         max_retries: u32,
         api_key_scope: &'static str,
+        provider_name: &'static str,
     ) -> Self {
         Self {
             agent: ureq::AgentBuilder::new()
@@ -62,16 +78,11 @@ impl HttpJsonClient {
             api_key_env: api_key_env.map(ToString::to_string),
             max_retries,
             api_key_scope,
+            provider_name,
         }
     }
 
-    fn post_json<T>(
-        &self,
-        endpoint_suffix: &str,
-        payload: &Value,
-        provider_name: &str,
-        operation: &str,
-    ) -> Result<T>
+    fn post_json<T>(&self, endpoint_suffix: &str, payload: &Value, operation: HttpOperation) -> Result<T>
     where
         T: DeserializeOwned,
     {
@@ -98,7 +109,9 @@ impl HttpJsonClient {
                 Ok(response) => {
                     let decoded = response.into_json().map_err(|err| {
                         KboltError::Inference(format!(
-                            "failed to decode {provider_name} {operation} response: {err}"
+                            "failed to decode {} {} response: {err}",
+                            self.provider_name,
+                            operation.label()
                         ))
                     })?;
                     return Ok(decoded);
@@ -121,7 +134,9 @@ impl HttpJsonClient {
                     }
 
                     return Err(KboltError::Inference(format!(
-                        "{provider_name} {operation} request failed ({status}): {body}"
+                        "{} {} request failed ({status}): {body}",
+                        self.provider_name,
+                        operation.label()
                     ))
                     .into());
                 }
@@ -131,7 +146,9 @@ impl HttpJsonClient {
                         continue;
                     }
                     return Err(KboltError::Inference(format!(
-                        "{provider_name} {operation} transport error: {err}"
+                        "{} {} transport error: {err}",
+                        self.provider_name,
+                        operation.label()
                     ))
                     .into());
                 }
@@ -143,7 +160,6 @@ impl HttpJsonClient {
 #[derive(Debug, Clone)]
 struct ChatClient {
     http: HttpJsonClient,
-    provider_name: &'static str,
     model: String,
     output_mode: TextInferenceOutputMode,
 }
@@ -157,8 +173,8 @@ impl ChatClient {
                 config.timeout_ms,
                 config.max_retries,
                 "inference",
+                provider_name,
             ),
-            provider_name,
             model: config.model.clone(),
             output_mode: config.output_mode.clone(),
         }
@@ -172,12 +188,9 @@ impl ChatClient {
             self.output_mode.clone(),
         );
 
-        let response: ChatCompletionResponse = self.http.post_json(
-            "chat/completions",
-            &payload,
-            self.provider_name,
-            "chat completion",
-        )?;
+        let response: ChatCompletionResponse =
+            self.http
+                .post_json("chat/completions", &payload, HttpOperation::ChatCompletion)?;
         let content = response.into_text()?;
         let normalized = match self.output_mode {
             TextInferenceOutputMode::JsonObject => content.trim(),
@@ -220,6 +233,10 @@ pub(crate) fn build_embedder(
         return Ok(None);
     };
 
+    let provider_name = match config.provider {
+        EmbeddingProvider::OpenAiCompatible => "openai_compatible",
+        EmbeddingProvider::Voyage => "voyage",
+    };
     let model = config.model.clone();
     let batch_size = config.batch_size;
     let client = HttpJsonClient::new(
@@ -228,16 +245,12 @@ pub(crate) fn build_embedder(
         config.timeout_ms,
         config.max_retries,
         "embedding",
+        provider_name,
     );
-    let provider_name = match config.provider {
-        EmbeddingProvider::OpenAiCompatible => "openai_compatible",
-        EmbeddingProvider::Voyage => "voyage",
-    };
     let embedder: Arc<dyn Embedder> = Arc::new(HttpApiEmbedder {
         client,
         model,
         batch_size,
-        provider_name,
     });
     Ok(Some(embedder))
 }
@@ -268,13 +281,7 @@ pub(crate) fn build_expander(config: Option<&TextInferenceConfig>) -> Result<Arc
 
 impl Embedder for HttpApiEmbedder {
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        embed_with_http_api(
-            &self.client,
-            &self.model,
-            self.batch_size,
-            self.provider_name,
-            texts,
-        )
+        embed_with_http_api(&self.client, &self.model, self.batch_size, texts)
     }
 }
 
@@ -350,7 +357,6 @@ fn embed_with_http_api(
     client: &HttpJsonClient,
     model: &str,
     batch_size: usize,
-    provider_name: &str,
     texts: &[String],
 ) -> Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
@@ -364,7 +370,7 @@ fn embed_with_http_api(
             "input": batch,
         });
         let parsed: EmbeddingResponseEnvelope =
-            client.post_json("embeddings", &payload, provider_name, "embedding")?;
+            client.post_json("embeddings", &payload, HttpOperation::Embedding)?;
         let response_vectors = parsed.into_vectors(batch.len())?;
         vectors.extend(response_vectors);
     }
