@@ -56,7 +56,7 @@ Embedding inference provider scope (V1):
 
 If models are missing when a command needs them (search, update with embedding), prompt/fallback behavior is CLI-only:
 - interactive CLI (TTY): kbolt prompts "Models not downloaded. Download now and continue? (Y/n)".
-- non-interactive CLI: no prompt; command fails with actionable guidance.
+- non-interactive CLI: no prompt; command fails with actionable guidance (`kbolt models pull`; for update also `--no-embed` when appropriate).
 - MCP/agent usage: no prompt; return deterministic error behavior.
 
 When the user declines the interactive prompt in auto search mode, kbolt falls back to keyword-only search. For explicitly requested semantic/deep modes, kbolt fails instead of silently changing mode.

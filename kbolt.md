@@ -1878,7 +1878,7 @@ Injected into LLM system prompt on connection:
 
 Download path is provider-agnostic in core: model orchestration depends on a provider abstraction, and artifact download is delegated to provider adapters. Default adapter is HuggingFace Hub via `hf-hub` (resumable downloads, checksum verification, local caching). `kbolt models pull` is the explicit pre-download path.
 
-Prompting is CLI-only: interactive terminal sessions may prompt to pull models when missing; non-interactive CLI and MCP never prompt.
+Prompting is CLI-only: interactive terminal sessions may prompt to pull models when missing; non-interactive CLI and MCP never prompt. Non-interactive update errors include actionable guidance to run `kbolt models pull` or re-run with `--no-embed` when embedding is optional.
 
 Models loaded lazily — embedder loads on first `kbolt update` (with embedding), reranker loads on first search that triggers reranking, expander loads on first `--deep` search. Once loaded, models stay in memory for the process lifetime (freed when the process exits). No inactivity timeout in V1 — it would add timer/reload complexity and cause unpredictable latency spikes during MCP sessions. Memory reclamation via timeout is a V2/daemon-mode feature.
 
