@@ -186,14 +186,38 @@ fn run() -> Result<()> {
             }
         }
         Command::Update(update) => {
-            let line = adapter.update(
-                cli.space.as_deref(),
-                &update.collections,
-                update.no_embed,
-                update.dry_run,
-                update.verbose,
-            )?;
-            println!("{line}");
+            let run_update = |no_embed: bool| {
+                adapter.update(
+                    cli.space.as_deref(),
+                    &update.collections,
+                    no_embed,
+                    update.dry_run,
+                    update.verbose,
+                )
+            };
+
+            match run_update(update.no_embed) {
+                Ok(line) => {
+                    println!("{line}");
+                }
+                Err(err)
+                    if should_offer_model_pull_for_update(
+                        update.no_embed,
+                        stdin_stdout_are_tty(),
+                        &err,
+                    ) =>
+                {
+                    if prompt_pull_models()? {
+                        let pull_report = adapter.models_pull()?;
+                        println!("{pull_report}");
+                        let retried = run_update(false)?;
+                        println!("{retried}");
+                    } else {
+                        return Err(err);
+                    }
+                }
+                Err(err) => return Err(err),
+            }
         }
         Command::Status => {
             let line = adapter.status(cli.space.as_deref())?;
@@ -276,11 +300,15 @@ fn parse_pull_confirmation(input: &str) -> bool {
     normalized.is_empty() || normalized == "y" || normalized == "yes"
 }
 
+fn should_offer_model_pull_for_update(no_embed: bool, is_tty: bool, err: &CoreError) -> bool {
+    !no_embed && is_tty && is_model_not_available_error(err)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         is_model_not_available_error, parse_pull_confirmation, requested_search_mode,
-        RequestedSearchMode,
+        should_offer_model_pull_for_update, RequestedSearchMode,
     };
     use kbolt_cli::args::SearchArgs;
     use kbolt_core::error::CoreError;
@@ -345,5 +373,19 @@ mod tests {
 
         let other = CoreError::Domain(KboltError::InvalidInput("bad input".to_string()));
         assert!(!is_model_not_available_error(&other));
+    }
+
+    #[test]
+    fn update_model_pull_prompt_offer_requires_embed_and_tty_and_model_error() {
+        let missing = CoreError::Domain(KboltError::ModelNotAvailable {
+            name: "test-model".to_string(),
+        });
+        assert!(should_offer_model_pull_for_update(false, true, &missing));
+
+        assert!(!should_offer_model_pull_for_update(true, true, &missing));
+        assert!(!should_offer_model_pull_for_update(false, false, &missing));
+
+        let other = CoreError::Domain(KboltError::InvalidInput("bad input".to_string()));
+        assert!(!should_offer_model_pull_for_update(false, true, &other));
     }
 }
