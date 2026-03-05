@@ -88,43 +88,30 @@ Dependencies flow strictly upward. CLI and MCP never depend on each other. Core 
 ───────────────────────────────────┼─────────────────────────────────
   Core                             │
                                    ▼
-                      ┌──────────────────────┐
-                      │        Engine         │
-                      │  .storage    .models  │
-                      │  .config              │
-                      └───────────┬───────────┘
-                                  │
-         ┌────────────────────────┼────────────────────────┐
-         ▼                        ▼                         ▼
-   ┌───────────┐           ┌───────────┐             ┌───────────┐
-   │  search/  │           │  ingest/  │             │  config/  │
-   │ execute() │           │  update() │             │   load()  │
-   │   deep()  │           │           │             │           │
-   └─────┬─────┘           └──┬─────┬──┘             └─────┬─────┘
-         │                    │     │                       │
-         │  ┌─────────────────┘     │                       │
-    ┌────┴──┴───────────────┐       │                       │
-    ▼      (borrows)        ▼       │ (reads)               │
-┌───────────┐        ┌───────────┐  │                       │
-│  storage/ │        │  models/  │  │                       │
-│           │        │           │  │                       │
-│ sqlite.rs │        │  embed()  │  │                       │
-│tantivy.rs │        │  rerank() │  │                       │
-│usearch.rs │        │ generate()│  │                       │
-└─────┬─────┘        └─────┬─────┘  │                       │
-      │                    │        │                       │
-──────┼────────────────────┼────────┼───────────────────────┼───────
-      │  External          │        │                       │
-      ▼                    ▼        ▼                       ▼
-┌─────────────┐     ┌───────────┐ ┌───────────┐       ┌──────────┐
-│  ~/.cache/   │     │ ONNX RT   │ │   Files   │       │~/.config/│
-│              │     │ llama-cpp │ │  on Disk  │       │index.toml│
-│ meta.sqlite  │     └─────┬─────┘ └───────────┘       │ ignores/ │
-│ spaces/      │           ▼                            └──────────┘
-│  {name}/     │     ┌──────────┐     ┌─────────────┐
-│   tantivy/   │     │  Model   │ ◀───│ HuggingFace │
-│   vectors    │     │  Files   │     │ Hub         │
-└──────────────┘     └──────────┘     └─────────────┘
+                      ┌────────────────────────────┐
+                      │           Engine           │
+                      │ storage, config, role impl│
+                      └─────────────┬──────────────┘
+                                    │
+                ┌───────────────────┼───────────────────┐
+                ▼                   ▼                   ▼
+        ┌───────────────┐   ┌───────────────┐   ┌──────────────┐
+        │ engine/search │   │ engine/update │   │ engine/ignore│
+        │   search()    │   │   update()    │   │   commands   │
+        └───────┬───────┘   └───────┬───────┘   └──────┬───────┘
+                │                   │                  │
+                ├──────────┬────────┴──────────┬───────┤
+                ▼          ▼                   ▼       ▼
+            storage/     models/             ingest/  config/
+
+──────┼────────────────────┼───────────────────────┼──────────────
+      │ External           │                       │
+      ▼                    ▼                       ▼
+┌───────────────┐     ┌───────────────┐       ┌──────────────┐
+│ ~/.cache/     │     │ ONNX / llama  │       │ ~/.config/   │
+│ meta.sqlite   │     │ model runtimes│       │ index.toml   │
+│ spaces/{name} │     │ + model files │       │ ignores/     │
+└───────────────┘     └───────────────┘       └──────────────┘
 ```
 
 ### External I/O
@@ -144,60 +131,64 @@ Every module that crosses the Core boundary:
 | `config/` | `~/.config/ignores/` | read/write | Ignore patterns (per space/collection) |
 | `ingest/` | Collection directories | read | Scan files, read bytes, compute hashes |
 
-Only `storage/`, `models/`, `config/`, and `ingest/` touch the outside world. `search/` and `engine` are pure internal — they only call other modules.
+Only `storage/`, `models/`, `config/`, and `engine/update_ops` touch the outside world. Other engine submodules and `ingest/` extraction/chunking are internal logic.
 
 ### Component Connectivity
 
 **Ownership** — Engine creates and holds as struct fields:
-- Engine → Storage: creates at startup, holds for process lifetime
-- Engine → Models: creates at startup (passing ModelConfig from Config), holds for process lifetime
-- Engine → Config: loads at startup via `config::load()`, holds for process lifetime
+- Engine -> Storage: creates at startup, holds for process lifetime
+- Engine -> Models role adapters: built at startup from Config (`Embedder`, `Reranker`, `Expander`)
+- Engine -> Config: loads at startup via `config::load()`, holds for process lifetime
 
-**Delegation** — Engine calls module functions, passing borrowed references:
-- Engine → `search::execute(&storage, &models, req)`: hybrid search
-- Engine → `search::deep(&storage, &models, req)`: expanded search
-- Engine → `ingest::update(&storage, &models, &config, opts)`: full ingestion pipeline
-- Engine → `storage.*` directly: for simple passthrough (get, list, collection CRUD)
+**Delegation** — Engine dispatches into internal engine modules:
+- `engine/search_ops.rs`: keyword, semantic, auto, deep ranking + result assembly
+- `engine/update_ops.rs`: scan/update/index/embed pipeline
+- `engine/ignore_ops.rs`: collection ignore CRUD
 
-**Borrowing** — modules receive `&Storage` and `&Models` as function parameters:
-- `search/` receives `&Storage` → calls: `query_bm25()`, `query_dense()`, `get_chunks()`, `get_document_by_hash_prefix()`
-- `search/` receives `&Models` → calls: `embed()` (query vector), `rerank()` (cross-encoder)
-- `ingest/` receives `&Storage` → calls: `upsert_document()`, `delete_chunks_for_document()`, `insert_chunks()`, `index_tantivy()`, `insert_usearch()`, `insert_embeddings()`, `deactivate_document()`, `reap_documents()`
-- `ingest/` receives `&Models` → calls: `embed()` (chunk vectors)
-- `ingest/` receives `&Config` → reads: `reaping.days` (for hard-delete threshold)
+**Borrowing** — internal modules operate through `&self` on Engine and call:
+- `storage.*` for CRUD + Tantivy/USearch operations
+- role adapters (`embedder`, `reranker`, `expander`) for inference
+- `ingest::extract` + `ingest::chunk` for extraction/chunking during update
 
-**Direct external I/O** — modules that cross the Core boundary beyond borrowing:
-- `ingest/` → reads files from disk: scans collection directories, reads file bytes, computes SHA-256 hashes
-- `search/` has no external I/O — all data access goes through borrowed `&Storage` and `&Models`
+**Direct external I/O**:
+- `engine/update_ops` reads files from disk: scans collection directories, reads bytes, computes SHA-256 hashes
+- `engine/search_ops` reads source files for snippet assembly
 
 **Construction-time data flow** (once when Engine is created):
-- `config::load(path)` → returns `Config` struct (includes `ModelConfig`)
-- `Engine::new()` passes `config.models` → `Models::new()`
-- `Engine::new()` passes `config.cache_dir` → `Storage::new()`
-- After construction, Config and Models have no direct connection
+- `config::load(path)` -> returns `Config` struct (includes model + inference config)
+- `Engine::new()` builds role adapters via `models::build_*_with_local_runtime`
+- `Engine::new()` passes `config.cache_dir` -> `Storage::new()`
 
 **No connection** (by design):
-- `config/` ↔ `storage/`: independent
-- `config/` ↔ `models/`: Engine bridges them at construction
-- `search/` ↔ `ingest/`: never call each other
-- `storage/` ↔ `models/`: never call each other
+- `config/` <-> `storage/`: independent
+- `config/` <-> `models/`: Engine bridges them at construction
+- `storage/` <-> `models/`: never call each other
 
 **Module dependency rules** — no circular dependencies:
-- `config/` → nothing (reads TOML, returns Config struct)
-- `storage/` → nothing (receives operations, manages three stores)
-- `models/` → nothing (loads models, runs inference)
-- `search/` → uses Storage and Models (via borrowed references)
-- `ingest/` → uses Storage, Models, and Config (via borrowed references)
-- `engine` → all of the above (owns instances, delegates via borrowing)
+- `config/` -> nothing (reads TOML, returns Config struct)
+- `storage/` -> nothing (receives operations, manages three stores)
+- `models/` -> nothing (loads models, runs inference)
+- `ingest/` -> extraction/chunking only (no storage/model orchestration)
+- `engine` -> orchestrates storage/models/config/ingest
 
-**Public vs internal functions**: Each module exposes only its entry points via `mod.rs`. Internal sub-module functions (`query::parse()`, `fusion::fuse()`, etc.) are private. Engine only sees top-level public functions.
+**Public vs internal functions**: adapters call Engine public methods; internal engine submodules remain private implementation detail.
 
 ### Core Module Structure
 
 ```
 core/
-  lib.rs                 # pub mod engine, storage, search, ingest, models, config
-  engine.rs              # Engine struct — thin orchestrator, delegates to modules
+  lib.rs                 # pub mod engine, storage, ingest, models, config
+  engine.rs              # Engine facade (public API entry points)
+  engine/
+    search_ops.rs        # search ranking + deep search + result assembly
+    update_ops.rs        # update scan/index/embed/reconcile pipeline
+    ignore_ops.rs        # collection ignore CRUD operations
+    scoring.rs           # score normalization/fusion helpers
+    text_helpers.rs      # snippet + contextual-prefix text assembly helpers
+    path_utils.rs        # path/docid normalization helpers
+    file_utils.rs        # hashing/title/file-error helpers
+    ignore_helpers.rs    # ignore matcher + ignore path/pattern helpers
+    tests.rs             # engine integration tests
 
   storage/
     mod.rs               # Storage struct — public API, owns db + tantivy + usearch
@@ -205,19 +196,13 @@ core/
     tantivy.rs           # Tantivy operations (index, query, field boosting)
     usearch.rs           # USearch operations (insert, search, quantization)
 
-  search/
-    mod.rs               # pub fn execute(), pub fn deep() — only public entry points
-    query.rs             # query parsing (phrases, filters, negations) — internal
-    routing.rs           # query routing (decide which signals to activate) — internal
-    fusion.rs            # RRF fusion, agreement bonus, deduplication — internal
-    rerank.rs            # cross-encoder reranking, score blending — internal
-
   ingest/
-    mod.rs               # pub fn update() — only public entry point
-    extract.rs           # Extractor trait + MarkdownExtractor, PlaintextExtractor, CodeExtractor
-    chunk.rs             # file-independent chunking pipeline (tiered budgets, structural packing, forced-split handling)
-    embed.rs             # embedding pipeline (batch embed, USearch insert)
-    ignore.rs            # ignore pattern parsing, hardcoded ignores, extension filtering
+    mod.rs               # ingest submodule exports
+    extract.rs           # extractor registry + shared extraction contracts
+    chunk.rs             # file-independent chunking pipeline
+    markdown.rs          # markdown extraction implementation
+    plaintext.rs         # plaintext extraction implementation
+    code.rs              # code extraction implementation
 
   models/
     mod.rs               # model orchestration (pull/status/resolve), role wiring entry points
@@ -241,41 +226,41 @@ core/
 
 ### Engine (composition root)
 
-Engine owns Storage, Models, and Config as struct fields. When Engine is created, it creates all three. When Engine is dropped, all three are dropped (connections closed, models unloaded). Every operation goes through Engine.
+Engine owns `Storage`, `Config`, and role adapters as struct fields. Every operation flows through Engine.
 
 ```rust
 pub struct Engine {
     storage: Storage,
-    models: Models,
     config: Config,
+    embedder: Option<Arc<dyn Embedder>>,
+    reranker: Arc<dyn Reranker>,
+    expander: Arc<dyn Expander>,
 }
 
 impl Engine {
     pub fn new(config_path: Option<&Path>) -> Result<Self>;
 
-    // Search — delegates to search module
+    // Search / indexing orchestration
     pub fn search(&self, req: SearchRequest) -> Result<SearchResponse>;
-
-    // Indexing — delegates to ingest module
     pub fn update(&self, opts: UpdateOptions) -> Result<UpdateReport>;
 
-    // Documents — resolves target, reads live file, computes stale flag
+    // Documents
     pub fn get_document(&self, req: GetRequest) -> Result<DocumentResponse>;
     pub fn multi_get(&self, req: MultiGetRequest) -> Result<MultiGetResponse>;
     pub fn list_files(&self, space: Option<&str>, collection: &str,
                        prefix: Option<&str>) -> Result<Vec<FileEntry>>;
 
-    // Spaces — thin wrappers over storage
+    // Spaces
     pub fn add_space(&self, name: &str, description: Option<&str>) -> Result<SpaceInfo>;
     pub fn remove_space(&self, name: &str) -> Result<()>;
     pub fn rename_space(&self, old: &str, new: &str) -> Result<()>;
     pub fn describe_space(&self, name: &str, description: &str) -> Result<()>;
     pub fn list_spaces(&self) -> Result<Vec<SpaceInfo>>;
     pub fn space_info(&self, name: &str) -> Result<SpaceInfo>;
-    pub fn set_default_space(&self, name: Option<&str>) -> Result<Option<String>>;
+    pub fn set_default_space(&mut self, name: Option<&str>) -> Result<Option<String>>;
     pub fn resolve_space(&self, explicit: Option<&str>) -> Result<String>;
 
-    // Collections — resolves space, delegates to storage, optionally triggers update
+    // Collections
     pub fn add_collection(&self, req: AddCollectionRequest) -> Result<CollectionInfo>;
     pub fn remove_collection(&self, space: Option<&str>, name: &str) -> Result<()>;
     pub fn rename_collection(&self, space: Option<&str>, old: &str, new: &str) -> Result<()>;
@@ -283,18 +268,14 @@ impl Engine {
     pub fn list_collections(&self, space: Option<&str>) -> Result<Vec<CollectionInfo>>;
     pub fn collection_info(&self, space: Option<&str>, name: &str) -> Result<CollectionInfo>;
 
-    // Models
+    // Models / admin
     pub fn pull_models(&self) -> Result<PullReport>;
     pub fn model_status(&self) -> Result<ModelStatus>;
-
-    // Admin
     pub fn status(&self, space: Option<&str>) -> Result<StatusResponse>;
 }
 ```
 
-Engine is the only type adapters interact with. Every public method maps directly to a CLI command or MCP tool. Space resolution (flag > env > default > unique lookup) happens inside Engine methods that accept `space: Option<&str>` — adapters pass through whatever the user provided, Engine resolves it.
-
-Adapters (CLI, MCP) take `&Engine` directly. They parse input into request types, call Engine methods, format the response.
+Engine is the only type adapters interact with. Public methods map to CLI/MCP operations; internal complexity is delegated to private engine submodules.
 
 ### Storage (three-store model, owns concurrency)
 
@@ -303,13 +284,16 @@ Storage is the data layer. SQLite is global (one database for all spaces). Tanti
 ```rust
 pub struct Storage {
     db: Mutex<rusqlite::Connection>,                     // global, single writer, WAL
-    spaces: RwLock<HashMap<String, Arc<SpaceIndexes>>>,  // per-space search indexes
+    cache_dir: PathBuf,
+    spaces: RwLock<HashMap<String, SpaceIndexes>>,       // per-space search indexes
 }
 
 struct SpaceIndexes {
-    tantivy_reader: tantivy::IndexReader,                // thread-safe (Clone + Send + Sync)
+    _tantivy_dir: PathBuf,
+    usearch_path: PathBuf,
+    tantivy_index: tantivy::Index,
     tantivy_writer: Mutex<tantivy::IndexWriter>,         // single writer
-    usearch: RwLock<usearch::Index>,                     // concurrent reads, exclusive writes
+    usearch_index: RwLock<usearch::Index>,               // concurrent reads, exclusive writes
 }
 ```
 
@@ -321,9 +305,9 @@ struct SpaceIndexes {
 
 SQLite is the source of truth. Tantivy and USearch are derived indexes — if corrupted or deleted, they can be rebuilt from SQLite + files on disk + model inference. Per-space isolation means a code-heavy space won't skew BM25 IDF statistics for a notes space.
 
-Search and ingest don't manage locks — they call `storage.query_bm25(space, ...)`, `storage.insert_chunks(...)`, etc. Storage handles synchronization internally. Cross-space search queries each space's indexes independently, then concatenates candidates for fusion and reranking.
+Engine search/update modules do not manage index locks — they call `storage.query_bm25(space, ...)`, `storage.insert_chunks(...)`, etc. Storage handles synchronization internally.
 
-**Space index lifecycle**: All known spaces are eagerly opened at `Storage::new()` — the spaces table is scanned and each space's Tantivy index and USearch file are loaded. The `RwLock<HashMap<String, Arc<SpaceIndexes>>>` allows `open_space` and `close_space` to take `&self` (write lock on the map). Read operations (search, get) take a read lock on the map, clone the `Arc<SpaceIndexes>`, then drop the map lock before touching the indexes. This means space add/remove only blocks reads for the brief duration of a HashMap lookup, not for entire search operations.
+**Space index lifecycle**: All known spaces are eagerly opened at `Storage::new()` by scanning the spaces table and loading each space's Tantivy/USearch handles. `open_space`/`close_space` take a write lock on the spaces map. Read operations take a read lock and use the selected entry for the query/index mutation. This keeps index ownership centralized in Storage and prevents adapter-level lock coupling.
 
 ### Models (facade, owns lifecycle)
 
@@ -689,7 +673,7 @@ pub struct DiskUsage {
 
 ### Storage API
 
-The Storage struct's public methods — the internal contract that `search/`, `ingest/`, and `engine` depend on. All methods take `&self` — Storage handles its own locking internally via `Mutex<Connection>`, `Mutex<IndexWriter>`, and `RwLock<usearch::Index>`.
+The Storage struct's public methods — the internal contract that engine orchestration modules depend on. All methods take `&self` — Storage handles its own locking internally via `Mutex<Connection>`, `Mutex<IndexWriter>`, and `RwLock<usearch::Index>`.
 
 ```rust
 impl Storage {
@@ -839,106 +823,16 @@ pub enum SpaceResolution {
 }
 ```
 
-### Search Module API
+### Engine Internal Search/Update Ops
 
-Two public functions — the only entry points from Engine into the search module:
+Search and update internals live under `core/src/engine/` and are private implementation modules, not separate top-level public APIs.
 
-```rust
-// search/mod.rs
-pub fn execute(
-    storage: &Storage,
-    models: &Models,
-    req: SearchRequest,
-) -> Result<SearchResponse>;
+- `search_ops.rs`: keyword/semantic/auto/deep ranking and final result assembly.
+- `update_ops.rs`: update pipeline (scan -> filter -> extract -> chunk -> store -> FTS -> embed), plus replay/reconciliation helpers.
+- `ignore_ops.rs`: collection ignore CRUD behavior.
+- helper modules (`scoring.rs`, `text_helpers.rs`, `path_utils.rs`, `file_utils.rs`, `ignore_helpers.rs`) keep pure utility logic isolated.
 
-pub fn deep(
-    storage: &Storage,
-    models: &Models,
-    req: SearchRequest,
-) -> Result<SearchResponse>;
-```
-
-`execute` handles Auto, Keyword, and Semantic modes. `deep` handles Deep mode (query expansion + multi-variant retrieval + full rerank). Engine dispatches based on `req.mode`.
-
-Internal types (private to `search/`, not in `types/`):
-
-```rust
-// query.rs — query parsing
-struct ParsedQuery {
-    terms: Vec<String>,                    // plain search terms
-    phrases: Vec<String>,                  // quoted exact-match phrases
-    file_filters: Vec<String>,             // file:*.rs patterns
-    collection_filter: Option<String>,     // collection:notes
-    negations: Vec<String>,                // -excluded terms
-}
-
-// routing.rs — signal activation
-struct RouteDecision {
-    use_bm25: bool,
-    use_dense: bool,
-    use_reranker: bool,
-}
-
-// fusion.rs — RRF fusion
-struct FusionConfig {
-    k: u32,                                // default: 60
-    w_bm25: f32,                           // default: 1.0
-    w_dense: f32,                          // default: 1.0
-    agreement_bonus: f32,                  // default: 1.2
-}
-
-struct FusedCandidate {
-    chunk_id: i64,
-    doc_id: i64,                           // for deduplication
-    rrf_score: f32,
-    bm25_score: Option<f32>,
-    dense_score: Option<f32>,
-}
-
-// rerank.rs — cross-encoder reranking
-struct RankedCandidate {
-    chunk_id: i64,
-    final_score: f32,                      // 0.7 * reranker + 0.3 * rrf
-    reranker_score: Option<f32>,
-    rrf_score: f32,
-}
-```
-
-### Ingest Module API
-
-One public function — the only entry point from Engine into the ingest module:
-
-```rust
-// ingest/mod.rs
-pub fn update(
-    storage: &Storage,
-    models: &Models,
-    config: &Config,
-    opts: UpdateOptions,
-) -> Result<UpdateReport>;
-```
-
-`update` runs the full pipeline: scan → filter → mtime check → hash check → extract → chunk → store → FTS index → embed. Returns an `UpdateReport` summarizing what happened. Non-fatal per-file errors are collected in `report.errors` — the pipeline continues processing remaining files.
-
-Internal types (private to `ingest/`):
-
-```rust
-// chunk.rs — finalized chunks ready for storage
-struct FinalChunk {
-    text: String,
-    offset: usize,
-    length: usize,
-    heading: Option<String>,
-    kind: ChunkKind,
-}
-
-// ignore.rs — compiled ignore rules for a collection
-struct IgnoreRules {
-    hardcoded: Vec<GlobPattern>,           // .git/, node_modules/, etc.
-    user_patterns: Vec<GlobPattern>,       // from .ignore file
-    extensions: Option<Vec<String>>,       // from collection config
-}
-```
+Extraction/chunking remain in `core/src/ingest/` and are invoked from `engine/update_ops.rs`.
 
 ### Config API
 
@@ -1906,22 +1800,20 @@ collection = "notes"
 
 ## Implementation Order
 
-1. **types/** — shared request/response structs (including Space types)
-2. **core/config** — TOML loading/saving (models, reaping, chunking policy, default space)
-3. **core/storage** — Storage struct, SQLite schema (spaces, collections, documents, chunks, embeddings, cache), per-space Tantivy/USearch indexes
-4. **core/ingest/ignore** — hardcoded ignores, ignore pattern parser (internal storage), extension filtering
-5. **core/ingest/extract** — Extractor trait + Markdown, plaintext, code extractors
-6. **core/ingest/chunk** — chunking pipeline (target/soft/hard budgets, structural packing, forced-split fallback)
-7. **core/ingest** — `update` flow (scan → filter → extract → chunk → store → FTS index)
-8. **core/models** — model registry, HuggingFace download, Embedder/Reranker/Generator traits + impls
-9. **core/ingest/embed** — embedding within update flow (chunks → embed → USearch insert)
-10. **core/search** — query parsing, routing, BM25, dense, RRF fusion, reranking, result assembly, cross-space search
-11. **core/search (deep)** — query expansion + multi-variant retrieval
-12. **core/engine** — Engine struct wiring everything together (space resolution logic)
-13. **cli/** — all commands wired to Engine (space, collection, ignore, search, update, admin)
-14. **mcp/** — MCP stdio server (space-aware tools)
-15. **eval** — evaluation framework
-16. **distribution** — CI/CD, release binaries, Homebrew, install script
+1. **types/** — shared request/response structs (spaces, collections, search/update/status)
+2. **core/config** — TOML load/save + validation (models, embeddings, inference, reaping, chunking, default space)
+3. **core/storage** — SQLite schema + per-space Tantivy/USearch ownership and lifecycle
+4. **core/ingest/extract** — extractor contracts + markdown/plaintext/code extractors
+5. **core/ingest/chunk** — profile-aware chunking (packing, forced split, overlap, structural kinds)
+6. **core/models (artifacts)** — provider-agnostic model pull/status + manifest checks
+7. **core/models (runtime roles)** — embedder/reranker/expander builders (HTTP + local ONNX/llama)
+8. **core/engine (facade)** — public API surface and shared operation lock orchestration
+9. **core/engine/update_ops** — update pipeline + FTS replay + embedding backlog reconciliation
+10. **core/engine/search_ops** — keyword/semantic/auto/deep retrieval + scoring + rerank/expand integration
+11. **core/engine/ignore_ops** — collection ignore pattern CRUD
+12. **cli/** — command mapping and human-facing UX
+13. **mcp/** — stdio MCP protocol framing + tool handlers
+14. **eval + distribution** — eval harness, CI/release artifacts, Homebrew/install script
 
 ---
 
