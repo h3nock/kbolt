@@ -1,15 +1,19 @@
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use kbolt_types::KboltError;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::config::{
-    EmbeddingConfig, EmbeddingProvider, TextInferenceConfig, TextInferenceProvider,
+    EmbeddingConfig, EmbeddingProvider, TextInferenceConfig, TextInferenceOutputMode,
+    TextInferenceProvider,
 };
 use crate::models::expander::HeuristicExpander;
 use crate::models::reranker::HeuristicReranker;
+use crate::models::text::strip_json_fences;
 use crate::models::{Embedder, Expander, Reranker};
 use crate::Result;
 
@@ -31,6 +35,182 @@ struct OpenAiCompatibleReranker {
 #[derive(Debug, Clone)]
 struct OpenAiCompatibleExpander {
     config: TextInferenceConfig,
+}
+
+const MAX_RETRY_AFTER_SECONDS: u64 = 30;
+
+struct HttpJsonClient {
+    agent: ureq::Agent,
+    base_url: String,
+    api_key_env: Option<String>,
+    max_retries: u32,
+    api_key_scope: &'static str,
+}
+
+impl HttpJsonClient {
+    fn new(
+        base_url: &str,
+        api_key_env: Option<&str>,
+        timeout_ms: u64,
+        max_retries: u32,
+        api_key_scope: &'static str,
+    ) -> Self {
+        Self {
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_millis(timeout_ms))
+                .build(),
+            base_url: base_url.to_string(),
+            api_key_env: api_key_env.map(ToString::to_string),
+            max_retries,
+            api_key_scope,
+        }
+    }
+
+    fn post_json<T>(
+        &self,
+        endpoint_suffix: &str,
+        payload: &Value,
+        provider_name: &str,
+        operation: &str,
+    ) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let endpoint = resolve_endpoint(&self.base_url, endpoint_suffix);
+        let mut attempt = 0_u32;
+
+        loop {
+            let mut request = self
+                .agent
+                .post(&endpoint)
+                .set("content-type", "application/json");
+
+            if let Some(api_key_env) = self.api_key_env.as_deref() {
+                let api_key = std::env::var(api_key_env).map_err(|_| {
+                    KboltError::Inference(format!(
+                        "{} API key env var is not set: {api_key_env}",
+                        self.api_key_scope
+                    ))
+                })?;
+                request = request.set("authorization", &format!("Bearer {api_key}"));
+            }
+
+            match request.send_json(payload.clone()) {
+                Ok(response) => {
+                    let decoded = response.into_json().map_err(|err| {
+                        KboltError::Inference(format!(
+                            "failed to decode {provider_name} {operation} response: {err}"
+                        ))
+                    })?;
+                    return Ok(decoded);
+                }
+                Err(ureq::Error::Status(status, response)) => {
+                    let retry_after_secs =
+                        parse_retry_after_seconds(response.header("retry-after"));
+                    let body = response
+                        .into_string()
+                        .unwrap_or_else(|_| "<unreadable body>".to_string());
+                    let can_retry = should_retry_status(status) && attempt < self.max_retries;
+                    if can_retry {
+                        attempt = attempt.saturating_add(1);
+                        if let Some(wait_seconds) = retry_after_secs {
+                            thread::sleep(Duration::from_secs(
+                                wait_seconds.min(MAX_RETRY_AFTER_SECONDS),
+                            ));
+                        }
+                        continue;
+                    }
+
+                    return Err(KboltError::Inference(format!(
+                        "{provider_name} {operation} request failed ({status}): {body}"
+                    ))
+                    .into());
+                }
+                Err(ureq::Error::Transport(err)) => {
+                    if attempt < self.max_retries {
+                        attempt = attempt.saturating_add(1);
+                        continue;
+                    }
+                    return Err(KboltError::Inference(format!(
+                        "{provider_name} {operation} transport error: {err}"
+                    ))
+                    .into());
+                }
+            }
+        }
+    }
+}
+
+struct ChatClient {
+    http: HttpJsonClient,
+    provider_name: &'static str,
+    model: String,
+    output_mode: TextInferenceOutputMode,
+}
+
+impl ChatClient {
+    fn new(config: &TextInferenceConfig, provider_name: &'static str) -> Self {
+        Self {
+            http: HttpJsonClient::new(
+                &config.base_url,
+                config.api_key_env.as_deref(),
+                config.timeout_ms,
+                config.max_retries,
+                "inference",
+            ),
+            provider_name,
+            model: config.model.clone(),
+            output_mode: config.output_mode.clone(),
+        }
+    }
+
+    fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
+        let payload = build_chat_payload(
+            &self.model,
+            system_prompt,
+            user_prompt,
+            self.output_mode.clone(),
+        );
+
+        let response: ChatCompletionResponse = self.http.post_json(
+            "chat/completions",
+            &payload,
+            self.provider_name,
+            "chat completion",
+        )?;
+        let content = response.into_text()?;
+        let normalized = match self.output_mode {
+            TextInferenceOutputMode::JsonObject => content.trim(),
+            TextInferenceOutputMode::Text => strip_json_fences(&content),
+        };
+        Ok(normalized.to_string())
+    }
+}
+
+fn build_chat_payload(
+    model: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    output_mode: TextInferenceOutputMode,
+) -> Value {
+    let mut payload = json!({
+        "model": model,
+        "temperature": 0,
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": user_prompt,
+            }
+        ]
+    });
+    if output_mode == TextInferenceOutputMode::JsonObject {
+        payload["response_format"] = json!({ "type": "json_object" });
+    }
+    payload
 }
 
 pub(crate) fn build_embedder(
@@ -100,13 +280,8 @@ impl Reranker for OpenAiCompatibleReranker {
         }
         user.push_str("\nRespond with exactly one score per document, in order.");
 
-        let content = request_chat_completion(
-            &self.config,
-            "openai_compatible",
-            system,
-            &user,
-            self.config.max_retries,
-        )?;
+        let chat = ChatClient::new(&self.config, "openai_compatible");
+        let content = chat.complete(system, &user)?;
         let parsed: RerankerResponse = parse_json_payload("reranker response", &content)?;
         let mut scores = parsed.into_scores();
         if scores.len() != docs.len() {
@@ -136,13 +311,8 @@ impl Expander for OpenAiCompatibleExpander {
         let user = format!(
             "Original query:\n{normalized}\n\nGenerate variants that improve lexical recall, semantic recall, and one HyDE-style descriptive query."
         );
-        let content = request_chat_completion(
-            &self.config,
-            "openai_compatible",
-            system,
-            &user,
-            self.config.max_retries,
-        )?;
+        let chat = ChatClient::new(&self.config, "openai_compatible");
+        let content = chat.complete(system, &user)?;
         let parsed: ExpanderResponse = parse_json_payload("expander response", &content)?;
 
         let mut seen = std::collections::HashSet::new();
@@ -176,185 +346,59 @@ fn embed_with_http_api(
         return Ok(Vec::new());
     }
 
+    let http = HttpJsonClient::new(
+        &config.base_url,
+        config.api_key_env.as_deref(),
+        config.timeout_ms,
+        config.max_retries,
+        "embedding",
+    );
     let mut vectors = Vec::new();
     for batch in texts.chunks(config.batch_size) {
-        let response_vectors =
-            request_embedding_batch(config, provider_name, batch, config.max_retries)?;
+        let payload = json!({
+            "model": config.model,
+            "input": batch,
+        });
+        let parsed: EmbeddingResponseEnvelope =
+            http.post_json("embeddings", &payload, provider_name, "embedding")?;
+        let response_vectors = parsed.into_vectors(batch.len())?;
         vectors.extend(response_vectors);
     }
     Ok(vectors)
 }
 
-fn request_embedding_batch(
-    config: &EmbeddingConfig,
-    provider_name: &str,
-    texts: &[String],
-    max_retries: u32,
-) -> Result<Vec<Vec<f32>>> {
-    let endpoint = embeddings_endpoint(&config.base_url);
-    let payload = json!({
-        "model": config.model,
-        "input": texts,
-    });
-    let timeout = Duration::from_millis(config.timeout_ms);
-    let agent = ureq::AgentBuilder::new().timeout(timeout).build();
-
-    let mut attempt = 0_u32;
-    loop {
-        let mut request = agent
-            .post(&endpoint)
-            .set("content-type", "application/json");
-
-        if let Some(api_key_env) = config.api_key_env.as_deref() {
-            let api_key = std::env::var(api_key_env).map_err(|_| {
-                KboltError::Inference(format!(
-                    "embedding API key env var is not set: {api_key_env}"
-                ))
-            })?;
-            request = request.set("authorization", &format!("Bearer {api_key}"));
-        }
-
-        match request.send_json(payload.clone()) {
-            Ok(response) => {
-                let parsed: EmbeddingResponseEnvelope = response.into_json().map_err(|err| {
-                    KboltError::Inference(format!(
-                        "failed to decode {provider_name} embedding response: {err}"
-                    ))
-                })?;
-                let vectors = parsed.into_vectors(texts.len())?;
-                return Ok(vectors);
-            }
-            Err(ureq::Error::Status(status, response)) => {
-                let body = response
-                    .into_string()
-                    .unwrap_or_else(|_| "<unreadable body>".to_string());
-                let can_retry = status >= 500 && attempt < max_retries;
-                if can_retry {
-                    attempt = attempt.saturating_add(1);
-                    continue;
-                }
-                return Err(KboltError::Inference(format!(
-                    "{provider_name} embedding request failed ({status}): {body}"
-                ))
-                .into());
-            }
-            Err(ureq::Error::Transport(err)) => {
-                if attempt < max_retries {
-                    attempt = attempt.saturating_add(1);
-                    continue;
-                }
-                return Err(KboltError::Inference(format!(
-                    "{provider_name} embedding transport error: {err}"
-                ))
-                .into());
-            }
-        }
-    }
-}
-
-fn embeddings_endpoint(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with("/embeddings") {
-        trimmed.to_string()
+fn resolve_endpoint(base_url: &str, suffix: &str) -> String {
+    let trimmed_base = base_url.trim_end_matches('/');
+    let normalized_suffix = suffix.trim_start_matches('/');
+    if trimmed_base.ends_with(normalized_suffix) {
+        trimmed_base.to_string()
     } else {
-        format!("{trimmed}/embeddings")
+        format!("{trimmed_base}/{normalized_suffix}")
     }
 }
 
-fn chat_completions_endpoint(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with("/chat/completions") {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}/chat/completions")
-    }
+fn should_retry_status(status: u16) -> bool {
+    status == 429 || status >= 500
 }
 
-fn request_chat_completion(
-    config: &TextInferenceConfig,
-    provider_name: &str,
-    system_prompt: &str,
-    user_prompt: &str,
-    max_retries: u32,
-) -> Result<String> {
-    let endpoint = chat_completions_endpoint(&config.base_url);
-    let payload = json!({
-        "model": config.model,
-        "temperature": 0,
-        "messages": [
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
-            {
-                "role": "user",
-                "content": user_prompt,
-            }
-        ]
-    });
-    let timeout = Duration::from_millis(config.timeout_ms);
-    let agent = ureq::AgentBuilder::new().timeout(timeout).build();
-
-    let mut attempt = 0_u32;
-    loop {
-        let mut request = agent
-            .post(&endpoint)
-            .set("content-type", "application/json");
-
-        if let Some(api_key_env) = config.api_key_env.as_deref() {
-            let api_key = std::env::var(api_key_env).map_err(|_| {
-                KboltError::Inference(format!(
-                    "inference API key env var is not set: {api_key_env}"
-                ))
-            })?;
-            request = request.set("authorization", &format!("Bearer {api_key}"));
-        }
-
-        match request.send_json(payload.clone()) {
-            Ok(response) => {
-                let parsed: ChatCompletionResponse = response.into_json().map_err(|err| {
-                    KboltError::Inference(format!(
-                        "failed to decode {provider_name} chat completion response: {err}"
-                    ))
-                })?;
-                let content = parsed.into_text()?;
-                return Ok(content);
-            }
-            Err(ureq::Error::Status(status, response)) => {
-                let body = response
-                    .into_string()
-                    .unwrap_or_else(|_| "<unreadable body>".to_string());
-                let can_retry = status >= 500 && attempt < max_retries;
-                if can_retry {
-                    attempt = attempt.saturating_add(1);
-                    continue;
-                }
-                return Err(KboltError::Inference(format!(
-                    "{provider_name} chat completion request failed ({status}): {body}"
-                ))
-                .into());
-            }
-            Err(ureq::Error::Transport(err)) => {
-                if attempt < max_retries {
-                    attempt = attempt.saturating_add(1);
-                    continue;
-                }
-                return Err(KboltError::Inference(format!(
-                    "{provider_name} chat completion transport error: {err}"
-                ))
-                .into());
-            }
-        }
+fn parse_retry_after_seconds(header_value: Option<&str>) -> Option<u64> {
+    let raw = header_value?.trim();
+    if raw.is_empty() {
+        return None;
     }
+    raw.parse::<u64>().ok()
 }
 
 fn parse_json_payload<T>(label: &str, content: &str) -> Result<T>
 where
     T: for<'de> Deserialize<'de>,
 {
-    serde_json::from_str(content).map_err(|err| {
-        KboltError::Inference(format!("failed to parse {label} as JSON: {err}; payload={content}"))
-            .into()
+    let trimmed = content.trim();
+    serde_json::from_str(trimmed).map_err(|err| {
+        KboltError::Inference(format!(
+            "failed to parse {label} as JSON: {err}; payload={content}"
+        ))
+        .into()
     })
 }
 
@@ -379,13 +423,12 @@ impl ChatCompletionResponse {
             .into());
         };
 
-        extract_text(choice.message.content)
-            .ok_or_else(|| {
-                KboltError::Inference(
-                    "chat completion response did not contain text content".to_string(),
-                )
-                .into()
-            })
+        extract_text(choice.message.content).ok_or_else(|| {
+            KboltError::Inference(
+                "chat completion response did not contain text content".to_string(),
+            )
+            .into()
+        })
     }
 }
 
@@ -416,9 +459,16 @@ fn extract_text(value: Value) -> Option<String> {
                 }
             }
 
-            if text.is_empty() { None } else { Some(text) }
+            if text.is_empty() {
+                None
+            } else {
+                Some(text)
+            }
         }
-        Value::Object(map) => map.get("text").and_then(|item| item.as_str()).map(ToString::to_string),
+        Value::Object(map) => map
+            .get("text")
+            .and_then(|item| item.as_str())
+            .map(ToString::to_string),
         _ => None,
     }
 }
@@ -543,9 +593,13 @@ mod tests {
         }
     }
 
-    fn base_text_config(base_url: String) -> TextInferenceConfig {
+    fn base_text_config(
+        base_url: String,
+        output_mode: TextInferenceOutputMode,
+    ) -> TextInferenceConfig {
         TextInferenceConfig {
             provider: TextInferenceProvider::OpenAiCompatible,
+            output_mode,
             model: "text-model".to_string(),
             base_url,
             api_key_env: None,
@@ -561,10 +615,11 @@ mod tests {
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept client");
 
-            read_full_request(&mut stream);
+            let _ = read_full_request(&mut stream);
 
             let status_line = match status_code {
                 200 => "HTTP/1.1 200 OK",
+                429 => "HTTP/1.1 429 Too Many Requests",
                 400 => "HTTP/1.1 400 Bad Request",
                 500 => "HTTP/1.1 500 Internal Server Error",
                 other => panic!("unsupported status code in test server: {other}"),
@@ -582,7 +637,45 @@ mod tests {
         format!("http://{addr}")
     }
 
-    fn read_full_request(stream: &mut std::net::TcpStream) {
+    struct TestResponse {
+        status_code: u16,
+        body: &'static str,
+        retry_after: Option<&'static str>,
+    }
+
+    fn serve_sequence(responses: Vec<TestResponse>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("server address");
+        std::thread::spawn(move || {
+            for response_spec in responses {
+                let (mut stream, _) = listener.accept().expect("accept client");
+                let _ = read_full_request(&mut stream);
+                let status_line = match response_spec.status_code {
+                    200 => "HTTP/1.1 200 OK",
+                    429 => "HTTP/1.1 429 Too Many Requests",
+                    400 => "HTTP/1.1 400 Bad Request",
+                    500 => "HTTP/1.1 500 Internal Server Error",
+                    other => panic!("unsupported status code in test server: {other}"),
+                };
+                let retry_after = response_spec
+                    .retry_after
+                    .map(|value| format!("Retry-After: {value}\r\n"))
+                    .unwrap_or_default();
+                let response = format!(
+                    "{status_line}\r\nContent-Type: application/json\r\n{retry_after}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_spec.body.as_bytes().len(),
+                    response_spec.body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+        });
+
+        format!("http://{addr}")
+    }
+
+    fn read_full_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
         let mut raw = Vec::new();
         let mut header_end = None;
         while header_end.is_none() {
@@ -596,7 +689,7 @@ mod tests {
         }
 
         let Some(header_end) = header_end else {
-            return;
+            return Vec::new();
         };
         let header_end = header_end + 4;
         let headers = String::from_utf8_lossy(&raw[..header_end]).to_ascii_lowercase();
@@ -618,6 +711,9 @@ mod tests {
             }
             remaining = remaining.saturating_sub(read);
         }
+
+        let body_end = header_end.saturating_add(content_length).min(raw.len());
+        raw.get(header_end..body_end).unwrap_or_default().to_vec()
     }
 
     #[test]
@@ -679,9 +775,7 @@ mod tests {
             .expect("build embedder")
             .expect("embedder should exist");
 
-        let vectors = embedder
-            .embed_batch(&["a".to_string()])
-            .expect("embed");
+        let vectors = embedder.embed_batch(&["a".to_string()]).expect("embed");
         assert_eq!(vectors, vec![vec![0.15, 0.25]]);
     }
 
@@ -754,7 +848,7 @@ mod tests {
   ]
 }"#;
         let base_url = serve_once(200, body);
-        let config = base_text_config(base_url);
+        let config = base_text_config(base_url, TextInferenceOutputMode::JsonObject);
         let reranker = build_reranker(Some(&config)).expect("build reranker");
 
         let scores = reranker
@@ -783,7 +877,7 @@ mod tests {
   ]
 }"#;
         let base_url = serve_once(200, body);
-        let config = base_text_config(base_url);
+        let config = base_text_config(base_url, TextInferenceOutputMode::JsonObject);
         let expander = build_expander(Some(&config)).expect("build expander");
 
         let variants = expander.expand("rust traits").expect("expand query");
@@ -795,5 +889,94 @@ mod tests {
                 "explain rust traits".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn json_object_mode_sets_response_format_in_chat_payload() {
+        let payload = build_chat_payload(
+            "model",
+            "system",
+            "user",
+            TextInferenceOutputMode::JsonObject,
+        );
+        assert_eq!(payload["response_format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn text_mode_omits_response_format_in_chat_payload() {
+        let payload = build_chat_payload("model", "system", "user", TextInferenceOutputMode::Text);
+        assert!(payload.get("response_format").is_none());
+    }
+
+    #[test]
+    fn text_mode_parses_fenced_json() {
+        let body = r#"{
+  "choices": [
+    {
+      "message": {
+        "content": "```json\n{\"scores\":[0.2,0.9]}\n```"
+      }
+    }
+  ]
+}"#;
+        let base_url = serve_once(200, body);
+        let config = base_text_config(base_url, TextInferenceOutputMode::Text);
+        let reranker = build_reranker(Some(&config)).expect("build reranker");
+
+        let scores = reranker
+            .rerank("query", &["doc one".to_string(), "doc two".to_string()])
+            .expect("rerank docs");
+        assert_eq!(scores, vec![0.2, 0.9]);
+    }
+
+    #[test]
+    fn text_mode_fails_fast_when_content_is_not_json() {
+        let body = r#"{
+  "choices": [
+    {
+      "message": {
+        "content": "this is not json"
+      }
+    }
+  ]
+}"#;
+        let base_url = serve_once(200, body);
+        let config = base_text_config(base_url, TextInferenceOutputMode::Text);
+        let reranker = build_reranker(Some(&config)).expect("build reranker");
+
+        let err = reranker
+            .rerank("query", &["doc one".to_string(), "doc two".to_string()])
+            .expect_err("non-json payload should fail");
+        assert!(err
+            .to_string()
+            .contains("failed to parse reranker response as JSON"));
+    }
+
+    #[test]
+    fn embedder_retries_on_rate_limit_status() {
+        let base_url = serve_sequence(vec![
+            TestResponse {
+                status_code: 429,
+                body: r#"{"error":"rate limit"}"#,
+                retry_after: Some("0"),
+            },
+            TestResponse {
+                status_code: 200,
+                body: r#"{"data":[{"index":0,"embedding":[0.1,0.2]}]}"#,
+                retry_after: None,
+            },
+        ]);
+        let config = EmbeddingConfig {
+            max_retries: 1,
+            ..base_config(EmbeddingProvider::OpenAiCompatible, base_url)
+        };
+        let embedder = build_embedder(Some(&config))
+            .expect("build embedder")
+            .expect("embedder should exist");
+
+        let vectors = embedder
+            .embed_batch(&["hello".to_string()])
+            .expect("embed should retry then succeed");
+        assert_eq!(vectors, vec![vec![0.1, 0.2]]);
     }
 }

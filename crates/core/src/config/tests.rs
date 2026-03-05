@@ -87,6 +87,7 @@ max_retries = 3
 
 [inference.reranker]
 provider = "openai_compatible"
+output_mode = "json_object"
 model = "rerank-1"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
@@ -95,6 +96,7 @@ max_retries = 1
 
 [inference.expander]
 provider = "openai_compatible"
+output_mode = "json_object"
 model = "expand-1"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
@@ -152,6 +154,7 @@ contextual_prefix = true
         InferenceConfig {
             reranker: Some(TextInferenceConfig {
                 provider: TextInferenceProvider::OpenAiCompatible,
+                output_mode: TextInferenceOutputMode::JsonObject,
                 model: "rerank-1".to_string(),
                 base_url: "https://api.openai.com/v1".to_string(),
                 api_key_env: Some("OPENAI_API_KEY".to_string()),
@@ -160,6 +163,7 @@ contextual_prefix = true
             }),
             expander: Some(TextInferenceConfig {
                 provider: TextInferenceProvider::OpenAiCompatible,
+                output_mode: TextInferenceOutputMode::JsonObject,
                 model: "expand-1".to_string(),
                 base_url: "https://api.openai.com/v1".to_string(),
                 api_key_env: Some("OPENAI_API_KEY".to_string()),
@@ -258,6 +262,7 @@ fn save_writes_index_toml() {
         inference: InferenceConfig {
             reranker: Some(TextInferenceConfig {
                 provider: TextInferenceProvider::OpenAiCompatible,
+                output_mode: TextInferenceOutputMode::JsonObject,
                 model: "rerank-1".to_string(),
                 base_url: "https://api.openai.com/v1".to_string(),
                 api_key_env: Some("OPENAI_API_KEY".to_string()),
@@ -266,6 +271,7 @@ fn save_writes_index_toml() {
             }),
             expander: Some(TextInferenceConfig {
                 provider: TextInferenceProvider::OpenAiCompatible,
+                output_mode: TextInferenceOutputMode::JsonObject,
                 model: "expand-1".to_string(),
                 base_url: "https://api.openai.com/v1".to_string(),
                 api_key_env: Some("OPENAI_API_KEY".to_string()),
@@ -330,6 +336,7 @@ fn save_writes_index_toml() {
         InferenceConfig {
             reranker: Some(TextInferenceConfig {
                 provider: TextInferenceProvider::OpenAiCompatible,
+                output_mode: TextInferenceOutputMode::JsonObject,
                 model: "rerank-1".to_string(),
                 base_url: "https://api.openai.com/v1".to_string(),
                 api_key_env: Some("OPENAI_API_KEY".to_string()),
@@ -338,6 +345,7 @@ fn save_writes_index_toml() {
             }),
             expander: Some(TextInferenceConfig {
                 provider: TextInferenceProvider::OpenAiCompatible,
+                output_mode: TextInferenceOutputMode::JsonObject,
                 model: "expand-1".to_string(),
                 base_url: "https://api.openai.com/v1".to_string(),
                 api_key_env: Some("OPENAI_API_KEY".to_string()),
@@ -508,6 +516,7 @@ fn load_rejects_invalid_inference_config() {
         r#"
 [inference.reranker]
 provider = "openai_compatible"
+output_mode = "json_object"
 model = "rerank-1"
 base_url = "api.openai.com/v1"
 "#,
@@ -517,4 +526,27 @@ base_url = "api.openai.com/v1"
     let err = load_from_file(&config_file, &config_dir, &cache_dir)
         .expect_err("invalid inference config should fail");
     assert!(err.to_string().contains("inference.reranker.base_url"));
+}
+
+#[test]
+fn load_rejects_inference_config_without_output_mode() {
+    let tmp = tempdir().expect("create tempdir");
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    let config_file = config_dir.join(CONFIG_FILENAME);
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        &config_file,
+        r#"
+[inference.reranker]
+provider = "openai_compatible"
+model = "rerank-1"
+base_url = "https://api.openai.com/v1"
+"#,
+    )
+    .expect("write config file");
+
+    let err = load_from_file(&config_file, &config_dir, &cache_dir)
+        .expect_err("missing output_mode should fail");
+    assert!(err.to_string().contains("output_mode"));
 }

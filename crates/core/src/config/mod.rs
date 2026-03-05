@@ -75,6 +75,7 @@ pub struct InferenceConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextInferenceConfig {
     pub provider: TextInferenceProvider,
+    pub output_mode: TextInferenceOutputMode,
     pub model: String,
     pub base_url: String,
     #[serde(default)]
@@ -89,6 +90,14 @@ pub struct TextInferenceConfig {
 pub enum TextInferenceProvider {
     #[serde(rename = "openai_compatible")]
     OpenAiCompatible,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextInferenceOutputMode {
+    #[serde(rename = "json_object")]
+    JsonObject,
+    #[serde(rename = "text")]
+    Text,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -371,10 +380,9 @@ fn validate_text_inference(scope: &str, config: Option<&TextInferenceConfig>) ->
     }
 
     if config.timeout_ms == 0 {
-        return Err(KboltError::Config(format!(
-            "{scope}.timeout_ms must be greater than zero"
-        ))
-        .into());
+        return Err(
+            KboltError::Config(format!("{scope}.timeout_ms must be greater than zero")).into(),
+        );
     }
 
     if let Some(api_key_env) = config.api_key_env.as_deref() {
