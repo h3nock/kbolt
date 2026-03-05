@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tempfile::tempdir;
 
 use crate::config::{
-    ChunkingConfig, Config, EmbeddingConfig, EmbeddingProvider, InferenceConfig, ModelConfig,
-    ModelProvider, ModelSourceConfig, ReapingConfig,
+    ChunkingConfig, Config, EmbeddingConfig, InferenceConfig, ModelConfig, ModelProvider,
+    ModelSourceConfig, ReapingConfig,
 };
 use crate::engine::{retrieval_text_with_prefix, Engine};
 use crate::storage::Storage;
@@ -135,8 +135,7 @@ fn test_engine_with_embedder_and_embedding_model(
                 revision: None,
             },
         },
-        embeddings: Some(EmbeddingConfig {
-            provider: EmbeddingProvider::OpenAiCompatible,
+        embeddings: Some(EmbeddingConfig::OpenAiCompatible {
             model: model.to_string(),
             base_url: "https://example.test/v1".to_string(),
             api_key_env: None,

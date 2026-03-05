@@ -26,8 +26,12 @@ const DEFAULT_CODE_CHUNK_BOUNDARY_OVERLAP_TOKENS: usize = 24;
 const DEFAULT_EMBEDDING_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 32;
 const DEFAULT_EMBEDDING_MAX_RETRIES: u32 = 2;
+const DEFAULT_LOCAL_EMBEDDING_MAX_LENGTH: usize = 512;
 const DEFAULT_INFERENCE_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_INFERENCE_MAX_RETRIES: u32 = 2;
+const DEFAULT_LOCAL_INFERENCE_MAX_TOKENS: usize = 256;
+const DEFAULT_LOCAL_INFERENCE_N_CTX: u32 = 2048;
+const DEFAULT_LOCAL_INFERENCE_N_GPU_LAYERS: u32 = 0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -42,26 +46,41 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EmbeddingConfig {
-    pub provider: EmbeddingProvider,
-    pub model: String,
-    pub base_url: String,
-    #[serde(default)]
-    pub api_key_env: Option<String>,
-    #[serde(default = "default_embedding_timeout_ms")]
-    pub timeout_ms: u64,
-    #[serde(default = "default_embedding_batch_size")]
-    pub batch_size: usize,
-    #[serde(default = "default_embedding_max_retries")]
-    pub max_retries: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EmbeddingProvider {
+#[serde(tag = "provider", rename_all = "snake_case")]
+pub enum EmbeddingConfig {
     #[serde(rename = "openai_compatible")]
-    OpenAiCompatible,
-    #[serde(rename = "voyage")]
-    Voyage,
+    OpenAiCompatible {
+        model: String,
+        base_url: String,
+        #[serde(default)]
+        api_key_env: Option<String>,
+        #[serde(default = "default_embedding_timeout_ms")]
+        timeout_ms: u64,
+        #[serde(default = "default_embedding_batch_size")]
+        batch_size: usize,
+        #[serde(default = "default_embedding_max_retries")]
+        max_retries: u32,
+    },
+    Voyage {
+        model: String,
+        base_url: String,
+        #[serde(default)]
+        api_key_env: Option<String>,
+        #[serde(default = "default_embedding_timeout_ms")]
+        timeout_ms: u64,
+        #[serde(default = "default_embedding_batch_size")]
+        batch_size: usize,
+        #[serde(default = "default_embedding_max_retries")]
+        max_retries: u32,
+    },
+    LocalOnnx {
+        #[serde(default)]
+        onnx_file: Option<String>,
+        #[serde(default)]
+        tokenizer_file: Option<String>,
+        #[serde(default = "default_local_embedding_max_length")]
+        max_length: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -74,22 +93,35 @@ pub struct InferenceConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextInferenceConfig {
+    #[serde(flatten)]
     pub provider: TextInferenceProvider,
-    pub output_mode: TextInferenceOutputMode,
-    pub model: String,
-    pub base_url: String,
-    #[serde(default)]
-    pub api_key_env: Option<String>,
-    #[serde(default = "default_inference_timeout_ms")]
-    pub timeout_ms: u64,
-    #[serde(default = "default_inference_max_retries")]
-    pub max_retries: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case")]
 pub enum TextInferenceProvider {
     #[serde(rename = "openai_compatible")]
-    OpenAiCompatible,
+    OpenAiCompatible {
+        output_mode: TextInferenceOutputMode,
+        model: String,
+        base_url: String,
+        #[serde(default)]
+        api_key_env: Option<String>,
+        #[serde(default = "default_inference_timeout_ms")]
+        timeout_ms: u64,
+        #[serde(default = "default_inference_max_retries")]
+        max_retries: u32,
+    },
+    LocalLlama {
+        #[serde(default)]
+        model_file: Option<String>,
+        #[serde(default = "default_local_inference_max_tokens")]
+        max_tokens: usize,
+        #[serde(default = "default_local_inference_n_ctx")]
+        n_ctx: u32,
+        #[serde(default = "default_local_inference_n_gpu_layers")]
+        n_gpu_layers: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,45 +344,98 @@ fn validate_embeddings(embeddings: Option<&EmbeddingConfig>) -> Result<()> {
         return Ok(());
     };
 
-    if embeddings.model.trim().is_empty() {
-        return Err(KboltError::Config("embeddings.model must not be empty".to_string()).into());
-    }
+    match embeddings {
+        EmbeddingConfig::OpenAiCompatible {
+            model,
+            base_url,
+            api_key_env,
+            timeout_ms,
+            batch_size,
+            ..
+        }
+        | EmbeddingConfig::Voyage {
+            model,
+            base_url,
+            api_key_env,
+            timeout_ms,
+            batch_size,
+            ..
+        } => {
+            if model.trim().is_empty() {
+                return Err(KboltError::Config("embeddings.model must not be empty".to_string()).into());
+            }
 
-    if embeddings.base_url.trim().is_empty() {
-        return Err(KboltError::Config("embeddings.base_url must not be empty".to_string()).into());
-    }
+            if base_url.trim().is_empty() {
+                return Err(
+                    KboltError::Config("embeddings.base_url must not be empty".to_string()).into(),
+                );
+            }
 
-    if !embeddings.base_url.starts_with("http://") && !embeddings.base_url.starts_with("https://") {
-        return Err(KboltError::Config(
-            "embeddings.base_url must start with http:// or https://".to_string(),
-        )
-        .into());
-    }
+            if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+                return Err(KboltError::Config(
+                    "embeddings.base_url must start with http:// or https://".to_string(),
+                )
+                .into());
+            }
 
-    if embeddings.timeout_ms == 0 {
-        return Err(KboltError::Config(
-            "embeddings.timeout_ms must be greater than zero".to_string(),
-        )
-        .into());
-    }
+            if *timeout_ms == 0 {
+                return Err(KboltError::Config(
+                    "embeddings.timeout_ms must be greater than zero".to_string(),
+                )
+                .into());
+            }
 
-    if embeddings.batch_size == 0 {
-        return Err(KboltError::Config(
-            "embeddings.batch_size must be greater than zero".to_string(),
-        )
-        .into());
-    }
+            if *batch_size == 0 {
+                return Err(KboltError::Config(
+                    "embeddings.batch_size must be greater than zero".to_string(),
+                )
+                .into());
+            }
 
-    if let Some(api_key_env) = embeddings.api_key_env.as_deref() {
-        if api_key_env.trim().is_empty() {
-            return Err(KboltError::Config(
-                "embeddings.api_key_env must not be empty when set".to_string(),
-            )
-            .into());
+            if let Some(api_key_env) = api_key_env.as_deref() {
+                if api_key_env.trim().is_empty() {
+                    return Err(KboltError::Config(
+                        "embeddings.api_key_env must not be empty when set".to_string(),
+                    )
+                    .into());
+                }
+            }
+
+            Ok(())
+        }
+        EmbeddingConfig::LocalOnnx {
+            onnx_file,
+            tokenizer_file,
+            max_length,
+        } => {
+            if *max_length == 0 {
+                return Err(KboltError::Config(
+                    "embeddings.max_length must be greater than zero".to_string(),
+                )
+                .into());
+            }
+
+            if let Some(onnx_file) = onnx_file {
+                if onnx_file.trim().is_empty() {
+                    return Err(KboltError::Config(
+                        "embeddings.onnx_file must not be empty when set".to_string(),
+                    )
+                    .into());
+                }
+            }
+
+            if let Some(tokenizer_file) = tokenizer_file {
+                if tokenizer_file.trim().is_empty() {
+                    return Err(KboltError::Config(
+                        "embeddings.tokenizer_file must not be empty when set".to_string(),
+                    )
+                    .into());
+                }
+            }
+
+            Ok(())
         }
     }
-
-    Ok(())
 }
 
 fn validate_inference(inference: &InferenceConfig) -> Result<()> {
@@ -364,37 +449,80 @@ fn validate_text_inference(scope: &str, config: Option<&TextInferenceConfig>) ->
         return Ok(());
     };
 
-    if config.model.trim().is_empty() {
-        return Err(KboltError::Config(format!("{scope}.model must not be empty")).into());
-    }
+    match &config.provider {
+        TextInferenceProvider::OpenAiCompatible {
+            model,
+            base_url,
+            api_key_env,
+            timeout_ms,
+            ..
+        } => {
+            if model.trim().is_empty() {
+                return Err(KboltError::Config(format!("{scope}.model must not be empty")).into());
+            }
 
-    if config.base_url.trim().is_empty() {
-        return Err(KboltError::Config(format!("{scope}.base_url must not be empty")).into());
-    }
+            if base_url.trim().is_empty() {
+                return Err(
+                    KboltError::Config(format!("{scope}.base_url must not be empty")).into(),
+                );
+            }
 
-    if !config.base_url.starts_with("http://") && !config.base_url.starts_with("https://") {
-        return Err(KboltError::Config(format!(
-            "{scope}.base_url must start with http:// or https://"
-        ))
-        .into());
-    }
+            if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+                return Err(KboltError::Config(format!(
+                    "{scope}.base_url must start with http:// or https://"
+                ))
+                .into());
+            }
 
-    if config.timeout_ms == 0 {
-        return Err(
-            KboltError::Config(format!("{scope}.timeout_ms must be greater than zero")).into(),
-        );
-    }
+            if *timeout_ms == 0 {
+                return Err(KboltError::Config(format!(
+                    "{scope}.timeout_ms must be greater than zero"
+                ))
+                .into());
+            }
 
-    if let Some(api_key_env) = config.api_key_env.as_deref() {
-        if api_key_env.trim().is_empty() {
-            return Err(KboltError::Config(format!(
-                "{scope}.api_key_env must not be empty when set"
-            ))
-            .into());
+            if let Some(api_key_env) = api_key_env.as_deref() {
+                if api_key_env.trim().is_empty() {
+                    return Err(KboltError::Config(format!(
+                        "{scope}.api_key_env must not be empty when set"
+                    ))
+                    .into());
+                }
+            }
+
+            Ok(())
+        }
+        TextInferenceProvider::LocalLlama {
+            model_file,
+            max_tokens,
+            n_ctx,
+            ..
+        } => {
+            if *max_tokens == 0 {
+                return Err(
+                    KboltError::Config(format!("{scope}.max_tokens must be greater than zero"))
+                        .into(),
+                );
+            }
+
+            if *n_ctx == 0 {
+                return Err(
+                    KboltError::Config(format!("{scope}.n_ctx must be greater than zero")).into(),
+                );
+            }
+
+            if let Some(model_file) = model_file {
+                if model_file.trim().is_empty() {
+                    return Err(KboltError::Config(format!(
+                        "{scope}.model_file must not be empty when set"
+                    ))
+                    .into());
+                }
+            }
+
+            Ok(())
         }
     }
-
-    Ok(())
 }
 
 fn validate_chunk_policy(scope: &str, policy: &ChunkPolicy) -> Result<()> {
@@ -548,12 +676,28 @@ fn default_embedding_max_retries() -> u32 {
     DEFAULT_EMBEDDING_MAX_RETRIES
 }
 
+fn default_local_embedding_max_length() -> usize {
+    DEFAULT_LOCAL_EMBEDDING_MAX_LENGTH
+}
+
 fn default_inference_timeout_ms() -> u64 {
     DEFAULT_INFERENCE_TIMEOUT_MS
 }
 
 fn default_inference_max_retries() -> u32 {
     DEFAULT_INFERENCE_MAX_RETRIES
+}
+
+fn default_local_inference_max_tokens() -> usize {
+    DEFAULT_LOCAL_INFERENCE_MAX_TOKENS
+}
+
+fn default_local_inference_n_ctx() -> u32 {
+    DEFAULT_LOCAL_INFERENCE_N_CTX
+}
+
+fn default_local_inference_n_gpu_layers() -> u32 {
+    DEFAULT_LOCAL_INFERENCE_N_GPU_LAYERS
 }
 
 #[cfg(test)]

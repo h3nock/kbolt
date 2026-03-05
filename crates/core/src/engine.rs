@@ -1653,7 +1653,11 @@ impl Engine {
         self.config
             .embeddings
             .as_ref()
-            .map(|config| config.model.as_str())
+            .and_then(|config| match config {
+                config::EmbeddingConfig::OpenAiCompatible { model, .. }
+                | config::EmbeddingConfig::Voyage { model, .. } => Some(model.as_str()),
+                config::EmbeddingConfig::LocalOnnx { .. } => None,
+            })
             .unwrap_or(self.config.models.embedder.id.as_str())
     }
 

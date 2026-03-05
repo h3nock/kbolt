@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::config::{
-    EmbeddingConfig, EmbeddingProvider, TextInferenceConfig, TextInferenceOutputMode,
+    EmbeddingConfig, TextInferenceConfig, TextInferenceOutputMode,
     TextInferenceProvider,
 };
 use crate::models::expander::HeuristicExpander;
@@ -165,18 +165,26 @@ struct ChatClient {
 }
 
 impl ChatClient {
-    fn new(config: &TextInferenceConfig, provider_name: &'static str) -> Self {
+    fn new(
+        base_url: &str,
+        api_key_env: Option<&str>,
+        timeout_ms: u64,
+        max_retries: u32,
+        model: &str,
+        output_mode: TextInferenceOutputMode,
+        provider_name: &'static str,
+    ) -> Self {
         Self {
             http: HttpJsonClient::new(
-                &config.base_url,
-                config.api_key_env.as_deref(),
-                config.timeout_ms,
-                config.max_retries,
+                base_url,
+                api_key_env,
+                timeout_ms,
+                max_retries,
                 "inference",
                 provider_name,
             ),
-            model: config.model.clone(),
-            output_mode: config.output_mode.clone(),
+            model: model.to_string(),
+            output_mode,
         }
     }
 
@@ -233,17 +241,52 @@ pub(crate) fn build_embedder(
         return Ok(None);
     };
 
-    let provider_name = match config.provider {
-        EmbeddingProvider::OpenAiCompatible => "openai_compatible",
-        EmbeddingProvider::Voyage => "voyage",
-    };
-    let model = config.model.clone();
-    let batch_size = config.batch_size;
+    let (provider_name, model, base_url, api_key_env, timeout_ms, max_retries, batch_size) =
+        match config {
+            EmbeddingConfig::OpenAiCompatible {
+                model,
+                base_url,
+                api_key_env,
+                timeout_ms,
+                max_retries,
+                batch_size,
+            } => (
+                "openai_compatible",
+                model.clone(),
+                base_url.as_str(),
+                api_key_env.as_deref(),
+                *timeout_ms,
+                *max_retries,
+                *batch_size,
+            ),
+            EmbeddingConfig::Voyage {
+                model,
+                base_url,
+                api_key_env,
+                timeout_ms,
+                max_retries,
+                batch_size,
+            } => (
+                "voyage",
+                model.clone(),
+                base_url.as_str(),
+                api_key_env.as_deref(),
+                *timeout_ms,
+                *max_retries,
+                *batch_size,
+            ),
+            EmbeddingConfig::LocalOnnx { .. } => {
+                return Err(
+                    KboltError::Inference("local_onnx embedder is not implemented yet".to_string())
+                        .into(),
+                )
+            }
+        };
     let client = HttpJsonClient::new(
-        &config.base_url,
-        config.api_key_env.as_deref(),
-        config.timeout_ms,
-        config.max_retries,
+        base_url,
+        api_key_env,
+        timeout_ms,
+        max_retries,
         "embedding",
         provider_name,
     );
@@ -257,10 +300,31 @@ pub(crate) fn build_embedder(
 
 pub(crate) fn build_reranker(config: Option<&TextInferenceConfig>) -> Result<Arc<dyn Reranker>> {
     let reranker: Arc<dyn Reranker> = match config {
-        Some(config) => match config.provider {
-            TextInferenceProvider::OpenAiCompatible => Arc::new(OpenAiCompatibleReranker {
-                chat: ChatClient::new(config, "openai_compatible"),
+        Some(config) => match &config.provider {
+            TextInferenceProvider::OpenAiCompatible {
+                output_mode,
+                model,
+                base_url,
+                api_key_env,
+                timeout_ms,
+                max_retries,
+            } => Arc::new(OpenAiCompatibleReranker {
+                chat: ChatClient::new(
+                    base_url,
+                    api_key_env.as_deref(),
+                    *timeout_ms,
+                    *max_retries,
+                    model,
+                    output_mode.clone(),
+                    "openai_compatible",
+                ),
             }),
+            TextInferenceProvider::LocalLlama { .. } => {
+                return Err(KboltError::Inference(
+                    "local_llama reranker is not implemented yet".to_string(),
+                )
+                .into())
+            }
         },
         None => Arc::new(HeuristicReranker),
     };
@@ -269,10 +333,31 @@ pub(crate) fn build_reranker(config: Option<&TextInferenceConfig>) -> Result<Arc
 
 pub(crate) fn build_expander(config: Option<&TextInferenceConfig>) -> Result<Arc<dyn Expander>> {
     let expander: Arc<dyn Expander> = match config {
-        Some(config) => match config.provider {
-            TextInferenceProvider::OpenAiCompatible => Arc::new(OpenAiCompatibleExpander {
-                chat: ChatClient::new(config, "openai_compatible"),
+        Some(config) => match &config.provider {
+            TextInferenceProvider::OpenAiCompatible {
+                output_mode,
+                model,
+                base_url,
+                api_key_env,
+                timeout_ms,
+                max_retries,
+            } => Arc::new(OpenAiCompatibleExpander {
+                chat: ChatClient::new(
+                    base_url,
+                    api_key_env.as_deref(),
+                    *timeout_ms,
+                    *max_retries,
+                    model,
+                    output_mode.clone(),
+                    "openai_compatible",
+                ),
             }),
+            TextInferenceProvider::LocalLlama { .. } => {
+                return Err(KboltError::Inference(
+                    "local_llama expander is not implemented yet".to_string(),
+                )
+                .into())
+            }
         },
         None => Arc::new(HeuristicExpander),
     };
@@ -601,9 +686,19 @@ mod tests {
 
     use super::*;
 
-    fn base_config(provider: EmbeddingProvider, base_url: String) -> EmbeddingConfig {
-        EmbeddingConfig {
-            provider,
+    fn base_openai_config(base_url: String) -> EmbeddingConfig {
+        EmbeddingConfig::OpenAiCompatible {
+            model: "embed-model".to_string(),
+            base_url,
+            api_key_env: None,
+            timeout_ms: 5_000,
+            batch_size: 64,
+            max_retries: 0,
+        }
+    }
+
+    fn base_voyage_config(base_url: String) -> EmbeddingConfig {
+        EmbeddingConfig::Voyage {
             model: "embed-model".to_string(),
             base_url,
             api_key_env: None,
@@ -618,13 +713,14 @@ mod tests {
         output_mode: TextInferenceOutputMode,
     ) -> TextInferenceConfig {
         TextInferenceConfig {
-            provider: TextInferenceProvider::OpenAiCompatible,
-            output_mode,
-            model: "text-model".to_string(),
-            base_url,
-            api_key_env: None,
-            timeout_ms: 5_000,
-            max_retries: 0,
+            provider: TextInferenceProvider::OpenAiCompatible {
+                output_mode,
+                model: "text-model".to_string(),
+                base_url,
+                api_key_env: None,
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
         }
     }
 
@@ -751,7 +847,7 @@ mod tests {
   ]
 }"#;
         let base_url = serve_once(200, body);
-        let config = base_config(EmbeddingProvider::OpenAiCompatible, base_url);
+        let config = base_openai_config(base_url);
         let embedder = build_embedder(Some(&config))
             .expect("build embedder")
             .expect("embedder should exist");
@@ -771,7 +867,7 @@ mod tests {
   ]
 }"#;
         let base_url = serve_once(200, body);
-        let config = base_config(EmbeddingProvider::OpenAiCompatible, base_url);
+        let config = base_openai_config(base_url);
         let embedder = build_embedder(Some(&config))
             .expect("build embedder")
             .expect("embedder should exist");
@@ -790,7 +886,7 @@ mod tests {
   ]
 }"#;
         let base_url = serve_once(200, body);
-        let config = base_config(EmbeddingProvider::OpenAiCompatible, base_url);
+        let config = base_openai_config(base_url);
         let embedder = build_embedder(Some(&config))
             .expect("build embedder")
             .expect("embedder should exist");
@@ -808,7 +904,7 @@ mod tests {
   ]
 }"#;
         let base_url = serve_once(200, body);
-        let config = base_config(EmbeddingProvider::Voyage, base_url);
+        let config = base_voyage_config(base_url);
         let embedder = build_embedder(Some(&config))
             .expect("build embedder")
             .expect("embedder should exist");
@@ -823,9 +919,13 @@ mod tests {
     fn embedder_errors_when_api_key_env_is_missing() {
         let body = r#"{"data":[{"index":0,"embedding":[0.1,0.2]}]}"#;
         let base_url = serve_once(200, body);
-        let config = EmbeddingConfig {
+        let config = EmbeddingConfig::OpenAiCompatible {
+            model: "embed-model".to_string(),
+            base_url,
             api_key_env: Some("KBOLT_TEST_MISSING_API_KEY".to_string()),
-            ..base_config(EmbeddingProvider::OpenAiCompatible, base_url)
+            timeout_ms: 5_000,
+            batch_size: 64,
+            max_retries: 0,
         };
         let embedder: Arc<dyn Embedder> = build_embedder(Some(&config))
             .expect("build embedder")
@@ -986,9 +1086,13 @@ mod tests {
                 retry_after: None,
             },
         ]);
-        let config = EmbeddingConfig {
+        let config = EmbeddingConfig::OpenAiCompatible {
+            model: "embed-model".to_string(),
+            base_url,
+            api_key_env: None,
+            timeout_ms: 5_000,
+            batch_size: 64,
             max_retries: 1,
-            ..base_config(EmbeddingProvider::OpenAiCompatible, base_url)
         };
         let embedder = build_embedder(Some(&config))
             .expect("build embedder")

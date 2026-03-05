@@ -139,8 +139,7 @@ contextual_prefix = true
     assert_eq!(config.models.expander.revision, None);
     assert_eq!(
         config.embeddings,
-        Some(EmbeddingConfig {
-            provider: EmbeddingProvider::OpenAiCompatible,
+        Some(EmbeddingConfig::OpenAiCompatible {
             model: "text-embedding-3-small".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key_env: Some("OPENAI_API_KEY".to_string()),
@@ -153,22 +152,24 @@ contextual_prefix = true
         config.inference,
         InferenceConfig {
             reranker: Some(TextInferenceConfig {
-                provider: TextInferenceProvider::OpenAiCompatible,
-                output_mode: TextInferenceOutputMode::JsonObject,
-                model: "rerank-1".to_string(),
-                base_url: "https://api.openai.com/v1".to_string(),
-                api_key_env: Some("OPENAI_API_KEY".to_string()),
-                timeout_ms: 18000,
-                max_retries: 1,
+                provider: TextInferenceProvider::OpenAiCompatible {
+                    output_mode: TextInferenceOutputMode::JsonObject,
+                    model: "rerank-1".to_string(),
+                    base_url: "https://api.openai.com/v1".to_string(),
+                    api_key_env: Some("OPENAI_API_KEY".to_string()),
+                    timeout_ms: 18000,
+                    max_retries: 1,
+                },
             }),
             expander: Some(TextInferenceConfig {
-                provider: TextInferenceProvider::OpenAiCompatible,
-                output_mode: TextInferenceOutputMode::JsonObject,
-                model: "expand-1".to_string(),
-                base_url: "https://api.openai.com/v1".to_string(),
-                api_key_env: Some("OPENAI_API_KEY".to_string()),
-                timeout_ms: 22000,
-                max_retries: 2,
+                provider: TextInferenceProvider::OpenAiCompatible {
+                    output_mode: TextInferenceOutputMode::JsonObject,
+                    model: "expand-1".to_string(),
+                    base_url: "https://api.openai.com/v1".to_string(),
+                    api_key_env: Some("OPENAI_API_KEY".to_string()),
+                    timeout_ms: 22000,
+                    max_retries: 2,
+                },
             }),
         }
     );
@@ -250,8 +251,7 @@ fn save_writes_index_toml() {
                 revision: None,
             },
         },
-        embeddings: Some(EmbeddingConfig {
-            provider: EmbeddingProvider::Voyage,
+        embeddings: Some(EmbeddingConfig::Voyage {
             model: "voyage-4-large".to_string(),
             base_url: "https://api.voyageai.com/v1".to_string(),
             api_key_env: Some("VOYAGE_API_KEY".to_string()),
@@ -261,22 +261,24 @@ fn save_writes_index_toml() {
         }),
         inference: InferenceConfig {
             reranker: Some(TextInferenceConfig {
-                provider: TextInferenceProvider::OpenAiCompatible,
-                output_mode: TextInferenceOutputMode::JsonObject,
-                model: "rerank-1".to_string(),
-                base_url: "https://api.openai.com/v1".to_string(),
-                api_key_env: Some("OPENAI_API_KEY".to_string()),
-                timeout_ms: 18000,
-                max_retries: 1,
+                provider: TextInferenceProvider::OpenAiCompatible {
+                    output_mode: TextInferenceOutputMode::JsonObject,
+                    model: "rerank-1".to_string(),
+                    base_url: "https://api.openai.com/v1".to_string(),
+                    api_key_env: Some("OPENAI_API_KEY".to_string()),
+                    timeout_ms: 18000,
+                    max_retries: 1,
+                },
             }),
             expander: Some(TextInferenceConfig {
-                provider: TextInferenceProvider::OpenAiCompatible,
-                output_mode: TextInferenceOutputMode::JsonObject,
-                model: "expand-1".to_string(),
-                base_url: "https://api.openai.com/v1".to_string(),
-                api_key_env: Some("OPENAI_API_KEY".to_string()),
-                timeout_ms: 22000,
-                max_retries: 2,
+                provider: TextInferenceProvider::OpenAiCompatible {
+                    output_mode: TextInferenceOutputMode::JsonObject,
+                    model: "expand-1".to_string(),
+                    base_url: "https://api.openai.com/v1".to_string(),
+                    api_key_env: Some("OPENAI_API_KEY".to_string()),
+                    timeout_ms: 22000,
+                    max_retries: 2,
+                },
             }),
         },
         reaping: ReapingConfig { days: 30 },
@@ -321,8 +323,7 @@ fn save_writes_index_toml() {
     assert_eq!(parsed.models.expander.revision, None);
     assert_eq!(
         parsed.embeddings,
-        Some(EmbeddingConfig {
-            provider: EmbeddingProvider::Voyage,
+        Some(EmbeddingConfig::Voyage {
             model: "voyage-4-large".to_string(),
             base_url: "https://api.voyageai.com/v1".to_string(),
             api_key_env: Some("VOYAGE_API_KEY".to_string()),
@@ -335,22 +336,24 @@ fn save_writes_index_toml() {
         parsed.inference,
         InferenceConfig {
             reranker: Some(TextInferenceConfig {
-                provider: TextInferenceProvider::OpenAiCompatible,
-                output_mode: TextInferenceOutputMode::JsonObject,
-                model: "rerank-1".to_string(),
-                base_url: "https://api.openai.com/v1".to_string(),
-                api_key_env: Some("OPENAI_API_KEY".to_string()),
-                timeout_ms: 18000,
-                max_retries: 1,
+                provider: TextInferenceProvider::OpenAiCompatible {
+                    output_mode: TextInferenceOutputMode::JsonObject,
+                    model: "rerank-1".to_string(),
+                    base_url: "https://api.openai.com/v1".to_string(),
+                    api_key_env: Some("OPENAI_API_KEY".to_string()),
+                    timeout_ms: 18000,
+                    max_retries: 1,
+                },
             }),
             expander: Some(TextInferenceConfig {
-                provider: TextInferenceProvider::OpenAiCompatible,
-                output_mode: TextInferenceOutputMode::JsonObject,
-                model: "expand-1".to_string(),
-                base_url: "https://api.openai.com/v1".to_string(),
-                api_key_env: Some("OPENAI_API_KEY".to_string()),
-                timeout_ms: 22000,
-                max_retries: 2,
+                provider: TextInferenceProvider::OpenAiCompatible {
+                    output_mode: TextInferenceOutputMode::JsonObject,
+                    model: "expand-1".to_string(),
+                    base_url: "https://api.openai.com/v1".to_string(),
+                    api_key_env: Some("OPENAI_API_KEY".to_string()),
+                    timeout_ms: 22000,
+                    max_retries: 2,
+                },
             }),
         }
     );
