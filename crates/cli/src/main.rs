@@ -1,10 +1,14 @@
 use clap::Parser;
-use kbolt_cli::args::{Cli, CollectionCommand, Command, IgnoreCommand, ModelsCommand, SpaceCommand};
+use kbolt_cli::args::{
+    Cli, CollectionCommand, Command, IgnoreCommand, ModelsCommand, SearchArgs, SpaceCommand,
+};
 use kbolt_cli::CliAdapter;
+use kbolt_core::error::CoreError;
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
 use kbolt_mcp::stdio;
 use kbolt_mcp::McpAdapter;
+use kbolt_types::KboltError;
 
 fn main() {
     if let Err(err) = run() {
@@ -144,19 +148,42 @@ fn run() -> Result<()> {
         },
         Command::Mcp => unreachable!("mcp command handled before adapter setup"),
         Command::Search(search) => {
-            let line = adapter.search(
-                cli.space.as_deref(),
-                &search.query,
-                &search.collections,
-                search.limit,
-                search.min_score,
-                search.deep,
-                search.keyword,
-                search.semantic,
-                search.no_rerank,
-                search.debug,
-            )?;
-            println!("{line}");
+            let requested_mode = requested_search_mode(&search);
+            let run_search = |deep: bool, keyword: bool, semantic: bool| {
+                adapter.search(
+                    cli.space.as_deref(),
+                    &search.query,
+                    &search.collections,
+                    search.limit,
+                    search.min_score,
+                    deep,
+                    keyword,
+                    semantic,
+                    search.no_rerank,
+                    search.debug,
+                )
+            };
+
+            match run_search(search.deep, search.keyword, search.semantic) {
+                Ok(line) => {
+                    println!("{line}");
+                }
+                Err(err) if is_model_not_available_error(&err) && stdin_stdout_are_tty() => {
+                    if prompt_pull_models()? {
+                        let pull_report = adapter.models_pull()?;
+                        println!("{pull_report}");
+                        let retried = run_search(search.deep, search.keyword, search.semantic)?;
+                        println!("{retried}");
+                    } else if requested_mode == RequestedSearchMode::Auto {
+                        println!("models unavailable; falling back to keyword mode");
+                        let fallback = run_search(false, true, false)?;
+                        println!("{fallback}");
+                    } else {
+                        return Err(err);
+                    }
+                }
+                Err(err) => return Err(err),
+            }
         }
         Command::Update(update) => {
             let line = adapter.update(
@@ -202,4 +229,121 @@ fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestedSearchMode {
+    Auto,
+    Deep,
+    Keyword,
+    Semantic,
+}
+
+fn requested_search_mode(search: &SearchArgs) -> RequestedSearchMode {
+    if search.deep {
+        RequestedSearchMode::Deep
+    } else if search.keyword {
+        RequestedSearchMode::Keyword
+    } else if search.semantic {
+        RequestedSearchMode::Semantic
+    } else {
+        RequestedSearchMode::Auto
+    }
+}
+
+fn is_model_not_available_error(err: &CoreError) -> bool {
+    matches!(err, CoreError::Domain(KboltError::ModelNotAvailable { .. }))
+}
+
+fn stdin_stdout_are_tty() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+fn prompt_pull_models() -> Result<bool> {
+    use std::io::Write;
+
+    print!("Models not downloaded. Download now and continue? (Y/n) ");
+    std::io::stdout().flush()?;
+
+    let mut response = String::new();
+    std::io::stdin().read_line(&mut response)?;
+    Ok(parse_pull_confirmation(&response))
+}
+
+fn parse_pull_confirmation(input: &str) -> bool {
+    let normalized = input.trim().to_ascii_lowercase();
+    normalized.is_empty() || normalized == "y" || normalized == "yes"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_model_not_available_error, parse_pull_confirmation, requested_search_mode,
+        RequestedSearchMode,
+    };
+    use kbolt_cli::args::SearchArgs;
+    use kbolt_core::error::CoreError;
+    use kbolt_types::KboltError;
+
+    fn search_args() -> SearchArgs {
+        SearchArgs {
+            query: "query".to_string(),
+            collections: Vec::new(),
+            limit: 10,
+            min_score: 0.0,
+            deep: false,
+            keyword: false,
+            semantic: false,
+            no_rerank: false,
+            debug: false,
+        }
+    }
+
+    #[test]
+    fn requested_search_mode_defaults_to_auto() {
+        let args = search_args();
+        assert_eq!(requested_search_mode(&args), RequestedSearchMode::Auto);
+    }
+
+    #[test]
+    fn requested_search_mode_respects_explicit_flags() {
+        let mut args = search_args();
+        args.deep = true;
+        assert_eq!(requested_search_mode(&args), RequestedSearchMode::Deep);
+
+        args.deep = false;
+        args.keyword = true;
+        assert_eq!(requested_search_mode(&args), RequestedSearchMode::Keyword);
+
+        args.keyword = false;
+        args.semantic = true;
+        assert_eq!(requested_search_mode(&args), RequestedSearchMode::Semantic);
+    }
+
+    #[test]
+    fn parse_pull_confirmation_accepts_default_yes_and_explicit_yes() {
+        assert!(parse_pull_confirmation(""));
+        assert!(parse_pull_confirmation("   "));
+        assert!(parse_pull_confirmation("y"));
+        assert!(parse_pull_confirmation("YES"));
+    }
+
+    #[test]
+    fn parse_pull_confirmation_rejects_non_yes_answers() {
+        assert!(!parse_pull_confirmation("n"));
+        assert!(!parse_pull_confirmation("no"));
+        assert!(!parse_pull_confirmation("anything else"));
+    }
+
+    #[test]
+    fn model_not_available_error_detection_is_specific() {
+        let missing = CoreError::Domain(KboltError::ModelNotAvailable {
+            name: "test-model".to_string(),
+        });
+        assert!(is_model_not_available_error(&missing));
+
+        let other = CoreError::Domain(KboltError::InvalidInput("bad input".to_string()));
+        assert!(!is_model_not_available_error(&other));
+    }
 }
