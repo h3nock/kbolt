@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+#[cfg(test)]
 use kbolt_types::KboltError;
 use kbolt_types::{ModelInfo, ModelStatus, PullReport};
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,7 @@ struct ModelTarget {
     source: ModelSourceConfig,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModelRole {
     Embedder,
@@ -41,6 +43,7 @@ pub(crate) enum ModelRole {
     Expander,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedModelArtifact {
     pub role: ModelRole,
@@ -71,6 +74,7 @@ impl ModelManifest {
     }
 }
 
+#[cfg(test)]
 impl ModelRole {
     fn role_dir(self) -> &'static str {
         match self {
@@ -194,6 +198,7 @@ pub fn status(config: &ModelConfig, model_dir: &Path) -> Result<ModelStatus> {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_model_artifact(
     config: &ModelConfig,
     model_dir: &Path,
