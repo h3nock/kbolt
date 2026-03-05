@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::Result;
+use crate::models::text::tokenize_terms;
 
 pub(crate) trait Expander: Send + Sync {
     fn expand(&self, query: &str) -> Result<Vec<String>>;
@@ -36,19 +37,6 @@ impl Expander for HeuristicExpander {
 
         Ok(variants)
     }
-}
-
-fn tokenize_terms(text: &str) -> Vec<String> {
-    text.split(|ch: char| !ch.is_alphanumeric())
-        .filter_map(|term| {
-            let lowered = term.trim().to_ascii_lowercase();
-            if lowered.is_empty() {
-                None
-            } else {
-                Some(lowered)
-            }
-        })
-        .collect::<Vec<_>>()
 }
 
 #[cfg(test)]

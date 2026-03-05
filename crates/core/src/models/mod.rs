@@ -14,6 +14,7 @@ mod inference;
 mod provider;
 mod providers;
 mod reranker;
+mod text;
 
 const MODEL_DIRNAME_EMBEDDER: &str = "embedder";
 const MODEL_DIRNAME_RERANKER: &str = "reranker";
