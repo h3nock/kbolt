@@ -11,6 +11,7 @@ use crate::Result;
 mod artifacts;
 mod embedder;
 mod expander;
+mod http;
 mod inference;
 mod provider;
 mod providers;
