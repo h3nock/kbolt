@@ -106,3 +106,68 @@ where
     results.sort();
     Ok(results)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{resolve_file_with_extension, resolve_tokenizer_file};
+
+    fn write_file(path: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent directories");
+        }
+        fs::write(path, b"fixture").expect("write fixture file");
+    }
+
+    use std::path::Path;
+
+    #[test]
+    fn resolve_file_with_extension_returns_single_match() {
+        let root = tempdir().expect("create tempdir");
+        let model = root.path().join("model.onnx");
+        write_file(&model);
+
+        let resolved = resolve_file_with_extension(root.path(), None, "onnx", "embeddings.onnx_file")
+            .expect("resolve .onnx file");
+        assert_eq!(resolved, model);
+    }
+
+    #[test]
+    fn resolve_file_with_extension_errors_on_ambiguous_match() {
+        let root = tempdir().expect("create tempdir");
+        write_file(&root.path().join("a/model.onnx"));
+        write_file(&root.path().join("b/model.onnx"));
+
+        let err = resolve_file_with_extension(root.path(), None, "onnx", "embeddings.onnx_file")
+            .expect_err("ambiguous .onnx files should error");
+        assert!(err.to_string().contains("multiple .onnx artifacts found"));
+    }
+
+    #[test]
+    fn resolve_file_with_extension_uses_configured_override() {
+        let root = tempdir().expect("create tempdir");
+        write_file(&root.path().join("a/model.onnx"));
+        let preferred = root.path().join("b/preferred.onnx");
+        write_file(&preferred);
+
+        let resolved = resolve_file_with_extension(
+            root.path(),
+            Some("b/preferred.onnx"),
+            "onnx",
+            "embeddings.onnx_file",
+        )
+        .expect("resolve configured onnx file");
+        assert_eq!(resolved, preferred);
+    }
+
+    #[test]
+    fn resolve_tokenizer_file_errors_when_missing() {
+        let root = tempdir().expect("create tempdir");
+        let err = resolve_tokenizer_file(root.path(), None, "embeddings.tokenizer_file")
+            .expect_err("missing tokenizer should error");
+        assert!(err.to_string().contains("missing tokenizer.json"));
+    }
+}
