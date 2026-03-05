@@ -1019,8 +1019,11 @@ pub struct PullReport {
 Model download is delegated through a provider abstraction (for example, HuggingFace, local filesystem mirrors, or cloud object storage). The core model module must not hardcode provider-specific assumptions in orchestration logic.
 
 Embedding inference provider scope is separate from model artifact download:
-- V1 providers: `openai_compatible`, `voyage`
+- V1 providers: `openai_compatible`, `voyage`, `local_onnx`
 - V2 consideration: native Google embeddings provider (keep out of V1 unless native-only controls are required)
+
+Text inference providers for reranker/expander are configured per role:
+- V1 providers: `openai_compatible`, `local_llama`
 
 ---
 
@@ -1719,13 +1722,27 @@ provider = "huggingface"
 id = "Qwen/Qwen3-1.7B-q4"
 
 [embeddings]
-provider = "openai_compatible"   # V1: openai_compatible | voyage
+provider = "openai_compatible"   # V1: openai_compatible | voyage | local_onnx
 model = "text-embedding-3-small"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 timeout_ms = 30000
 batch_size = 32
 max_retries = 2
+
+[inference.reranker]
+provider = "local_llama"         # V1: openai_compatible | local_llama
+max_tokens = 256
+n_ctx = 2048
+n_gpu_layers = 0
+# model_file = "qwen-reranker.gguf"  # optional when multiple gguf files exist
+
+[inference.expander]
+provider = "local_llama"
+max_tokens = 256
+n_ctx = 2048
+n_gpu_layers = 0
+# model_file = "qwen-expander.gguf"
 
 [reaping]
 days = 7    # hard-delete documents deactivated longer than this
@@ -1752,6 +1769,8 @@ Collection-level chunking overrides are deferred in V1. When implemented, they w
 Notes:
 - Google embedding access through OpenAI-compatible endpoints is covered by `provider = "openai_compatible"` with the corresponding Google-compatible base URL.
 - Native Google embeddings API support is intentionally deferred to V2.
+- `provider = "local_onnx"` loads ONNX + tokenizer artifacts from `~/.cache/kbolt/models/embedder` (or explicit `onnx_file` / `tokenizer_file`).
+- `provider = "local_llama"` loads GGUF artifacts from role directories (`reranker` / `expander`) and fails fast when artifact selection is ambiguous.
 
 ---
 
