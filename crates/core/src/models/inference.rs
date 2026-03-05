@@ -1,5 +1,5 @@
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use kbolt_types::KboltError;
 use serde::Deserialize;
@@ -41,6 +41,24 @@ struct ChatBackedExpander {
     chat: Arc<dyn CompletionClient>,
 }
 
+struct LazyLocalOnnxEmbedder {
+    runtime: LocalRuntimeContext,
+    onnx_file: Option<String>,
+    tokenizer_file: Option<String>,
+    max_length: usize,
+    initialized: Mutex<Option<Arc<dyn Embedder>>>,
+}
+
+struct LazyLocalLlamaCompletionClient {
+    runtime: LocalRuntimeContext,
+    role: ModelRole,
+    model_file: Option<String>,
+    max_tokens: usize,
+    n_ctx: u32,
+    n_gpu_layers: u32,
+    initialized: Mutex<Option<Arc<dyn CompletionClient>>>,
+}
+
 #[cfg(test)]
 pub(crate) fn build_embedder(
     config: Option<&EmbeddingConfig>,
@@ -55,10 +73,7 @@ pub(crate) fn build_embedder_with_local_runtime(
 ) -> Result<Option<Arc<dyn Embedder>>> {
     build_embedder_inner(
         config,
-        Some(LocalRuntimeContext {
-            model_config,
-            model_dir,
-        }),
+        Some(LocalRuntimeContext::new(model_config, model_dir)),
     )
 }
 
@@ -74,10 +89,7 @@ pub(crate) fn build_reranker_with_local_runtime(
 ) -> Result<Arc<dyn Reranker>> {
     build_reranker_inner(
         config,
-        Some(LocalRuntimeContext {
-            model_config,
-            model_dir,
-        }),
+        Some(LocalRuntimeContext::new(model_config, model_dir)),
     )
 }
 
@@ -93,22 +105,28 @@ pub(crate) fn build_expander_with_local_runtime(
 ) -> Result<Arc<dyn Expander>> {
     build_expander_inner(
         config,
-        Some(LocalRuntimeContext {
-            model_config,
-            model_dir,
-        }),
+        Some(LocalRuntimeContext::new(model_config, model_dir)),
     )
 }
 
-#[derive(Clone, Copy)]
-struct LocalRuntimeContext<'a> {
-    model_config: &'a ModelConfig,
-    model_dir: &'a Path,
+#[derive(Debug, Clone)]
+struct LocalRuntimeContext {
+    model_config: ModelConfig,
+    model_dir: PathBuf,
+}
+
+impl LocalRuntimeContext {
+    fn new(model_config: &ModelConfig, model_dir: &Path) -> Self {
+        Self {
+            model_config: model_config.clone(),
+            model_dir: model_dir.to_path_buf(),
+        }
+    }
 }
 
 fn build_embedder_inner(
     config: Option<&EmbeddingConfig>,
-    local_runtime: Option<LocalRuntimeContext<'_>>,
+    local_runtime: Option<LocalRuntimeContext>,
 ) -> Result<Option<Arc<dyn Embedder>>> {
     let Some(config) = config else {
         return Ok(None);
@@ -158,15 +176,14 @@ fn build_embedder_inner(
                         "local_onnx embedder requires local runtime context".to_string(),
                     )
                 })?;
-                let artifact =
-                    resolve_model_artifact(runtime.model_config, runtime.model_dir, ModelRole::Embedder)?;
-                let embedder = build_local_onnx_embedder(
-                    &artifact.path,
-                    onnx_file.as_deref(),
-                    tokenizer_file.as_deref(),
-                    *max_length,
-                )?;
-                return Ok(Some(Arc::new(embedder)));
+                let embedder: Arc<dyn Embedder> = Arc::new(LazyLocalOnnxEmbedder {
+                    runtime,
+                    onnx_file: onnx_file.clone(),
+                    tokenizer_file: tokenizer_file.clone(),
+                    max_length: *max_length,
+                    initialized: Mutex::new(None),
+                });
+                return Ok(Some(embedder));
             }
         };
     let client = HttpJsonClient::new(
@@ -187,7 +204,7 @@ fn build_embedder_inner(
 
 fn build_reranker_inner(
     config: Option<&TextInferenceConfig>,
-    local_runtime: Option<LocalRuntimeContext<'_>>,
+    local_runtime: Option<LocalRuntimeContext>,
 ) -> Result<Arc<dyn Reranker>> {
     let reranker: Arc<dyn Reranker> = match config {
         Some(config) => Arc::new(ChatBackedReranker {
@@ -205,7 +222,7 @@ fn build_reranker_inner(
 
 fn build_expander_inner(
     config: Option<&TextInferenceConfig>,
-    local_runtime: Option<LocalRuntimeContext<'_>>,
+    local_runtime: Option<LocalRuntimeContext>,
 ) -> Result<Arc<dyn Expander>> {
     let expander: Arc<dyn Expander> = match config {
         Some(config) => Arc::new(ChatBackedExpander {
@@ -223,7 +240,7 @@ fn build_expander_inner(
 
 fn build_completion_client_for_role(
     provider: &TextInferenceProvider,
-    local_runtime: Option<LocalRuntimeContext<'_>>,
+    local_runtime: Option<LocalRuntimeContext>,
     role: ModelRole,
     role_label: &str,
 ) -> Result<Arc<dyn CompletionClient>> {
@@ -255,14 +272,15 @@ fn build_completion_client_for_role(
                     "local_llama {role_label} requires local runtime context"
                 ))
             })?;
-            build_local_llama_client(
+            Ok(Arc::new(LazyLocalLlamaCompletionClient {
                 runtime,
                 role,
-                model_file.as_deref(),
-                *max_tokens,
-                *n_ctx,
-                *n_gpu_layers,
-            )
+                model_file: model_file.clone(),
+                max_tokens: *max_tokens,
+                n_ctx: *n_ctx,
+                n_gpu_layers: *n_gpu_layers,
+                initialized: Mutex::new(None),
+            }))
         }
     }
 }
@@ -270,6 +288,88 @@ fn build_completion_client_for_role(
 impl Embedder for HttpApiEmbedder {
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         embed_with_http_api(&self.client, &self.model, self.batch_size, texts)
+    }
+}
+
+impl Embedder for LazyLocalOnnxEmbedder {
+    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let embedder = self.ensure_embedder()?;
+        embedder.embed_batch(texts)
+    }
+}
+
+impl CompletionClient for LazyLocalLlamaCompletionClient {
+    fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
+        let client = self.ensure_client()?;
+        client.complete(system_prompt, user_prompt)
+    }
+}
+
+impl LazyLocalOnnxEmbedder {
+    fn ensure_embedder(&self) -> Result<Arc<dyn Embedder>> {
+        {
+            let guard = self.initialized.lock().map_err(|_| {
+                KboltError::Inference("local onnx embedder mutex poisoned".to_string())
+            })?;
+            if let Some(embedder) = guard.as_ref() {
+                return Ok(embedder.clone());
+            }
+        }
+
+        let artifact = resolve_model_artifact(
+            &self.runtime.model_config,
+            &self.runtime.model_dir,
+            ModelRole::Embedder,
+        )?;
+        let embedder = build_local_onnx_embedder(
+            &artifact.path,
+            self.onnx_file.as_deref(),
+            self.tokenizer_file.as_deref(),
+            self.max_length,
+        )?;
+        let built: Arc<dyn Embedder> = Arc::new(embedder);
+
+        let mut guard = self
+            .initialized
+            .lock()
+            .map_err(|_| KboltError::Inference("local onnx embedder mutex poisoned".to_string()))?;
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+        *guard = Some(built.clone());
+        Ok(built)
+    }
+}
+
+impl LazyLocalLlamaCompletionClient {
+    fn ensure_client(&self) -> Result<Arc<dyn CompletionClient>> {
+        {
+            let guard = self.initialized.lock().map_err(|_| {
+                KboltError::Inference("local llama client mutex poisoned".to_string())
+            })?;
+            if let Some(client) = guard.as_ref() {
+                return Ok(client.clone());
+            }
+        }
+
+        let built = build_local_llama_client(
+            &self.runtime.model_config,
+            &self.runtime.model_dir,
+            self.role,
+            self.model_file.as_deref(),
+            self.max_tokens,
+            self.n_ctx,
+            self.n_gpu_layers,
+        )?;
+        let mut guard = self
+            .initialized
+            .lock()
+            .map_err(|_| KboltError::Inference("local llama client mutex poisoned".to_string()))?;
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+        *guard = Some(built.clone());
+        Ok(built)
     }
 }
 
@@ -366,16 +466,30 @@ fn embed_with_http_api(
 }
 
 fn build_local_llama_client(
-    runtime: LocalRuntimeContext<'_>,
+    model_config: &ModelConfig,
+    model_dir: &Path,
     role: ModelRole,
     model_file: Option<&str>,
     max_tokens: usize,
     n_ctx: u32,
     n_gpu_layers: u32,
 ) -> Result<Arc<dyn CompletionClient>> {
-    let artifact = resolve_model_artifact(runtime.model_config, runtime.model_dir, role)?;
-    let gguf_path = resolve_file_with_extension(&artifact.path, model_file, "gguf", "model_file")?;
+    let artifact = resolve_model_artifact(model_config, model_dir, role)?;
+    let gguf_path = resolve_file_with_extension(
+        &artifact.path,
+        model_file,
+        "gguf",
+        local_llama_model_field(role),
+    )?;
     build_local_llama_completion_client(&gguf_path, max_tokens, n_ctx, n_gpu_layers)
+}
+
+fn local_llama_model_field(role: ModelRole) -> &'static str {
+    match role {
+        ModelRole::Reranker => "inference.reranker.model_file",
+        ModelRole::Expander => "inference.expander.model_file",
+        ModelRole::Embedder => "inference.model_file",
+    }
 }
 
 fn parse_json_payload<T>(label: &str, content: &str) -> Result<T>
@@ -505,6 +619,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use tempfile::tempdir;
+
     use super::*;
 
     fn base_openai_config(base_url: String) -> EmbeddingConfig {
@@ -552,6 +668,26 @@ mod tests {
                 max_tokens: 128,
                 n_ctx: 2048,
                 n_gpu_layers: 0,
+            },
+        }
+    }
+
+    fn test_model_config() -> ModelConfig {
+        ModelConfig {
+            embedder: crate::config::ModelSourceConfig {
+                provider: crate::config::ModelProvider::HuggingFace,
+                id: "embed-model".to_string(),
+                revision: None,
+            },
+            reranker: crate::config::ModelSourceConfig {
+                provider: crate::config::ModelProvider::HuggingFace,
+                id: "rerank-model".to_string(),
+                revision: None,
+            },
+            expander: crate::config::ModelSourceConfig {
+                provider: crate::config::ModelProvider::HuggingFace,
+                id: "expand-model".to_string(),
+                revision: None,
             },
         }
     }
@@ -789,6 +925,25 @@ mod tests {
     }
 
     #[test]
+    fn local_onnx_embedder_initializes_lazily() {
+        let root = tempdir().expect("create tempdir");
+        let model_config = test_model_config();
+        let config = EmbeddingConfig::LocalOnnx {
+            onnx_file: None,
+            tokenizer_file: None,
+            max_length: 256,
+        };
+
+        let embedder = build_embedder_with_local_runtime(Some(&config), &model_config, root.path())
+            .expect("build embedder")
+            .expect("embedder should exist");
+        let err = embedder
+            .embed_batch(&["a".to_string()])
+            .expect_err("missing local model should fail on first use");
+        assert!(err.to_string().contains("model not available"));
+    }
+
+    #[test]
     fn build_reranker_uses_heuristic_when_inference_config_is_missing() {
         let reranker = build_reranker(None).expect("build reranker");
         let scores = reranker
@@ -814,6 +969,21 @@ mod tests {
         assert!(err
             .to_string()
             .contains("local_llama reranker requires local runtime context"));
+    }
+
+    #[test]
+    fn local_llama_reranker_initializes_lazily() {
+        let root = tempdir().expect("create tempdir");
+        let model_config = test_model_config();
+        let config = base_local_llama_text_config();
+
+        let reranker =
+            build_reranker_with_local_runtime(Some(&config), &model_config, root.path())
+                .expect("build reranker");
+        let err = reranker
+            .rerank("query", &["doc".to_string()])
+            .expect_err("missing local model should fail on first use");
+        assert!(err.to_string().contains("model not available"));
     }
 
     #[test]
