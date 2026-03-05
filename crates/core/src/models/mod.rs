@@ -16,6 +16,7 @@ mod expander;
 mod http;
 mod inference;
 mod local_llama;
+mod local_onnx;
 mod provider;
 mod providers;
 mod reranker;
