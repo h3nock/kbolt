@@ -526,6 +526,7 @@ kbolt search {query} --space {name} --deep
 kbolt search {query} --space {name} --collection {name} --deep
 kbolt search {query} --keyword
 kbolt search {query} --semantic
+kbolt search {query} --rerank
 kbolt search {query} --no-rerank
 ```
 
@@ -537,9 +538,10 @@ kbolt search {query} --no-rerank
 - **--deep** (optional) — query expansion + all signals + reranking
 - **--keyword** (optional) — BM25 only (diagnostic)
 - **--semantic** (optional) — dense vector only (diagnostic)
+- **--rerank** (optional) — enable cross-encoder reranking in auto mode
 - **--no-rerank** (optional) — disable cross-encoder reranking (diagnostic)
 
-Default behavior (no mode flag): auto mode — the system analyzes the query and routes to appropriate signals (BM25, dense, reranker) based on query characteristics.
+Default behavior (no mode flag): auto mode — the system analyzes the query and routes to hybrid BM25+dense retrieval, with reranking off by default for speed. Use `--rerank` to opt in.
 
 **Cross-space search**: When searching without `--space`, each space's Tantivy and USearch indexes are queried independently. Candidate lists from all spaces are concatenated, then fused and reranked together. The cross-encoder reranker normalizes scores across spaces.
 

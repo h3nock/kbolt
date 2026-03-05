@@ -1501,7 +1501,7 @@ Decides which retrieval signals to activate based on query characteristics:
 | Natural question (`how does X work?`) | yes | yes | yes |
 | File filter only (`file:*.rs`) | yes | no | no |
 
-Rule-based (no LLM). `--no-rerank` flag skips reranker. `--keyword` forces BM25-only. `--semantic` forces dense-only.
+Rule-based (no LLM). Auto mode defaults to BM25+dense with reranker off for speed; `--rerank` opts in. `--no-rerank` forces reranker off. `--keyword` forces BM25-only. `--semantic` forces dense-only.
 
 ### Stage 3: Query Expansion (--deep only)
 
@@ -1662,6 +1662,7 @@ SEARCH (one command, mode flags)
     -d, --deep                     Expand query + multi-variant + rerank
     -k, --keyword                  BM25 only
     --semantic                     Dense vector only
+    --rerank                       Enable reranking in auto mode
     --no-rerank                    Skip reranking
     --debug                        Include per-signal scores in results
     -c, --collection <name,...>    Scope to one or more collections (comma-separated)
