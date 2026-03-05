@@ -17,6 +17,7 @@ Add a dedicated inference config namespace with per-role settings:
 ```toml
 [inference.reranker]
 provider = "openai_compatible"
+output_mode = "json_object"
 model = "rerank-model"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
@@ -25,6 +26,7 @@ max_retries = 2
 
 [inference.expander]
 provider = "openai_compatible"
+output_mode = "json_object"
 model = "expand-model"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
@@ -34,6 +36,7 @@ max_retries = 2
 
 Validation rules match embedding config expectations:
 - non-empty `model`
+- explicit `output_mode` (`json_object` or `text`)
 - `base_url` must be `http://` or `https://`
 - `timeout_ms > 0`
 - `api_key_env` must be non-empty when set
