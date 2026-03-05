@@ -18,6 +18,7 @@ mod embedder;
 mod expander;
 mod http;
 mod inference;
+mod local_gguf;
 mod local_llama;
 mod local_onnx;
 mod provider;

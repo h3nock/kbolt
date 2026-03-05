@@ -11,6 +11,7 @@ use crate::models::chat::HttpChatClient;
 use crate::models::completion::CompletionClient;
 use crate::models::expander::HeuristicExpander;
 use crate::models::http::{HttpJsonClient, HttpOperation};
+use crate::models::local_gguf::build_local_gguf_embedder;
 use crate::models::local_llama::build_local_llama_completion_client;
 use crate::models::local_onnx::build_local_onnx_embedder;
 use crate::models::reranker::HeuristicReranker;
@@ -46,6 +47,15 @@ struct LazyLocalOnnxEmbedder {
     onnx_file: Option<String>,
     tokenizer_file: Option<String>,
     max_length: usize,
+    initialized: Mutex<Option<Arc<dyn Embedder>>>,
+}
+
+struct LazyLocalGgufEmbedder {
+    runtime: LocalRuntimeContext,
+    model_file: Option<String>,
+    batch_size: usize,
+    n_threads: Option<u32>,
+    n_threads_batch: Option<u32>,
     initialized: Mutex<Option<Arc<dyn Embedder>>>,
 }
 
@@ -185,11 +195,26 @@ fn build_embedder_inner(
                 });
                 return Ok(Some(embedder));
             }
-            EmbeddingConfig::LocalGguf { .. } => {
-                return Err(KboltError::Inference(
-                    "local_gguf embedder is configured but not yet implemented".to_string(),
-                )
-                .into());
+            EmbeddingConfig::LocalGguf {
+                model_file,
+                batch_size,
+                n_threads,
+                n_threads_batch,
+            } => {
+                let runtime = local_runtime.ok_or_else(|| {
+                    KboltError::Inference(
+                        "local_gguf embedder requires local runtime context".to_string(),
+                    )
+                })?;
+                let embedder: Arc<dyn Embedder> = Arc::new(LazyLocalGgufEmbedder {
+                    runtime,
+                    model_file: model_file.clone(),
+                    batch_size: *batch_size,
+                    n_threads: *n_threads,
+                    n_threads_batch: *n_threads_batch,
+                    initialized: Mutex::new(None),
+                });
+                return Ok(Some(embedder));
             }
         };
     let client = HttpJsonClient::new(
@@ -304,6 +329,13 @@ impl Embedder for LazyLocalOnnxEmbedder {
     }
 }
 
+impl Embedder for LazyLocalGgufEmbedder {
+    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let embedder = self.ensure_embedder()?;
+        embedder.embed_batch(texts)
+    }
+}
+
 impl CompletionClient for LazyLocalLlamaCompletionClient {
     fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
         let client = self.ensure_client()?;
@@ -339,6 +371,37 @@ impl LazyLocalOnnxEmbedder {
             .initialized
             .lock()
             .map_err(|_| KboltError::Inference("local onnx embedder mutex poisoned".to_string()))?;
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+        *guard = Some(built.clone());
+        Ok(built)
+    }
+}
+
+impl LazyLocalGgufEmbedder {
+    fn ensure_embedder(&self) -> Result<Arc<dyn Embedder>> {
+        {
+            let guard = self.initialized.lock().map_err(|_| {
+                KboltError::Inference("local gguf embedder mutex poisoned".to_string())
+            })?;
+            if let Some(embedder) = guard.as_ref() {
+                return Ok(embedder.clone());
+            }
+        }
+
+        let built = build_local_gguf_embedder_with_runtime(
+            &self.runtime.model_config,
+            &self.runtime.model_dir,
+            self.model_file.as_deref(),
+            self.batch_size,
+            self.n_threads,
+            self.n_threads_batch,
+        )?;
+        let mut guard = self
+            .initialized
+            .lock()
+            .map_err(|_| KboltError::Inference("local gguf embedder mutex poisoned".to_string()))?;
         if let Some(existing) = guard.as_ref() {
             return Ok(existing.clone());
         }
@@ -469,6 +532,26 @@ fn embed_with_http_api(
         vectors.extend(response_vectors);
     }
     Ok(vectors)
+}
+
+fn build_local_gguf_embedder_with_runtime(
+    model_config: &ModelConfig,
+    model_dir: &Path,
+    model_file: Option<&str>,
+    batch_size: usize,
+    n_threads: Option<u32>,
+    n_threads_batch: Option<u32>,
+) -> Result<Arc<dyn Embedder>> {
+    let artifact = resolve_model_artifact(model_config, model_dir, ModelRole::Embedder)?;
+    let gguf_path =
+        resolve_file_with_extension(&artifact.path, model_file, "gguf", "embeddings.model_file")?;
+    let embedder = build_local_gguf_embedder(
+        &gguf_path,
+        batch_size,
+        n_threads,
+        n_threads_batch,
+    )?;
+    Ok(Arc::new(embedder))
 }
 
 fn build_local_llama_client(
@@ -675,6 +758,15 @@ mod tests {
                 n_ctx: 2048,
                 n_gpu_layers: 0,
             },
+        }
+    }
+
+    fn base_local_gguf_embedding_config() -> EmbeddingConfig {
+        EmbeddingConfig::LocalGguf {
+            model_file: None,
+            batch_size: 4,
+            n_threads: Some(4),
+            n_threads_batch: Some(4),
         }
     }
 
@@ -939,6 +1031,33 @@ mod tests {
             tokenizer_file: None,
             max_length: 256,
         };
+
+        let embedder = build_embedder_with_local_runtime(Some(&config), &model_config, root.path())
+            .expect("build embedder")
+            .expect("embedder should exist");
+        let err = embedder
+            .embed_batch(&["a".to_string()])
+            .expect_err("missing local model should fail on first use");
+        assert!(err.to_string().contains("model not available"));
+    }
+
+    #[test]
+    fn local_gguf_embedder_requires_local_runtime_context() {
+        let config = base_local_gguf_embedding_config();
+        let err = match build_embedder(Some(&config)) {
+            Ok(_) => panic!("local runtime context should be required"),
+            Err(err) => err,
+        };
+        assert!(err
+            .to_string()
+            .contains("local_gguf embedder requires local runtime context"));
+    }
+
+    #[test]
+    fn local_gguf_embedder_initializes_lazily() {
+        let root = tempfile::tempdir().expect("create tempdir");
+        let model_config = test_model_config();
+        let config = base_local_gguf_embedding_config();
 
         let embedder = build_embedder_with_local_runtime(Some(&config), &model_config, root.path())
             .expect("build embedder")
