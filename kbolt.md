@@ -220,10 +220,20 @@ core/
     ignore.rs            # ignore pattern parsing, hardcoded ignores, extension filtering
 
   models/
-    mod.rs               # Models struct — facade, lazy loading, public API (embed/rerank/generate)
-    embedder.rs          # Embedder trait + OnnxEmbedder implementation
-    reranker.rs          # Reranker trait + GgufReranker implementation
-    generator.rs         # Generator trait + GgufGenerator implementation
+    mod.rs               # model orchestration (pull/status/resolve), role wiring entry points
+    provider.rs          # model artifact provider trait
+    providers/hf.rs      # HuggingFace artifact download adapter
+    embedder.rs          # Embedder trait
+    reranker.rs          # Reranker trait + heuristic fallback
+    expander.rs          # Expander trait + heuristic fallback
+    inference.rs         # provider wiring and role implementations
+    http.rs              # shared HTTP transport/retry behavior
+    chat.rs              # chat completion client + request/response shaping
+    completion.rs        # shared completion client contract
+    local_onnx.rs        # local ONNX embedder runtime
+    local_llama.rs       # local llama completion runtime
+    artifacts.rs         # model artifact file discovery helpers
+    text.rs              # shared text normalization helpers
 
   config/
     mod.rs               # Config struct, TOML loading/saving (models, reaping, chunking policy)
@@ -317,19 +327,7 @@ Search and ingest don't manage locks — they call `storage.query_bm25(space, ..
 
 ### Models (facade, owns lifecycle)
 
-Models is a facade that hides all ML complexity from the rest of the system. Engine calls `models.embed()`, `models.rerank()`, `models.generate()` without knowing about ONNX, llama-cpp, HuggingFace downloads, or thread-safety wrappers.
-
-```rust
-pub struct Models {
-    embedder: Option<Arc<dyn Embedder>>,       // None until first use, ONNX: thread-safe
-    reranker: Option<Mutex<dyn Reranker>>,     // None until first use, llama-cpp: NOT thread-safe
-    generator: Option<Mutex<dyn Generator>>,   // None until first use, llama-cpp: NOT thread-safe
-    config: ModelConfig,
-    model_dir: PathBuf,
-}
-```
-
-Models are loaded lazily on first use and stay loaded for the lifetime of the process. In V1 (single process), this means models are freed when the process exits. MCP sessions keep models warm naturally.
+Models hides inference/runtime details behind role interfaces. Engine owns role instances (`Embedder`, `Reranker`, `Expander`) and builds them from config at construction. Provider-specific transport/runtime concerns (HTTP, ONNX Runtime, llama-cpp) stay inside `models/` implementation modules.
 
 Three separate traits — each defines its own contract because they share nothing in common (different inputs, outputs, runtimes, thread-safety):
 
@@ -347,6 +345,10 @@ pub trait Embedder: Send + Sync {
 
 pub trait Reranker: Send + Sync {
     fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<f32>>;
+}
+
+pub trait Expander: Send + Sync {
+    fn expand(&self, query: &str) -> Result<Vec<String>>;
 }
 
 pub trait Generator: Send + Sync {
@@ -985,36 +987,14 @@ pub fn save(config: &Config) -> Result<()>;
 
 ### Models API
 
-Trait definitions already specified in the Architecture section (Embedder, Reranker, Generator, Extractor). The Models facade provides the public API that Engine and domain modules call:
+Trait definitions are listed in the Architecture section (`Embedder`, `Reranker`, `Expander`, `Extractor`). Runtime model orchestration exposed from `models/mod.rs` is:
 
 ```rust
-// models/mod.rs
-
-impl Models {
-    pub fn new(config: ModelConfig, model_dir: &Path) -> Result<Self>;
-
-    // Inference — lazy-loads the backing model on first call
-    pub fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
-    pub fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<f32>>;
-    pub fn generate(&self, prompt: &str, max_tokens: u32) -> Result<String>;
-
-    // Metadata
-    pub fn dimensions(&self) -> usize;          // embedding dimensions (e.g. 256)
-    pub fn embedder_name(&self) -> &str;        // current embedder model identifier
-
-    // Lifecycle
-    pub fn pull(&self) -> Result<PullReport>;   // download all configured models
-    pub fn status(&self) -> Result<ModelStatus>; // which models are downloaded
-}
-
-pub struct PullReport {
-    pub downloaded: Vec<String>,           // model names freshly downloaded
-    pub already_present: Vec<String>,      // model names already on disk
-    pub total_bytes: u64,                  // bytes downloaded this run
-}
+pub fn pull(config: &ModelConfig, model_dir: &Path) -> Result<PullReport>;
+pub fn status(config: &ModelConfig, model_dir: &Path) -> Result<ModelStatus>;
 ```
 
-`embed()`, `rerank()`, and `generate()` trigger lazy model loading on first invocation. The loaded model stays in memory for the process lifetime. Thread safety: embedder (ONNX) is `Arc<dyn Embedder>` (thread-safe, concurrent calls OK). Reranker and generator (llama-cpp) are `Mutex<dyn Reranker>` / `Mutex<dyn Generator>` (serialized access — llama-cpp is not thread-safe).
+Engine composes role adapters through model builders (`build_embedder_*`, `build_reranker_*`, `build_expander_*`) and then routes update/search through those role traits. If a reranker/expander role is unset in config, deterministic heuristic implementations are used.
 
 Model download is delegated through a provider abstraction (for example, HuggingFace, local filesystem mirrors, or cloud object storage). The core model module must not hardcode provider-specific assumptions in orchestration logic.
 
