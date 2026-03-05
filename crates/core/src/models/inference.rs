@@ -190,47 +190,14 @@ fn build_reranker_inner(
     local_runtime: Option<LocalRuntimeContext<'_>>,
 ) -> Result<Arc<dyn Reranker>> {
     let reranker: Arc<dyn Reranker> = match config {
-        Some(config) => match &config.provider {
-            TextInferenceProvider::OpenAiCompatible {
-                output_mode,
-                model,
-                base_url,
-                api_key_env,
-                timeout_ms,
-                max_retries,
-            } => Arc::new(ChatBackedReranker {
-                chat: Arc::new(HttpChatClient::new(
-                    base_url,
-                    api_key_env.as_deref(),
-                    *timeout_ms,
-                    *max_retries,
-                    model,
-                    output_mode.clone(),
-                    "openai_compatible",
-                )),
-            }),
-            TextInferenceProvider::LocalLlama {
-                model_file,
-                max_tokens,
-                n_ctx,
-                n_gpu_layers,
-            } => {
-                let runtime = local_runtime.ok_or_else(|| {
-                    KboltError::Inference(
-                        "local_llama reranker requires local runtime context".to_string(),
-                    )
-                })?;
-                let chat = build_local_llama_client(
-                    runtime,
-                    ModelRole::Reranker,
-                    model_file.as_deref(),
-                    *max_tokens,
-                    *n_ctx,
-                    *n_gpu_layers,
-                )?;
-                Arc::new(ChatBackedReranker { chat })
-            }
-        },
+        Some(config) => Arc::new(ChatBackedReranker {
+            chat: build_completion_client_for_role(
+                &config.provider,
+                local_runtime,
+                ModelRole::Reranker,
+                "reranker",
+            )?,
+        }),
         None => Arc::new(HeuristicReranker),
     };
     Ok(reranker)
@@ -241,50 +208,63 @@ fn build_expander_inner(
     local_runtime: Option<LocalRuntimeContext<'_>>,
 ) -> Result<Arc<dyn Expander>> {
     let expander: Arc<dyn Expander> = match config {
-        Some(config) => match &config.provider {
-            TextInferenceProvider::OpenAiCompatible {
-                output_mode,
-                model,
-                base_url,
-                api_key_env,
-                timeout_ms,
-                max_retries,
-            } => Arc::new(ChatBackedExpander {
-                chat: Arc::new(HttpChatClient::new(
-                    base_url,
-                    api_key_env.as_deref(),
-                    *timeout_ms,
-                    *max_retries,
-                    model,
-                    output_mode.clone(),
-                    "openai_compatible",
-                )),
-            }),
-            TextInferenceProvider::LocalLlama {
-                model_file,
-                max_tokens,
-                n_ctx,
-                n_gpu_layers,
-            } => {
-                let runtime = local_runtime.ok_or_else(|| {
-                    KboltError::Inference(
-                        "local_llama expander requires local runtime context".to_string(),
-                    )
-                })?;
-                let chat = build_local_llama_client(
-                    runtime,
-                    ModelRole::Expander,
-                    model_file.as_deref(),
-                    *max_tokens,
-                    *n_ctx,
-                    *n_gpu_layers,
-                )?;
-                Arc::new(ChatBackedExpander { chat })
-            }
-        },
+        Some(config) => Arc::new(ChatBackedExpander {
+            chat: build_completion_client_for_role(
+                &config.provider,
+                local_runtime,
+                ModelRole::Expander,
+                "expander",
+            )?,
+        }),
         None => Arc::new(HeuristicExpander),
     };
     Ok(expander)
+}
+
+fn build_completion_client_for_role(
+    provider: &TextInferenceProvider,
+    local_runtime: Option<LocalRuntimeContext<'_>>,
+    role: ModelRole,
+    role_label: &str,
+) -> Result<Arc<dyn CompletionClient>> {
+    match provider {
+        TextInferenceProvider::OpenAiCompatible {
+            output_mode,
+            model,
+            base_url,
+            api_key_env,
+            timeout_ms,
+            max_retries,
+        } => Ok(Arc::new(HttpChatClient::new(
+            base_url,
+            api_key_env.as_deref(),
+            *timeout_ms,
+            *max_retries,
+            model,
+            output_mode.clone(),
+            "openai_compatible",
+        ))),
+        TextInferenceProvider::LocalLlama {
+            model_file,
+            max_tokens,
+            n_ctx,
+            n_gpu_layers,
+        } => {
+            let runtime = local_runtime.ok_or_else(|| {
+                KboltError::Inference(format!(
+                    "local_llama {role_label} requires local runtime context"
+                ))
+            })?;
+            build_local_llama_client(
+                runtime,
+                role,
+                model_file.as_deref(),
+                *max_tokens,
+                *n_ctx,
+                *n_gpu_layers,
+            )
+        }
+    }
 }
 
 impl Embedder for HttpApiEmbedder {
