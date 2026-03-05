@@ -458,10 +458,22 @@ impl ExpanderResponse {
 impl EmbeddingResponseEnvelope {
     fn into_vectors(self, expected_len: usize) -> Result<Vec<Vec<f32>>> {
         let mut vectors = match self {
-            Self::OpenAiLike { mut data } => {
-                data.sort_by_key(|item| item.index);
-                data.into_iter()
-                    .map(|item| item.embedding)
+            Self::OpenAiLike { data } => {
+                let all_indexed = data.iter().all(|item| item.index.is_some());
+                let mut ordered = data
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, item)| {
+                        let order = item.index.unwrap_or(position);
+                        (order, item.embedding.into_vec())
+                    })
+                    .collect::<Vec<_>>();
+                if all_indexed {
+                    ordered.sort_by_key(|(order, _)| *order);
+                }
+                ordered
+                    .into_iter()
+                    .map(|(_, embedding)| embedding)
                     .collect::<Vec<_>>()
             }
             Self::VoyageLike { embeddings } => embeddings,
@@ -490,8 +502,25 @@ impl EmbeddingResponseEnvelope {
 
 #[derive(Debug, Deserialize)]
 struct EmbeddingItem {
-    index: usize,
-    embedding: Vec<f32>,
+    #[serde(default)]
+    index: Option<usize>,
+    embedding: EmbeddingVector,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum EmbeddingVector {
+    Direct(Vec<f32>),
+    Wrapped { values: Vec<f32> },
+}
+
+impl EmbeddingVector {
+    fn into_vec(self) -> Vec<f32> {
+        match self {
+            Self::Direct(values) => values,
+            Self::Wrapped { values } => values,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -615,6 +644,45 @@ mod tests {
             .embed_batch(&["a".to_string(), "b".to_string()])
             .expect("embed");
         assert_eq!(vectors, vec![vec![0.1, 0.2], vec![0.3, 0.4]]);
+    }
+
+    #[test]
+    fn openai_compatible_embedder_parses_openai_style_response_without_index() {
+        let body = r#"{
+  "data": [
+    {"embedding": [0.51, 0.52]},
+    {"embedding": [0.61, 0.62]}
+  ]
+}"#;
+        let base_url = serve_once(200, body);
+        let config = base_config(EmbeddingProvider::OpenAiCompatible, base_url);
+        let embedder = build_embedder(Some(&config))
+            .expect("build embedder")
+            .expect("embedder should exist");
+
+        let vectors = embedder
+            .embed_batch(&["a".to_string(), "b".to_string()])
+            .expect("embed");
+        assert_eq!(vectors, vec![vec![0.51, 0.52], vec![0.61, 0.62]]);
+    }
+
+    #[test]
+    fn openai_compatible_embedder_parses_wrapped_embedding_values() {
+        let body = r#"{
+  "data": [
+    {"index": 0, "embedding": {"values": [0.15, 0.25]}}
+  ]
+}"#;
+        let base_url = serve_once(200, body);
+        let config = base_config(EmbeddingProvider::OpenAiCompatible, base_url);
+        let embedder = build_embedder(Some(&config))
+            .expect("build embedder")
+            .expect("embedder should exist");
+
+        let vectors = embedder
+            .embed_batch(&["a".to_string()])
+            .expect("embed");
+        assert_eq!(vectors, vec![vec![0.15, 0.25]]);
     }
 
     #[test]
