@@ -216,6 +216,7 @@ core/
     chat.rs              # chat completion client + request/response shaping
     completion.rs        # shared completion client contract
     local_onnx.rs        # local ONNX embedder runtime
+    local_gguf.rs        # local GGUF embedder runtime
     local_llama.rs       # local llama completion runtime
     artifacts.rs         # model artifact file discovery helpers
     text.rs              # shared text normalization helpers
@@ -893,7 +894,7 @@ Engine composes role adapters through model builders (`build_embedder_*`, `build
 Model download is delegated through a provider abstraction (for example, HuggingFace, local filesystem mirrors, or cloud object storage). The core model module must not hardcode provider-specific assumptions in orchestration logic.
 
 Embedding inference provider scope is separate from model artifact download:
-- V1 providers: `openai_compatible`, `voyage`, `local_onnx`
+- V1 providers: `openai_compatible`, `voyage`, `local_onnx`, `local_gguf`
 - V2 consideration: native Google embeddings provider (keep out of V1 unless native-only controls are required)
 
 Text inference providers for reranker/expander are configured per role:
@@ -1589,14 +1590,14 @@ id = "sentence-transformers/all-MiniLM-L6-v2"
 
 [models.reranker]
 provider = "huggingface"
-id = "Qwen/Qwen3-0.6B-GGUF"
+id = "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF"
 
 [models.expander]
 provider = "huggingface"
-id = "Qwen/Qwen3-0.6B-GGUF"
+id = "tobil/qmd-query-expansion-1.7B-gguf"
 
 [embeddings]
-provider = "openai_compatible"   # V1: openai_compatible | voyage | local_onnx
+provider = "openai_compatible"   # V1: openai_compatible | voyage | local_onnx | local_gguf
 model = "text-embedding-3-small"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
@@ -1644,6 +1645,7 @@ Notes:
 - Google embedding access through OpenAI-compatible endpoints is covered by `provider = "openai_compatible"` with the corresponding Google-compatible base URL.
 - Native Google embeddings API support is intentionally deferred to V2.
 - `provider = "local_onnx"` loads ONNX + tokenizer artifacts from `~/.cache/kbolt/models/embedder` (or explicit `onnx_file` / `tokenizer_file`).
+- `provider = "local_gguf"` loads a GGUF artifact from `~/.cache/kbolt/models/embedder` (or explicit `model_file`) and fails fast when artifact selection is ambiguous.
 - `provider = "local_llama"` loads GGUF artifacts from role directories (`reranker` / `expander`) and fails fast when artifact selection is ambiguous.
 
 ---
@@ -1767,10 +1769,10 @@ Injected into LLM system prompt on connection:
 | Role | Model | Format | Size | Runtime |
 |---|---|---|---|---|
 | Embedding | all-MiniLM-L6-v2 | ONNX + tokenizer | ~100MB | ONNX Runtime (CPU) |
-| Reranker | Qwen3 0.6B | GGUF Q8 | ~700MB | llama-cpp-rs (GPU/CPU) |
-| Expander | Qwen3 0.6B | GGUF Q8 | ~700MB | llama-cpp-rs (GPU/CPU) |
+| Reranker | Qwen3-Reranker 0.6B | GGUF Q8 | ~640MB | llama-cpp-rs (GPU/CPU) |
+| Expander | qmd-query-expansion 1.7B | GGUF Q4 | ~1.2GB | llama-cpp-rs (GPU/CPU) |
 
-Download path is provider-agnostic in core: model orchestration depends on a provider abstraction, and artifact download is delegated to provider adapters. Default adapter is HuggingFace Hub via `hf-hub` (resumable downloads, checksum verification, local caching). `kbolt models pull` downloads only required role artifacts (embedder: one ONNX + tokenizer, text roles: one GGUF each).
+Download path is provider-agnostic in core: model orchestration depends on a provider abstraction, and artifact download is delegated to provider adapters. Default adapter is HuggingFace Hub via `hf-hub` (resumable downloads, checksum verification, local caching). `kbolt models pull` downloads only required role artifacts (embedder: one ONNX + tokenizer for `local_onnx`, or one GGUF for `local_gguf`; text roles: one GGUF each).
 
 Prompting is CLI-only: interactive terminal sessions may prompt to pull models when missing; non-interactive CLI and MCP never prompt. Non-interactive update errors include actionable guidance to run `kbolt models pull` or re-run with `--no-embed` when embedding is optional.
 

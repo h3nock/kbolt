@@ -48,10 +48,10 @@ After install, `kbolt` command is available. No configuration needed yet — the
 kbolt models pull
 ```
 
-Downloads role artifacts via the configured model provider (default: HuggingFace Hub) to `~/.cache/kbolt/models/{role}/` (`embedder`, `reranker`, `expander`). In V1 this is selective per role (embedder: one ONNX + tokenizer, text roles: one GGUF each), with per-model progress events and a final download summary.
+Downloads role artifacts via the configured model provider (default: HuggingFace Hub) to `~/.cache/kbolt/models/{role}/` (`embedder`, `reranker`, `expander`). In V1 this is selective per role (embedder: one ONNX + tokenizer for `local_onnx`, or one GGUF for `local_gguf`; text roles: one GGUF each), with per-model progress events and a final download summary.
 
 Embedding inference provider scope (V1):
-- supported: `openai_compatible`, `voyage`, `local_onnx`
+- supported: `openai_compatible`, `voyage`, `local_onnx`, `local_gguf`
 - deferred to V2: native Google embeddings API provider (add only if we need native-only controls/parity)
 
 Text inference provider scope for reranker/expander (V1):
