@@ -1,20 +1,28 @@
-use std::sync::Arc;
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use kbolt_types::KboltError;
+use llama_cpp::standard_sampler::StandardSampler;
+use llama_cpp::{LlamaModel, LlamaParams, SessionParams};
+use ort::session::Session;
+use ort::value::Tensor;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams, TruncationStrategy};
+use walkdir::WalkDir;
 
 use crate::config::{
-    EmbeddingConfig, TextInferenceConfig, TextInferenceOutputMode,
+    EmbeddingConfig, ModelConfig, TextInferenceConfig, TextInferenceOutputMode,
     TextInferenceProvider,
 };
 use crate::models::expander::HeuristicExpander;
 use crate::models::reranker::HeuristicReranker;
 use crate::models::text::strip_json_fences;
-use crate::models::{Embedder, Expander, Reranker};
+use crate::models::{resolve_model_artifact, Embedder, Expander, ModelRole, Reranker};
 use crate::Result;
 
 #[derive(Debug, Clone)]
@@ -24,14 +32,23 @@ struct HttpApiEmbedder {
     batch_size: usize,
 }
 
-#[derive(Debug, Clone)]
-struct OpenAiCompatibleReranker {
-    chat: ChatClient,
+struct LocalOnnxEmbedder {
+    session: Mutex<Session>,
+    tokenizer: Tokenizer,
 }
 
-#[derive(Debug, Clone)]
-struct OpenAiCompatibleExpander {
-    chat: ChatClient,
+#[derive(Clone)]
+struct ChatBackedReranker {
+    chat: Arc<dyn CompletionClient>,
+}
+
+#[derive(Clone)]
+struct ChatBackedExpander {
+    chat: Arc<dyn CompletionClient>,
+}
+
+trait CompletionClient: Send + Sync {
+    fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String>;
 }
 
 const MAX_RETRY_AFTER_SECONDS: u64 = 30;
@@ -158,13 +175,13 @@ impl HttpJsonClient {
 }
 
 #[derive(Debug, Clone)]
-struct ChatClient {
+struct HttpChatClient {
     http: HttpJsonClient,
     model: String,
     output_mode: TextInferenceOutputMode,
 }
 
-impl ChatClient {
+impl HttpChatClient {
     fn new(
         base_url: &str,
         api_key_env: Option<&str>,
@@ -187,7 +204,9 @@ impl ChatClient {
             output_mode,
         }
     }
+}
 
+impl CompletionClient for HttpChatClient {
     fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
         let payload = build_chat_payload(
             &self.model,
@@ -205,6 +224,54 @@ impl ChatClient {
             TextInferenceOutputMode::Text => strip_json_fences(&content),
         };
         Ok(normalized.to_string())
+    }
+}
+
+struct LocalLlamaClient {
+    model: Arc<LlamaModel>,
+    max_tokens: usize,
+    n_ctx: u32,
+}
+
+impl LocalLlamaClient {
+    fn new(model_path: &Path, max_tokens: usize, n_ctx: u32, n_gpu_layers: u32) -> Result<Self> {
+        let mut params = LlamaParams::default();
+        params.n_gpu_layers = n_gpu_layers;
+        let model = LlamaModel::load_from_file(model_path, params).map_err(|err| {
+            KboltError::Inference(format!(
+                "failed to load local llama model {}: {err}",
+                model_path.display()
+            ))
+        })?;
+
+        Ok(Self {
+            model: Arc::new(model),
+            max_tokens,
+            n_ctx,
+        })
+    }
+}
+
+impl CompletionClient for LocalLlamaClient {
+    fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
+        let mut session_params = SessionParams::default();
+        session_params.n_ctx = self.n_ctx;
+        let mut session = self
+            .model
+            .create_session(session_params)
+            .map_err(|err| KboltError::Inference(format!("failed to create llama session: {err}")))?;
+
+        let prompt = format!(
+            "System:\n{system_prompt}\n\nUser:\n{user_prompt}\n\nAssistant:\n"
+        );
+        session
+            .advance_context(prompt.as_bytes())
+            .map_err(|err| KboltError::Inference(format!("llama prompt failed: {err}")))?;
+        let completion = session
+            .start_completing_with(StandardSampler::new_greedy(), self.max_tokens)
+            .map_err(|err| KboltError::Inference(format!("llama completion failed: {err}")))?;
+        let text = completion.into_string();
+        Ok(strip_json_fences(&text).trim().to_string())
     }
 }
 
@@ -234,8 +301,74 @@ fn build_chat_payload(
     payload
 }
 
+#[cfg(test)]
 pub(crate) fn build_embedder(
     config: Option<&EmbeddingConfig>,
+) -> Result<Option<Arc<dyn Embedder>>> {
+    build_embedder_inner(config, None)
+}
+
+pub(crate) fn build_embedder_with_local_runtime(
+    config: Option<&EmbeddingConfig>,
+    model_config: &ModelConfig,
+    model_dir: &Path,
+) -> Result<Option<Arc<dyn Embedder>>> {
+    build_embedder_inner(
+        config,
+        Some(LocalRuntimeContext {
+            model_config,
+            model_dir,
+        }),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn build_reranker(config: Option<&TextInferenceConfig>) -> Result<Arc<dyn Reranker>> {
+    build_reranker_inner(config, None)
+}
+
+pub(crate) fn build_reranker_with_local_runtime(
+    config: Option<&TextInferenceConfig>,
+    model_config: &ModelConfig,
+    model_dir: &Path,
+) -> Result<Arc<dyn Reranker>> {
+    build_reranker_inner(
+        config,
+        Some(LocalRuntimeContext {
+            model_config,
+            model_dir,
+        }),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn build_expander(config: Option<&TextInferenceConfig>) -> Result<Arc<dyn Expander>> {
+    build_expander_inner(config, None)
+}
+
+pub(crate) fn build_expander_with_local_runtime(
+    config: Option<&TextInferenceConfig>,
+    model_config: &ModelConfig,
+    model_dir: &Path,
+) -> Result<Arc<dyn Expander>> {
+    build_expander_inner(
+        config,
+        Some(LocalRuntimeContext {
+            model_config,
+            model_dir,
+        }),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct LocalRuntimeContext<'a> {
+    model_config: &'a ModelConfig,
+    model_dir: &'a Path,
+}
+
+fn build_embedder_inner(
+    config: Option<&EmbeddingConfig>,
+    local_runtime: Option<LocalRuntimeContext<'_>>,
 ) -> Result<Option<Arc<dyn Embedder>>> {
     let Some(config) = config else {
         return Ok(None);
@@ -276,10 +409,13 @@ pub(crate) fn build_embedder(
                 *batch_size,
             ),
             EmbeddingConfig::LocalOnnx { .. } => {
-                return Err(
-                    KboltError::Inference("local_onnx embedder is not implemented yet".to_string())
-                        .into(),
-                )
+                let runtime = local_runtime.ok_or_else(|| {
+                    KboltError::Inference(
+                        "local_onnx embedder requires local runtime context".to_string(),
+                    )
+                })?;
+                let embedder = build_local_onnx_embedder(config, runtime)?;
+                return Ok(Some(Arc::new(embedder)));
             }
         };
     let client = HttpJsonClient::new(
@@ -298,7 +434,10 @@ pub(crate) fn build_embedder(
     Ok(Some(embedder))
 }
 
-pub(crate) fn build_reranker(config: Option<&TextInferenceConfig>) -> Result<Arc<dyn Reranker>> {
+fn build_reranker_inner(
+    config: Option<&TextInferenceConfig>,
+    local_runtime: Option<LocalRuntimeContext<'_>>,
+) -> Result<Arc<dyn Reranker>> {
     let reranker: Arc<dyn Reranker> = match config {
         Some(config) => match &config.provider {
             TextInferenceProvider::OpenAiCompatible {
@@ -308,8 +447,8 @@ pub(crate) fn build_reranker(config: Option<&TextInferenceConfig>) -> Result<Arc
                 api_key_env,
                 timeout_ms,
                 max_retries,
-            } => Arc::new(OpenAiCompatibleReranker {
-                chat: ChatClient::new(
+            } => Arc::new(ChatBackedReranker {
+                chat: Arc::new(HttpChatClient::new(
                     base_url,
                     api_key_env.as_deref(),
                     *timeout_ms,
@@ -317,13 +456,28 @@ pub(crate) fn build_reranker(config: Option<&TextInferenceConfig>) -> Result<Arc
                     model,
                     output_mode.clone(),
                     "openai_compatible",
-                ),
+                )),
             }),
-            TextInferenceProvider::LocalLlama { .. } => {
-                return Err(KboltError::Inference(
-                    "local_llama reranker is not implemented yet".to_string(),
-                )
-                .into())
+            TextInferenceProvider::LocalLlama {
+                model_file,
+                max_tokens,
+                n_ctx,
+                n_gpu_layers,
+            } => {
+                let runtime = local_runtime.ok_or_else(|| {
+                    KboltError::Inference(
+                        "local_llama reranker requires local runtime context".to_string(),
+                    )
+                })?;
+                let chat = build_local_llama_client(
+                    runtime,
+                    ModelRole::Reranker,
+                    model_file.as_deref(),
+                    *max_tokens,
+                    *n_ctx,
+                    *n_gpu_layers,
+                )?;
+                Arc::new(ChatBackedReranker { chat })
             }
         },
         None => Arc::new(HeuristicReranker),
@@ -331,7 +485,10 @@ pub(crate) fn build_reranker(config: Option<&TextInferenceConfig>) -> Result<Arc
     Ok(reranker)
 }
 
-pub(crate) fn build_expander(config: Option<&TextInferenceConfig>) -> Result<Arc<dyn Expander>> {
+fn build_expander_inner(
+    config: Option<&TextInferenceConfig>,
+    local_runtime: Option<LocalRuntimeContext<'_>>,
+) -> Result<Arc<dyn Expander>> {
     let expander: Arc<dyn Expander> = match config {
         Some(config) => match &config.provider {
             TextInferenceProvider::OpenAiCompatible {
@@ -341,8 +498,8 @@ pub(crate) fn build_expander(config: Option<&TextInferenceConfig>) -> Result<Arc
                 api_key_env,
                 timeout_ms,
                 max_retries,
-            } => Arc::new(OpenAiCompatibleExpander {
-                chat: ChatClient::new(
+            } => Arc::new(ChatBackedExpander {
+                chat: Arc::new(HttpChatClient::new(
                     base_url,
                     api_key_env.as_deref(),
                     *timeout_ms,
@@ -350,13 +507,28 @@ pub(crate) fn build_expander(config: Option<&TextInferenceConfig>) -> Result<Arc
                     model,
                     output_mode.clone(),
                     "openai_compatible",
-                ),
+                )),
             }),
-            TextInferenceProvider::LocalLlama { .. } => {
-                return Err(KboltError::Inference(
-                    "local_llama expander is not implemented yet".to_string(),
-                )
-                .into())
+            TextInferenceProvider::LocalLlama {
+                model_file,
+                max_tokens,
+                n_ctx,
+                n_gpu_layers,
+            } => {
+                let runtime = local_runtime.ok_or_else(|| {
+                    KboltError::Inference(
+                        "local_llama expander requires local runtime context".to_string(),
+                    )
+                })?;
+                let chat = build_local_llama_client(
+                    runtime,
+                    ModelRole::Expander,
+                    model_file.as_deref(),
+                    *max_tokens,
+                    *n_ctx,
+                    *n_gpu_layers,
+                )?;
+                Arc::new(ChatBackedExpander { chat })
             }
         },
         None => Arc::new(HeuristicExpander),
@@ -370,7 +542,13 @@ impl Embedder for HttpApiEmbedder {
     }
 }
 
-impl Reranker for OpenAiCompatibleReranker {
+impl Embedder for LocalOnnxEmbedder {
+    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        embed_with_local_onnx(self, texts)
+    }
+}
+
+impl Reranker for ChatBackedReranker {
     fn rerank(&self, query: &str, docs: &[String]) -> Result<Vec<f32>> {
         if docs.is_empty() {
             return Ok(Vec::new());
@@ -402,7 +580,7 @@ impl Reranker for OpenAiCompatibleReranker {
     }
 }
 
-impl Expander for OpenAiCompatibleExpander {
+impl Expander for ChatBackedExpander {
     fn expand(&self, query: &str) -> Result<Vec<String>> {
         let normalized = query.split_whitespace().collect::<Vec<_>>().join(" ");
         if normalized.is_empty() {
@@ -460,6 +638,400 @@ fn embed_with_http_api(
         vectors.extend(response_vectors);
     }
     Ok(vectors)
+}
+
+fn build_local_onnx_embedder(
+    config: &EmbeddingConfig,
+    runtime: LocalRuntimeContext<'_>,
+) -> Result<LocalOnnxEmbedder> {
+    let EmbeddingConfig::LocalOnnx {
+        onnx_file,
+        tokenizer_file,
+        max_length,
+    } = config
+    else {
+        return Err(KboltError::Inference("invalid local onnx config".to_string()).into());
+    };
+
+    let artifact = resolve_model_artifact(runtime.model_config, runtime.model_dir, ModelRole::Embedder)?;
+    let onnx_path = resolve_file_with_extension(
+        &artifact.path,
+        onnx_file.as_deref(),
+        "onnx",
+        "embeddings.onnx_file",
+    )?;
+    let tokenizer_path =
+        resolve_tokenizer_file(&artifact.path, tokenizer_file.as_deref(), "embeddings.tokenizer_file")?;
+
+    let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|err| {
+        KboltError::Inference(format!(
+            "failed to load tokenizer {}: {err}",
+            tokenizer_path.display()
+        ))
+    })?;
+    let pad_id = tokenizer
+        .token_to_id("[PAD]")
+        .or_else(|| tokenizer.token_to_id("<pad>"))
+        .unwrap_or(0);
+    let pad_token = tokenizer
+        .id_to_token(pad_id)
+        .unwrap_or_else(|| "[PAD]".to_string());
+    tokenizer.with_padding(Some(PaddingParams {
+        strategy: PaddingStrategy::BatchLongest,
+        pad_id,
+        pad_token,
+        ..PaddingParams::default()
+    }));
+    tokenizer
+        .with_truncation(Some(TruncationParams {
+            max_length: *max_length,
+            strategy: TruncationStrategy::LongestFirst,
+            stride: 0,
+            direction: Default::default(),
+        }))
+        .map_err(|err| KboltError::Inference(format!("failed to configure tokenizer: {err}")))?;
+
+    let session = Session::builder()
+        .map_err(|err| KboltError::Inference(format!("failed to create ONNX session builder: {err}")))?
+        .commit_from_file(&onnx_path)
+        .map_err(|err| {
+            KboltError::Inference(format!(
+                "failed to load ONNX model {}: {err}",
+                onnx_path.display()
+            ))
+        })?;
+
+    Ok(LocalOnnxEmbedder {
+        session: Mutex::new(session),
+        tokenizer,
+    })
+}
+
+fn build_local_llama_client(
+    runtime: LocalRuntimeContext<'_>,
+    role: ModelRole,
+    model_file: Option<&str>,
+    max_tokens: usize,
+    n_ctx: u32,
+    n_gpu_layers: u32,
+) -> Result<Arc<dyn CompletionClient>> {
+    let artifact = resolve_model_artifact(runtime.model_config, runtime.model_dir, role)?;
+    let gguf_path = resolve_file_with_extension(&artifact.path, model_file, "gguf", "model_file")?;
+    let client = LocalLlamaClient::new(&gguf_path, max_tokens, n_ctx, n_gpu_layers)?;
+    Ok(Arc::new(client))
+}
+
+fn embed_with_local_onnx(embedder: &LocalOnnxEmbedder, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let inputs = texts.iter().map(|text| text.as_str()).collect::<Vec<_>>();
+    let encodings = embedder
+        .tokenizer
+        .encode_batch(inputs, true)
+        .map_err(|err| KboltError::Inference(format!("tokenization failed: {err}")))?;
+    if encodings.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let batch_size = encodings.len();
+    let seq_len = encodings[0].get_ids().len();
+    if seq_len == 0 {
+        return Err(KboltError::Inference("tokenizer produced empty sequences".to_string()).into());
+    }
+
+    let mut input_ids = Vec::with_capacity(batch_size * seq_len);
+    let mut attention_mask = Vec::with_capacity(batch_size * seq_len);
+    let mut token_type_ids = Vec::with_capacity(batch_size * seq_len);
+    for encoding in &encodings {
+        if encoding.get_ids().len() != seq_len {
+            return Err(
+                KboltError::Inference("tokenizer produced uneven sequence lengths".to_string())
+                    .into(),
+            );
+        }
+        input_ids.extend(encoding.get_ids().iter().map(|value| *value as i64));
+        attention_mask.extend(encoding.get_attention_mask().iter().map(|value| *value as i64));
+        if encoding.get_type_ids().is_empty() {
+            token_type_ids.extend(std::iter::repeat_n(0_i64, seq_len));
+        } else {
+            token_type_ids.extend(encoding.get_type_ids().iter().map(|value| *value as i64));
+        }
+    }
+
+    let ids_tensor = Tensor::<i64>::from_array(([batch_size, seq_len], input_ids.clone())).map_err(
+        |err| KboltError::Inference(format!("failed to build input_ids tensor: {err}")),
+    )?;
+    let mask_tensor =
+        Tensor::<i64>::from_array(([batch_size, seq_len], attention_mask.clone())).map_err(
+            |err| KboltError::Inference(format!("failed to build attention_mask tensor: {err}")),
+        )?;
+    let type_tensor =
+        Tensor::<i64>::from_array(([batch_size, seq_len], token_type_ids)).map_err(|err| {
+            KboltError::Inference(format!("failed to build token_type_ids tensor: {err}"))
+        })?;
+
+    let mut session = embedder.session.lock().map_err(|_| {
+        KboltError::Inference("local onnx session mutex poisoned".to_string())
+    })?;
+    let mut session_inputs = Vec::new();
+    let single_input = session.inputs().len() == 1;
+    let mut mapped_ids = false;
+    for input in session.inputs() {
+        let name = input.name();
+        let lower = name.to_ascii_lowercase();
+        if lower.contains("input_ids") || (!mapped_ids && single_input) {
+            session_inputs.push((Cow::Owned(name.to_string()), ids_tensor.clone().into_dyn()));
+            mapped_ids = true;
+            continue;
+        }
+        if lower.contains("attention_mask") || lower.contains("mask") {
+            session_inputs.push((Cow::Owned(name.to_string()), mask_tensor.clone().into_dyn()));
+            continue;
+        }
+        if lower.contains("token_type_ids") || lower.contains("segment_ids") {
+            session_inputs.push((Cow::Owned(name.to_string()), type_tensor.clone().into_dyn()));
+            continue;
+        }
+
+        return Err(KboltError::Inference(format!(
+            "unsupported ONNX input '{}' for local embedder",
+            name
+        ))
+        .into());
+    }
+
+    if !mapped_ids {
+        return Err(KboltError::Inference(
+            "ONNX embedder inputs do not include input_ids".to_string(),
+        )
+        .into());
+    }
+
+    let outputs = session
+        .run(session_inputs)
+        .map_err(|err| KboltError::Inference(format!("onnx inference failed: {err}")))?;
+    extract_embedding_vectors(outputs, batch_size, seq_len, &attention_mask)
+}
+
+fn extract_embedding_vectors(
+    outputs: ort::session::SessionOutputs<'_>,
+    batch_size: usize,
+    seq_len: usize,
+    attention_mask: &[i64],
+) -> Result<Vec<Vec<f32>>> {
+    for (_, output) in outputs.iter() {
+        let Ok((shape, values)) = output.try_extract_tensor::<f32>() else {
+            continue;
+        };
+        if let Some(vectors) =
+            parse_embedding_tensor(shape, values, batch_size, seq_len, attention_mask)?
+        {
+            return Ok(vectors);
+        }
+    }
+
+    Err(KboltError::Inference(
+        "onnx output did not contain a usable embedding tensor".to_string(),
+    )
+    .into())
+}
+
+fn parse_embedding_tensor(
+    shape: &ort::value::Shape,
+    values: &[f32],
+    batch_size: usize,
+    seq_len: usize,
+    attention_mask: &[i64],
+) -> Result<Option<Vec<Vec<f32>>>> {
+    let dims = shape.iter().copied().collect::<Vec<_>>();
+    if dims.len() == 2 {
+        let batch = usize::try_from(dims[0]).ok();
+        let hidden = usize::try_from(dims[1]).ok();
+        let (Some(batch), Some(hidden)) = (batch, hidden) else {
+            return Ok(None);
+        };
+        if batch != batch_size || hidden == 0 || values.len() != batch.saturating_mul(hidden) {
+            return Ok(None);
+        }
+
+        let mut vectors = Vec::with_capacity(batch);
+        for row in 0..batch {
+            let start = row.saturating_mul(hidden);
+            let end = start.saturating_add(hidden);
+            vectors.push(values[start..end].to_vec());
+        }
+        return Ok(Some(vectors));
+    }
+
+    if dims.len() == 3 {
+        let batch = usize::try_from(dims[0]).ok();
+        let tokens = usize::try_from(dims[1]).ok();
+        let hidden = usize::try_from(dims[2]).ok();
+        let (Some(batch), Some(tokens), Some(hidden)) = (batch, tokens, hidden) else {
+            return Ok(None);
+        };
+        if batch != batch_size
+            || hidden == 0
+            || values.len() != batch.saturating_mul(tokens).saturating_mul(hidden)
+        {
+            return Ok(None);
+        }
+
+        let mask_tokens = if tokens == seq_len {
+            attention_mask
+        } else {
+            return Ok(None);
+        };
+
+        let mut vectors = vec![vec![0.0_f32; hidden]; batch];
+        for batch_index in 0..batch {
+            let mut weight_sum = 0.0_f32;
+            for token_index in 0..tokens {
+                let mask_index = batch_index
+                    .saturating_mul(tokens)
+                    .saturating_add(token_index);
+                let weight = if mask_tokens.get(mask_index).copied().unwrap_or(1) > 0 {
+                    1.0_f32
+                } else {
+                    0.0_f32
+                };
+                if weight == 0.0 {
+                    continue;
+                }
+                weight_sum += weight;
+
+                let value_offset = batch_index
+                    .saturating_mul(tokens)
+                    .saturating_add(token_index)
+                    .saturating_mul(hidden);
+                for hidden_index in 0..hidden {
+                    vectors[batch_index][hidden_index] += values[value_offset + hidden_index];
+                }
+            }
+
+            if weight_sum == 0.0 {
+                return Err(KboltError::Inference(
+                    "attention mask produced zero-weight embedding row".to_string(),
+                )
+                .into());
+            }
+            for value in &mut vectors[batch_index] {
+                *value /= weight_sum;
+            }
+        }
+
+        return Ok(Some(vectors));
+    }
+
+    Ok(None)
+}
+
+fn resolve_tokenizer_file(
+    artifact_dir: &Path,
+    configured: Option<&str>,
+    config_field: &str,
+) -> Result<PathBuf> {
+    if let Some(configured) = configured {
+        return resolve_configured_file(artifact_dir, configured, config_field);
+    }
+
+    let matches = discover_files(artifact_dir, |path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.eq_ignore_ascii_case("tokenizer.json"))
+            .unwrap_or(false)
+    })?;
+    match matches.len() {
+        0 => Err(KboltError::Inference(format!(
+            "missing tokenizer.json under {}",
+            artifact_dir.display()
+        ))
+        .into()),
+        1 => Ok(matches[0].clone()),
+        _ => Err(KboltError::Inference(format!(
+            "multiple tokenizer.json files found under {}. set {config_field} to choose one",
+            artifact_dir.display()
+        ))
+        .into()),
+    }
+}
+
+fn resolve_file_with_extension(
+    artifact_dir: &Path,
+    configured: Option<&str>,
+    extension: &str,
+    config_field: &str,
+) -> Result<PathBuf> {
+    if let Some(configured) = configured {
+        return resolve_configured_file(artifact_dir, configured, config_field);
+    }
+
+    let matches = discover_files(artifact_dir, |path| {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case(extension))
+            .unwrap_or(false)
+    })?;
+    match matches.len() {
+        0 => Err(KboltError::Inference(format!(
+            "missing .{extension} artifact under {}",
+            artifact_dir.display()
+        ))
+        .into()),
+        1 => Ok(matches[0].clone()),
+        _ => Err(KboltError::Inference(format!(
+            "multiple .{extension} artifacts found under {}. set {config_field} to choose one",
+            artifact_dir.display()
+        ))
+        .into()),
+    }
+}
+
+fn resolve_configured_file(
+    artifact_dir: &Path,
+    configured: &str,
+    config_field: &str,
+) -> Result<PathBuf> {
+    let configured_path = Path::new(configured);
+    let path = if configured_path.is_absolute() {
+        configured_path.to_path_buf()
+    } else {
+        artifact_dir.join(configured_path)
+    };
+    if !path.is_file() {
+        return Err(KboltError::Inference(format!(
+            "{config_field} does not point to an existing file: {}",
+            path.display()
+        ))
+        .into());
+    }
+    Ok(path)
+}
+
+fn discover_files<F>(root: &Path, mut predicate: F) -> Result<Vec<PathBuf>>
+where
+    F: FnMut(&Path) -> bool,
+{
+    let mut results = Vec::new();
+    for entry in WalkDir::new(root).follow_links(true) {
+        let entry = entry.map_err(|err| {
+            KboltError::Inference(format!(
+                "failed to walk model artifact directory {}: {err}",
+                root.display()
+            ))
+        })?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if predicate(path) {
+            results.push(path.to_path_buf());
+        }
+    }
+    results.sort();
+    Ok(results)
 }
 
 fn resolve_endpoint(base_url: &str, suffix: &str) -> String {
@@ -724,6 +1296,17 @@ mod tests {
         }
     }
 
+    fn base_local_llama_text_config() -> TextInferenceConfig {
+        TextInferenceConfig {
+            provider: TextInferenceProvider::LocalLlama {
+                model_file: None,
+                max_tokens: 128,
+                n_ctx: 2048,
+                n_gpu_layers: 0,
+            },
+        }
+    }
+
     fn serve_once(status_code: u16, body: &str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let addr = listener.local_addr().expect("server address");
@@ -941,6 +1524,22 @@ mod tests {
     }
 
     #[test]
+    fn local_onnx_embedder_requires_local_runtime_context() {
+        let config = EmbeddingConfig::LocalOnnx {
+            onnx_file: None,
+            tokenizer_file: None,
+            max_length: 256,
+        };
+        let err = match build_embedder(Some(&config)) {
+            Ok(_) => panic!("local runtime context should be required"),
+            Err(err) => err,
+        };
+        assert!(err
+            .to_string()
+            .contains("local_onnx embedder requires local runtime context"));
+    }
+
+    #[test]
     fn build_reranker_uses_heuristic_when_inference_config_is_missing() {
         let reranker = build_reranker(None).expect("build reranker");
         let scores = reranker
@@ -954,6 +1553,18 @@ mod tests {
             .expect("rerank docs");
         assert_eq!(scores.len(), 2);
         assert!(scores[0] > scores[1]);
+    }
+
+    #[test]
+    fn local_llama_reranker_requires_local_runtime_context() {
+        let config = base_local_llama_text_config();
+        let err = match build_reranker(Some(&config)) {
+            Ok(_) => panic!("local runtime context should be required"),
+            Err(err) => err,
+        };
+        assert!(err
+            .to_string()
+            .contains("local_llama reranker requires local runtime context"));
     }
 
     #[test]

@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::Path;
 
-#[cfg(test)]
 use kbolt_types::KboltError;
 use kbolt_types::{ModelInfo, ModelStatus, PullReport};
 use serde::{Deserialize, Serialize};
@@ -24,7 +23,12 @@ const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";
 
 pub(crate) use embedder::Embedder;
 pub(crate) use expander::Expander;
-pub(crate) use inference::{build_embedder, build_expander, build_reranker};
+#[cfg(test)]
+pub(crate) use inference::build_embedder;
+pub(crate) use inference::{
+    build_embedder_with_local_runtime, build_expander_with_local_runtime,
+    build_reranker_with_local_runtime,
+};
 pub(crate) use provider::ModelArtifactProvider;
 use providers::hf::HfHubDownloader;
 pub(crate) use reranker::Reranker;
@@ -35,7 +39,6 @@ struct ModelTarget {
     source: ModelSourceConfig,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModelRole {
     Embedder,
@@ -43,7 +46,6 @@ pub(crate) enum ModelRole {
     Expander,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedModelArtifact {
     pub role: ModelRole,
@@ -74,7 +76,6 @@ impl ModelManifest {
     }
 }
 
-#[cfg(test)]
 impl ModelRole {
     fn role_dir(self) -> &'static str {
         match self {
@@ -198,7 +199,6 @@ pub fn status(config: &ModelConfig, model_dir: &Path) -> Result<ModelStatus> {
     })
 }
 
-#[cfg(test)]
 pub(crate) fn resolve_model_artifact(
     config: &ModelConfig,
     model_dir: &Path,

@@ -89,9 +89,22 @@ impl Engine {
     pub fn new(config_path: Option<&Path>) -> Result<Self> {
         let config = config::load(config_path)?;
         let storage = Storage::new(&config.cache_dir)?;
-        let embedder = models::build_embedder(config.embeddings.as_ref())?;
-        let reranker = models::build_reranker(config.inference.reranker.as_ref())?;
-        let expander = models::build_expander(config.inference.expander.as_ref())?;
+        let model_dir = config.cache_dir.join("models");
+        let embedder = models::build_embedder_with_local_runtime(
+            config.embeddings.as_ref(),
+            &config.models,
+            &model_dir,
+        )?;
+        let reranker = models::build_reranker_with_local_runtime(
+            config.inference.reranker.as_ref(),
+            &config.models,
+            &model_dir,
+        )?;
+        let expander = models::build_expander_with_local_runtime(
+            config.inference.expander.as_ref(),
+            &config.models,
+            &model_dir,
+        )?;
         Ok(Self {
             storage,
             config,
@@ -112,10 +125,19 @@ impl Engine {
         config: Config,
         embedder: Option<Arc<dyn models::Embedder>>,
     ) -> Self {
-        let reranker = models::build_reranker(config.inference.reranker.as_ref())
-            .expect("build reranker for test engine");
-        let expander = models::build_expander(config.inference.expander.as_ref())
-            .expect("build expander for test engine");
+        let model_dir = config.cache_dir.join("models");
+        let reranker = models::build_reranker_with_local_runtime(
+            config.inference.reranker.as_ref(),
+            &config.models,
+            &model_dir,
+        )
+        .expect("build reranker for test engine");
+        let expander = models::build_expander_with_local_runtime(
+            config.inference.expander.as_ref(),
+            &config.models,
+            &model_dir,
+        )
+        .expect("build expander for test engine");
         Self {
             storage,
             config,
@@ -727,7 +749,7 @@ impl Engine {
     ) -> Result<Vec<RankedChunk>> {
         let Some(embedder) = self.embedder.as_ref() else {
             return Err(KboltError::InvalidInput(
-                "semantic search requires embeddings configuration. add [embeddings] to index.toml with provider = \"openai_compatible\" or \"voyage\"".to_string(),
+                "semantic search requires embeddings configuration. add [embeddings] to index.toml with provider = \"openai_compatible\", \"voyage\", or \"local_onnx\"".to_string(),
             )
             .into());
         };
