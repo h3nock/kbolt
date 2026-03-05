@@ -413,7 +413,7 @@ kbolt update --space {name}
 
 Without `--space`: updates all collections in all spaces. With `--space`: scopes to that space only.
 
-For each collection: scans the directory and applies filters (hardcoded ignores → ignore patterns → extractor registry → extensions). For each file that passes filters, checks the file's modification time (mtime) against the stored value — if unchanged, skips the file entirely (no read needed). If mtime changed, reads the file and computes a SHA-256 hash — if the hash matches the stored hash, updates the stored mtime and skips re-indexing. Only when the hash actually changed does the full pipeline run: extract content, chunk, write to the space's FTS index, embed vectors into the space's USearch file. Files that disappeared from disk are deactivated (soft-deleted). Files deactivated longer than the reaping period (default: 7 days) are hard-deleted.
+For each collection: scans the directory and applies filters (hardcoded ignores → ignore patterns → extractor registry → extensions). For each file that passes filters, checks the file's modification time (mtime) against the stored value — if unchanged, skips the file entirely (no read needed). If mtime changed, reads the file and computes a SHA-256 hash — if the hash matches the stored hash, updates the stored mtime and skips re-indexing. Only when the hash actually changed does the full pipeline run: extract content, chunk, write to the space's FTS index, embed vectors into the space's USearch file. Chunking is structure-first and budget-constrained (`target`/`soft_max`/`hard_max`); forced splits can use small boundary overlap, while retrieval-time neighboring chunks provide additional context during search. Files that disappeared from disk are deactivated (soft-deleted). Files deactivated longer than the reaping period (default: 7 days) are hard-deleted.
 
 This two-level change detection (mtime first, hash second) makes "nothing changed" scans extremely fast — ~10ms for 10K files. The SHA-256 hash is the source of truth; mtime is a fast pre-filter to avoid unnecessary file reads.
 
@@ -541,6 +541,8 @@ Default behavior (no mode flag): auto mode — the system analyzes the query and
 **Cross-space search**: When searching without `--space`, each space's Tantivy and USearch indexes are queried independently. Candidate lists from all spaces are concatenated, then fused and reranked together. The cross-encoder reranker normalizes scores across spaces.
 
 Returns ranked results. Each result shows: rank, docid, space, collection, path, title, heading breadcrumb, snippet, score. The output footer includes a staleness hint: "Index last updated: {time ago}" based on the most recent update timestamp across the searched collections. This helps users understand why a recently saved file might not appear in results.
+
+Search result assembly may expand each hit with neighboring chunks from the same document (`±N` by chunk sequence, default `±1`) to provide context without storing large overlap at indexing time.
 
 `--keyword`, `--semantic`, and `--no-rerank` are diagnostic flags for troubleshooting retrieval quality — they let the user isolate which retrieval signal is working or failing.
 
