@@ -999,7 +999,7 @@ UNIQUE constraint on `(doc_id, seq)`. Offset and length define a byte slice into
 | Column | Type | Purpose |
 |---|---|---|
 | `chunk_id` | INTEGER FK | References `chunks.id`, CASCADE delete |
-| `model` | TEXT | Model identifier (e.g. `EmbeddingGemma-256`) |
+| `model` | TEXT | Model identifier (e.g. `sentence-transformers/all-MiniLM-L6-v2`) |
 | `embedded_at` | TEXT | ISO 8601, when the embedding was created |
 
 PRIMARY KEY on `(chunk_id, model)`. Tracks which chunks have been embedded and by which model. When the embedding model changes, stale entries are detected by comparing the `model` column against the current model config.
@@ -1584,16 +1584,16 @@ default_space = "work"    # optional, set via `kbolt space default`
 
 [models.embedder]
 provider = "huggingface"
-id = "google/EmbeddingGemma-256"
+id = "sentence-transformers/all-MiniLM-L6-v2"
 # revision = "main"
 
 [models.reranker]
 provider = "huggingface"
-id = "ExpedientFalcon/qwen3-reranker-0.6b-q8"
+id = "Qwen/Qwen3-0.6B-GGUF"
 
 [models.expander]
 provider = "huggingface"
-id = "Qwen/Qwen3-1.7B-q4"
+id = "Qwen/Qwen3-0.6B-GGUF"
 
 [embeddings]
 provider = "openai_compatible"   # V1: openai_compatible | voyage | local_onnx
@@ -1766,11 +1766,11 @@ Injected into LLM system prompt on connection:
 
 | Role | Model | Format | Size | Runtime |
 |---|---|---|---|---|
-| Embedding | EmbeddingGemma (256d) | ONNX | ~600MB | ONNX Runtime (CPU) |
-| Reranker | Qwen3-Reranker 0.6B | GGUF Q8 | ~700MB | llama-cpp-rs (GPU) |
-| Expander | Qwen3 1.7B | GGUF Q4 | ~1.2GB | llama-cpp-rs (GPU) |
+| Embedding | all-MiniLM-L6-v2 | ONNX + tokenizer | ~100MB | ONNX Runtime (CPU) |
+| Reranker | Qwen3 0.6B | GGUF Q8 | ~700MB | llama-cpp-rs (GPU/CPU) |
+| Expander | Qwen3 0.6B | GGUF Q8 | ~700MB | llama-cpp-rs (GPU/CPU) |
 
-Download path is provider-agnostic in core: model orchestration depends on a provider abstraction, and artifact download is delegated to provider adapters. Default adapter is HuggingFace Hub via `hf-hub` (resumable downloads, checksum verification, local caching). `kbolt models pull` is the explicit pre-download path.
+Download path is provider-agnostic in core: model orchestration depends on a provider abstraction, and artifact download is delegated to provider adapters. Default adapter is HuggingFace Hub via `hf-hub` (resumable downloads, checksum verification, local caching). `kbolt models pull` downloads only required role artifacts (embedder: one ONNX + tokenizer, text roles: one GGUF each).
 
 Prompting is CLI-only: interactive terminal sessions may prompt to pull models when missing; non-interactive CLI and MCP never prompt. Non-interactive update errors include actionable guidance to run `kbolt models pull` or re-run with `--no-embed` when embedding is optional.
 

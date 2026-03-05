@@ -35,7 +35,7 @@ cargo install kbolt
 
 After install, `kbolt` command is available. No configuration needed yet — the system creates `~/.config/kbolt/` and `~/.cache/kbolt/` on first use.
 
-> **TODO (implementation)**: The install script / Homebrew post-install message should print a getting-started reminder after confirming kbolt is installed, e.g. "Run `kbolt models pull` to download ML models (~2.5GB) for semantic search and reranking. Keyword search works without models." This is a one-time message at install time, not on every command.
+> **TODO (implementation)**: The install script / Homebrew post-install message should print a getting-started reminder after confirming kbolt is installed, e.g. "Run `kbolt models pull` to download ML models for semantic search and reranking. Keyword search works without models." This is a one-time message at install time, not on every command.
 
 ---
 
@@ -48,7 +48,7 @@ After install, `kbolt` command is available. No configuration needed yet — the
 kbolt models pull
 ```
 
-Downloads embedding model (~600MB), reranker (~700MB), and query expander (~1.2GB) via the configured model provider (default: HuggingFace Hub) to `~/.cache/kbolt/models/{role}/` (`embedder`, `reranker`, `expander`). The command reports per-model progress events and a final download summary.
+Downloads role artifacts via the configured model provider (default: HuggingFace Hub) to `~/.cache/kbolt/models/{role}/` (`embedder`, `reranker`, `expander`). In V1 this is selective per role (embedder: one ONNX + tokenizer, text roles: one GGUF each), with per-model progress events and a final download summary.
 
 Embedding inference provider scope (V1):
 - supported: `openai_compatible`, `voyage`, `local_onnx`
