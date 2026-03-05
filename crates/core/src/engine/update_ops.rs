@@ -1,0 +1,601 @@
+use super::*;
+
+impl Engine {
+    pub fn update(&self, options: UpdateOptions) -> Result<UpdateReport> {
+        let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
+        self.update_unlocked(options)
+    }
+
+    pub(super) fn update_unlocked(&self, options: UpdateOptions) -> Result<UpdateReport> {
+        let started = Instant::now();
+        let mut report = UpdateReport {
+            scanned: 0,
+            skipped_mtime: 0,
+            skipped_hash: 0,
+            added: 0,
+            updated: 0,
+            deactivated: 0,
+            reactivated: 0,
+            reaped: 0,
+            embedded: 0,
+            errors: Vec::new(),
+            elapsed_ms: 0,
+        };
+
+        if !options.dry_run {
+            self.replay_fts_dirty_documents(&mut report)?;
+        }
+
+        let targets = self.resolve_update_targets(&options)?;
+        if targets.is_empty() {
+            report.elapsed_ms = started.elapsed().as_millis() as u64;
+            return Ok(report);
+        }
+
+        self.reconcile_dense_integrity(&targets, &options)?;
+
+        let mut fts_dirty_by_space: HashMap<String, HashSet<i64>> = HashMap::new();
+        for target in &targets {
+            self.update_collection_target(target, &options, &mut report, &mut fts_dirty_by_space)?;
+        }
+
+        if !options.dry_run {
+            for (space, doc_ids) in fts_dirty_by_space {
+                if doc_ids.is_empty() {
+                    continue;
+                }
+
+                self.storage.commit_tantivy(&space)?;
+                let mut ids = doc_ids.into_iter().collect::<Vec<_>>();
+                ids.sort_unstable();
+                self.storage.batch_clear_fts_dirty(&ids)?;
+            }
+
+            self.embed_pending_chunks(&options, &mut report)?;
+
+            let reaped = self.storage.reap_documents(self.config.reaping.days)?;
+            report.reaped = reaped.len();
+        }
+
+        report.elapsed_ms = started.elapsed().as_millis() as u64;
+        Ok(report)
+    }
+
+    fn reconcile_dense_integrity(&self, targets: &[UpdateTarget], options: &UpdateOptions) -> Result<()> {
+        if options.no_embed || options.dry_run {
+            return Ok(());
+        }
+
+        let expected_model = self.embedding_model_key();
+        let mut visited_spaces = HashSet::new();
+        for target in targets {
+            if !visited_spaces.insert(target.collection.space_id) {
+                continue;
+            }
+
+            let models = self
+                .storage
+                .list_embedding_models_in_space(target.collection.space_id)?;
+            if models.iter().any(|model| model != expected_model) {
+                self.storage
+                    .delete_embeddings_for_space(target.collection.space_id)?;
+                self.storage.clear_usearch(&target.space)?;
+                continue;
+            }
+
+            let sqlite_count = self
+                .storage
+                .count_embedded_chunks(Some(target.collection.space_id))?;
+            let usearch_count = self.storage.count_usearch(&target.space)?;
+
+            if sqlite_count == usearch_count {
+                continue;
+            }
+
+            self.storage
+                .delete_embeddings_for_space(target.collection.space_id)?;
+            self.storage.clear_usearch(&target.space)?;
+        }
+
+        Ok(())
+    }
+
+    fn embed_pending_chunks(&self, options: &UpdateOptions, report: &mut UpdateReport) -> Result<()> {
+        if options.no_embed || options.dry_run {
+            return Ok(());
+        }
+
+        let Some(embedder) = self.embedder.as_ref() else {
+            return Ok(());
+        };
+
+        let model = self.embedding_model_key();
+        loop {
+            let backlog = self.storage.get_unembedded_chunks(model, 64)?;
+            if backlog.is_empty() {
+                break;
+            }
+
+            let mut chunk_ids = Vec::new();
+            let mut spaces = Vec::new();
+            let mut texts = Vec::new();
+            for record in backlog {
+                let full_path = record.collection_path.join(&record.doc_path);
+                let bytes = match std::fs::read(&full_path) {
+                    Ok(bytes) => bytes,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(err) => {
+                        report.errors.push(file_error(
+                            Some(full_path),
+                            format!("embed read failed: {err}"),
+                        ));
+                        continue;
+                    }
+                };
+
+                let mut text = chunk_text_from_bytes(&bytes, record.offset, record.length);
+                if text.trim().is_empty() {
+                    text = " ".to_string();
+                }
+
+                chunk_ids.push(record.chunk_id);
+                spaces.push(record.space_name);
+                texts.push(text);
+            }
+
+            if chunk_ids.is_empty() {
+                break;
+            }
+
+            let vectors = embedder.embed_batch(&texts)?;
+            if vectors.len() != chunk_ids.len() {
+                return Err(KboltError::Inference(format!(
+                    "embedder returned {} vectors for {} chunks",
+                    vectors.len(),
+                    chunk_ids.len()
+                ))
+                .into());
+            }
+
+            let mut grouped_vectors: HashMap<String, Vec<(i64, Vec<f32>)>> = HashMap::new();
+            let mut embedding_rows = Vec::with_capacity(chunk_ids.len());
+            for ((chunk_id, space), vector) in chunk_ids
+                .iter()
+                .zip(spaces.iter())
+                .zip(vectors.into_iter())
+            {
+                if vector.is_empty() {
+                    return Err(KboltError::Inference(format!(
+                        "embedder returned an empty vector for chunk {chunk_id}"
+                    ))
+                    .into());
+                }
+
+                grouped_vectors
+                    .entry(space.clone())
+                    .or_default()
+                    .push((*chunk_id, vector));
+                embedding_rows.push((*chunk_id, model));
+            }
+
+            for (space, vectors) in grouped_vectors {
+                let refs = vectors
+                    .iter()
+                    .map(|(chunk_id, vector)| (*chunk_id, vector.as_slice()))
+                    .collect::<Vec<_>>();
+                self.storage.batch_insert_usearch(&space, &refs)?;
+            }
+
+            self.storage.insert_embeddings(&embedding_rows)?;
+            report.embedded = report.embedded.saturating_add(chunk_ids.len());
+        }
+
+        Ok(())
+    }
+
+    fn replay_fts_dirty_documents(&self, report: &mut UpdateReport) -> Result<()> {
+        let records = self.storage.get_fts_dirty_documents()?;
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        let mut cleared_by_space: HashMap<String, Vec<i64>> = HashMap::new();
+        for record in records {
+            let space_name = record.space_name;
+            let doc_id = record.doc_id;
+
+            if record.chunks.is_empty() {
+                cleared_by_space.entry(space_name).or_default().push(doc_id);
+                continue;
+            }
+
+            let full_path = record.collection_path.join(&record.doc_path);
+            let bytes = match std::fs::read(&full_path) {
+                Ok(bytes) => bytes,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => {
+                    report.errors.push(file_error(
+                        Some(full_path),
+                        format!("fts replay read failed: {err}"),
+                    ));
+                    continue;
+                }
+            };
+            if sha256_hex(&bytes) != record.doc_hash {
+                continue;
+            }
+
+            self.storage.delete_tantivy_by_doc(&space_name, doc_id)?;
+
+            let file_body = String::from_utf8_lossy(&bytes).into_owned();
+            let entries = record
+                .chunks
+                .iter()
+                .map(|chunk| {
+                    let chunk_body = chunk_text_from_bytes(&bytes, chunk.offset, chunk.length);
+                    let source_body = if chunk_body.is_empty() {
+                        file_body.as_str()
+                    } else {
+                        chunk_body.as_str()
+                    };
+                    TantivyEntry {
+                        chunk_id: chunk.id,
+                        doc_id,
+                        filepath: record.doc_path.clone(),
+                        title: record.doc_title.clone(),
+                        heading: chunk.heading.clone(),
+                        body: retrieval_text_with_prefix(
+                            source_body,
+                            record.doc_title.as_str(),
+                            chunk.heading.as_deref(),
+                            self.config.chunking.defaults.contextual_prefix,
+                        ),
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            self.storage.index_tantivy(&space_name, &entries)?;
+            cleared_by_space.entry(space_name).or_default().push(doc_id);
+        }
+
+        for (space_name, mut doc_ids) in cleared_by_space {
+            if doc_ids.is_empty() {
+                continue;
+            }
+
+            doc_ids.sort_unstable();
+            doc_ids.dedup();
+            self.storage.commit_tantivy(&space_name)?;
+            self.storage.batch_clear_fts_dirty(&doc_ids)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn resolve_update_targets(&self, options: &UpdateOptions) -> Result<Vec<UpdateTarget>> {
+        let mut targets = Vec::new();
+
+        if options.collections.is_empty() {
+            return self.resolve_update_targets_for_all_collections(options.space.as_deref());
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for raw_collection_name in &options.collections {
+            let collection_name = raw_collection_name.trim();
+            if collection_name.is_empty() {
+                return Err(
+                    KboltError::InvalidInput("collection names cannot be empty".to_string()).into(),
+                );
+            }
+
+            let resolved_space =
+                self.resolve_space_row(options.space.as_deref(), Some(collection_name))?;
+            let collection = self
+                .storage
+                .get_collection(resolved_space.id, collection_name)?;
+
+            if seen.insert((collection.space_id, collection.name.clone())) {
+                targets.push(UpdateTarget {
+                    space: resolved_space.name,
+                    collection,
+                });
+            }
+        }
+
+        Ok(targets)
+    }
+
+    fn resolve_update_targets_for_all_collections(
+        &self,
+        space: Option<&str>,
+    ) -> Result<Vec<UpdateTarget>> {
+        let (space_id_filter, spaces_by_id) = if let Some(space_name) = space {
+            let resolved = self.resolve_space_row(Some(space_name), None)?;
+            let mut map = std::collections::HashMap::new();
+            map.insert(resolved.id, resolved.name.clone());
+            (Some(resolved.id), map)
+        } else {
+            let spaces = self.storage.list_spaces()?;
+            let map = spaces
+                .into_iter()
+                .map(|space| (space.id, space.name))
+                .collect::<std::collections::HashMap<_, _>>();
+            (None, map)
+        };
+
+        let collections = self.storage.list_collections(space_id_filter)?;
+        let mut targets = Vec::with_capacity(collections.len());
+        for collection in collections {
+            let space_name = spaces_by_id
+                .get(&collection.space_id)
+                .ok_or_else(|| {
+                    KboltError::Internal(format!(
+                        "missing space mapping for collection '{}'",
+                        collection.name
+                    ))
+                })?
+                .clone();
+            targets.push(UpdateTarget {
+                space: space_name,
+                collection,
+            });
+        }
+
+        Ok(targets)
+    }
+
+    fn update_collection_target(
+        &self,
+        target: &UpdateTarget,
+        options: &UpdateOptions,
+        report: &mut UpdateReport,
+        fts_dirty_by_space: &mut HashMap<String, HashSet<i64>>,
+    ) -> Result<()> {
+        let all_documents = self.storage.list_documents(target.collection.id, false)?;
+        let mut docs_by_path: HashMap<String, DocumentRow> = all_documents
+            .into_iter()
+            .map(|doc| (doc.path.clone(), doc))
+            .collect();
+        let mut seen_paths = HashSet::new();
+        let extension_filter = normalized_extension_filter(target.collection.extensions.as_deref());
+        let ignore_matcher = load_collection_ignore_matcher(
+            &self.config.config_dir,
+            &target.collection.path,
+            &target.space,
+            &target.collection.name,
+        )?;
+        let extractor_registry = default_registry();
+        let mut touched_collection = false;
+
+        for entry in WalkDir::new(&target.collection.path)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| {
+                !entry.file_type().is_dir() || !is_hard_ignored_dir_name(entry.file_name())
+            })
+        {
+            let entry = match entry {
+                Ok(item) => item,
+                Err(err) => {
+                    report.errors.push(file_error(
+                        err.path().map(Path::to_path_buf),
+                        format!("walkdir error: {err}"),
+                    ));
+                    continue;
+                }
+            };
+
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            if is_hard_ignored_file(entry.path()) {
+                continue;
+            }
+
+            if !extension_allowed(entry.path(), extension_filter.as_ref()) {
+                continue;
+            }
+
+            let relative_path = match collection_relative_path(&target.collection.path, entry.path()) {
+                Ok(path) => path,
+                Err(err) => {
+                    report.errors.push(file_error(Some(entry.path().to_path_buf()), err.to_string()));
+                    continue;
+                }
+            };
+
+            if let Some(matcher) = ignore_matcher.as_ref() {
+                if matcher.matched(Path::new(&relative_path), false).is_ignore() {
+                    continue;
+                }
+            }
+
+            let Some(extractor) = extractor_registry.resolve_for_path(entry.path()) else {
+                continue;
+            };
+
+            report.scanned += 1;
+            seen_paths.insert(relative_path.clone());
+
+            let metadata = match entry.metadata() {
+                Ok(data) => data,
+                Err(err) => {
+                    report
+                        .errors
+                        .push(file_error(Some(entry.path().to_path_buf()), err.to_string()));
+                    continue;
+                }
+            };
+
+            let modified = match modified_token(&metadata) {
+                Ok(value) => value,
+                Err(err) => {
+                    report.errors.push(file_error(
+                        Some(entry.path().to_path_buf()),
+                        format!("modified timestamp error: {err}"),
+                    ));
+                    continue;
+                }
+            };
+
+            if let Some(existing) = docs_by_path.get(&relative_path) {
+                if existing.active && existing.modified == modified {
+                    report.skipped_mtime += 1;
+                    continue;
+                }
+            }
+
+            let bytes = match std::fs::read(entry.path()) {
+                Ok(data) => data,
+                Err(err) => {
+                    report
+                        .errors
+                        .push(file_error(Some(entry.path().to_path_buf()), err.to_string()));
+                    continue;
+                }
+            };
+            let hash = sha256_hex(&bytes);
+            let mut title = file_title(entry.path());
+
+            let existing = docs_by_path.get(&relative_path).cloned();
+            if let Some(doc) = existing.as_ref() {
+                if doc.hash == hash {
+                    if doc.active {
+                        report.skipped_hash += 1;
+                    } else {
+                        report.reactivated += 1;
+                    }
+
+                    if !options.dry_run {
+                        self.storage.update_document_metadata(doc.id, &title, &modified)?;
+                    }
+                    continue;
+                }
+
+                report.updated += 1;
+                if !doc.active {
+                    report.reactivated += 1;
+                }
+            } else {
+                report.added += 1;
+            }
+
+            if options.dry_run {
+                continue;
+            }
+
+            let extracted = match extractor.extract(entry.path(), &bytes) {
+                Ok(document) => document,
+                Err(err) => {
+                    report.errors.push(file_error(
+                        Some(entry.path().to_path_buf()),
+                        format!("extract failed: {err}"),
+                    ));
+                    continue;
+                }
+            };
+            if let Some(extracted_title) = extracted.title.as_deref() {
+                title = extracted_title.to_string();
+            }
+
+            let doc_id = self.storage.upsert_document(
+                target.collection.id,
+                &relative_path,
+                &title,
+                &hash,
+                &modified,
+            )?;
+
+            if let Some(doc) = existing.as_ref() {
+                let old_chunk_ids = self.storage.delete_chunks_for_document(doc.id)?;
+                if !old_chunk_ids.is_empty() {
+                    self.storage.delete_tantivy(&target.space, &old_chunk_ids)?;
+                    self.storage.delete_usearch(&target.space, &old_chunk_ids)?;
+                }
+            }
+
+            let policy = resolve_policy(
+                &self.config.chunking,
+                Some(extractor.profile_key()),
+                None,
+            );
+            let final_chunks = chunk_document(&extracted, &policy);
+
+            let chunk_inserts = final_chunks
+                .iter()
+                .enumerate()
+                .map(|(index, chunk)| ChunkInsert {
+                    seq: index as i32,
+                    offset: chunk.offset,
+                    length: chunk.length,
+                    heading: chunk.heading.clone(),
+                    kind: chunk.kind.as_storage_kind().to_string(),
+                })
+                .collect::<Vec<_>>();
+            let body = String::from_utf8_lossy(&bytes).into_owned();
+            let chunk_ids = self.storage.insert_chunks(doc_id, &chunk_inserts)?;
+
+            if !chunk_ids.is_empty() {
+                let entries = chunk_ids
+                    .iter()
+                    .zip(final_chunks.iter())
+                    .map(|(chunk_id, chunk)| TantivyEntry {
+                        chunk_id: *chunk_id,
+                        doc_id,
+                        filepath: relative_path.clone(),
+                        title: title.clone(),
+                        heading: chunk.heading.clone(),
+                        body: retrieval_text_with_prefix(
+                            if chunk.text.is_empty() {
+                                body.as_str()
+                            } else {
+                                chunk.text.as_str()
+                            },
+                            title.as_str(),
+                            chunk.heading.as_deref(),
+                            policy.contextual_prefix,
+                        ),
+                    })
+                    .collect::<Vec<_>>();
+                self.storage.index_tantivy(
+                    &target.space,
+                    &entries,
+                )?;
+                fts_dirty_by_space
+                    .entry(target.space.clone())
+                    .or_default()
+                    .insert(doc_id);
+            }
+
+            docs_by_path.insert(
+                relative_path.clone(),
+                self.storage
+                    .get_document_by_path(target.collection.id, &relative_path)?
+                    .ok_or_else(|| {
+                        KboltError::Internal(format!(
+                            "document missing after upsert: collection={}, path={relative_path}",
+                            target.collection.id
+                        ))
+                    })?,
+            );
+            touched_collection = true;
+        }
+
+        for doc in docs_by_path.values() {
+            if doc.active && !seen_paths.contains(&doc.path) {
+                report.deactivated += 1;
+                if !options.dry_run {
+                    self.storage.deactivate_document(doc.id)?;
+                    touched_collection = true;
+                }
+            }
+        }
+
+        if touched_collection && !options.dry_run {
+            self.storage.update_collection_timestamp(target.collection.id)?;
+        }
+
+        Ok(())
+    }
+}
