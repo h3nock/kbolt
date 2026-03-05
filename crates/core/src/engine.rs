@@ -788,7 +788,12 @@ impl Engine {
 
     pub fn pull_models(&self) -> Result<PullReport> {
         let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
-        models::pull(&self.config.models, &self.model_dir())
+        models::pull(
+            &self.config.models,
+            self.config.embeddings.as_ref(),
+            &self.config.inference,
+            &self.model_dir(),
+        )
     }
 
     pub fn pull_models_with_progress<F>(&self, on_event: F) -> Result<PullReport>
@@ -796,7 +801,13 @@ impl Engine {
         F: FnMut(ModelPullEvent),
     {
         let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
-        models::pull_with_progress(&self.config.models, &self.model_dir(), on_event)
+        models::pull_with_progress(
+            &self.config.models,
+            self.config.embeddings.as_ref(),
+            &self.config.inference,
+            &self.model_dir(),
+            on_event,
+        )
     }
 
     pub fn config(&self) -> &Config {

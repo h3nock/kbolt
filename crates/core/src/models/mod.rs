@@ -5,7 +5,10 @@ use kbolt_types::KboltError;
 use kbolt_types::{ModelInfo, ModelStatus, PullReport};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ModelConfig, ModelProvider, ModelSourceConfig};
+use crate::config::{
+    EmbeddingConfig, InferenceConfig, ModelConfig, ModelProvider, ModelSourceConfig,
+    TextInferenceConfig, TextInferenceProvider,
+};
 use crate::Result;
 
 mod artifacts;
@@ -35,12 +38,13 @@ pub(crate) use inference::{
     build_embedder_with_local_runtime, build_expander_with_local_runtime,
     build_reranker_with_local_runtime,
 };
-pub(crate) use provider::ModelArtifactProvider;
+pub(crate) use provider::{ModelArtifactProvider, ModelDownloadRequest, ModelFileRequirement};
 use providers::hf::HfHubDownloader;
 pub(crate) use reranker::Reranker;
 
 #[derive(Debug, Clone)]
 struct ModelTarget {
+    role: ModelRole,
     role_dir: &'static str,
     source: ModelSourceConfig,
 }
@@ -118,22 +122,45 @@ pub enum ModelPullEvent {
     },
 }
 
-pub fn pull(config: &ModelConfig, model_dir: &Path) -> Result<PullReport> {
+pub fn pull(
+    model_config: &ModelConfig,
+    embeddings: Option<&EmbeddingConfig>,
+    inference: &InferenceConfig,
+    model_dir: &Path,
+) -> Result<PullReport> {
     let downloader = HfHubDownloader;
-    pull_with_downloader_and_progress(config, model_dir, &downloader, |_| {})
+    pull_with_downloader_and_progress(
+        model_config,
+        embeddings,
+        inference,
+        model_dir,
+        &downloader,
+        |_| {},
+    )
 }
 
 #[cfg(test)]
 pub(crate) fn pull_with_downloader(
-    config: &ModelConfig,
+    model_config: &ModelConfig,
+    embeddings: Option<&EmbeddingConfig>,
+    inference: &InferenceConfig,
     model_dir: &Path,
     downloader: &dyn ModelArtifactProvider,
 ) -> Result<PullReport> {
-    pull_with_downloader_and_progress(config, model_dir, downloader, |_| {})
+    pull_with_downloader_and_progress(
+        model_config,
+        embeddings,
+        inference,
+        model_dir,
+        downloader,
+        |_| {},
+    )
 }
 
 pub fn pull_with_progress<F>(
-    config: &ModelConfig,
+    model_config: &ModelConfig,
+    embeddings: Option<&EmbeddingConfig>,
+    inference: &InferenceConfig,
     model_dir: &Path,
     on_event: F,
 ) -> Result<PullReport>
@@ -141,11 +168,20 @@ where
     F: FnMut(ModelPullEvent),
 {
     let downloader = HfHubDownloader;
-    pull_with_downloader_and_progress(config, model_dir, &downloader, on_event)
+    pull_with_downloader_and_progress(
+        model_config,
+        embeddings,
+        inference,
+        model_dir,
+        &downloader,
+        on_event,
+    )
 }
 
 pub(crate) fn pull_with_downloader_and_progress<F>(
-    config: &ModelConfig,
+    model_config: &ModelConfig,
+    embeddings: Option<&EmbeddingConfig>,
+    inference: &InferenceConfig,
     model_dir: &Path,
     downloader: &dyn ModelArtifactProvider,
     mut on_event: F,
@@ -160,7 +196,7 @@ where
         total_bytes: 0,
     };
 
-    for target in model_targets(config) {
+    for target in model_targets(model_config) {
         let role = target.role_dir.to_string();
         let model = target.source.id.clone();
         let target_dir = model_dir.join(target.role_dir);
@@ -178,7 +214,8 @@ where
             role: role.clone(),
             model: model.clone(),
         });
-        let downloaded_bytes = downloader.download_model(&target.source.id, &target_dir)?;
+        let request = download_request_for_target(&target, embeddings, inference);
+        let downloaded_bytes = downloader.download_model(&request, &target_dir)?;
         on_event(ModelPullEvent::DownloadCompleted {
             role,
             model: model.clone(),
@@ -230,18 +267,107 @@ pub(crate) fn resolve_model_artifact(
 fn model_targets(config: &ModelConfig) -> [ModelTarget; 3] {
     [
         ModelTarget {
+            role: ModelRole::Embedder,
             role_dir: MODEL_DIRNAME_EMBEDDER,
             source: config.embedder.clone(),
         },
         ModelTarget {
+            role: ModelRole::Reranker,
             role_dir: MODEL_DIRNAME_RERANKER,
             source: config.reranker.clone(),
         },
         ModelTarget {
+            role: ModelRole::Expander,
             role_dir: MODEL_DIRNAME_EXPANDER,
             source: config.expander.clone(),
         },
     ]
+}
+
+fn download_request_for_target(
+    target: &ModelTarget,
+    embeddings: Option<&EmbeddingConfig>,
+    inference: &InferenceConfig,
+) -> ModelDownloadRequest {
+    let requirements = match target.role {
+        ModelRole::Embedder => embedder_download_requirements(embeddings),
+        ModelRole::Reranker => text_role_download_requirements(
+            inference.reranker.as_ref(),
+            "inference.reranker.model_file",
+        ),
+        ModelRole::Expander => text_role_download_requirements(
+            inference.expander.as_ref(),
+            "inference.expander.model_file",
+        ),
+    };
+
+    ModelDownloadRequest {
+        model_id: target.source.id.clone(),
+        requirements,
+    }
+}
+
+fn embedder_download_requirements(
+    embeddings: Option<&EmbeddingConfig>,
+) -> Vec<ModelFileRequirement> {
+    let (onnx_override, tokenizer_override) = match embeddings {
+        Some(EmbeddingConfig::LocalOnnx {
+            onnx_file,
+            tokenizer_file,
+            ..
+        }) => (
+            configured_repo_path(onnx_file.as_deref()),
+            configured_repo_path(tokenizer_file.as_deref()),
+        ),
+        _ => (None, None),
+    };
+
+    vec![
+        onnx_override
+            .map(|path| ModelFileRequirement::ExactPath {
+                path,
+                config_field: "embeddings.onnx_file",
+            })
+            .unwrap_or(ModelFileRequirement::SingleExtension {
+                extension: "onnx",
+                config_field: "embeddings.onnx_file",
+            }),
+        tokenizer_override
+            .map(|path| ModelFileRequirement::ExactPath {
+                path,
+                config_field: "embeddings.tokenizer_file",
+            })
+            .unwrap_or(ModelFileRequirement::SingleTokenizerJson {
+                config_field: "embeddings.tokenizer_file",
+            }),
+    ]
+}
+
+fn text_role_download_requirements(
+    config: Option<&TextInferenceConfig>,
+    config_field: &'static str,
+) -> Vec<ModelFileRequirement> {
+    let configured = config
+        .and_then(|config| match &config.provider {
+            TextInferenceProvider::LocalLlama { model_file, .. } => {
+                configured_repo_path(model_file.as_deref())
+            }
+            TextInferenceProvider::OpenAiCompatible { .. } => None,
+        })
+        .map(|path| ModelFileRequirement::ExactPath { path, config_field });
+
+    vec![configured.unwrap_or(ModelFileRequirement::SingleExtension {
+        extension: "gguf",
+        config_field,
+    })]
+}
+
+fn configured_repo_path(configured: Option<&str>) -> Option<String> {
+    let configured = configured?.trim();
+    if configured.is_empty() || Path::new(configured).is_absolute() {
+        return None;
+    }
+    Some(configured.trim_start_matches("./").to_string())
 }
 
 fn info_for_target(model_dir: &Path, target: &ModelTarget) -> Result<ModelInfo> {

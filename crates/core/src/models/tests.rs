@@ -1,12 +1,17 @@
 use std::path::Path;
+use std::sync::Mutex;
 
 use serde_json::json;
 use tempfile::tempdir;
 
-use crate::config::{ModelConfig, ModelProvider, ModelSourceConfig};
+use crate::config::{
+    EmbeddingConfig, InferenceConfig, ModelConfig, ModelProvider, ModelSourceConfig,
+    TextInferenceConfig, TextInferenceOutputMode, TextInferenceProvider,
+};
 use crate::models::{
     build_embedder, pull_with_downloader, pull_with_downloader_and_progress,
-    resolve_model_artifact, status, ModelArtifactProvider, ModelPullEvent, ModelRole,
+    resolve_model_artifact, status, ModelArtifactProvider, ModelDownloadRequest,
+    ModelFileRequirement, ModelPullEvent, ModelRole,
 };
 use crate::Result;
 
@@ -18,10 +23,34 @@ struct FakeDownloader {
 }
 
 impl ModelArtifactProvider for FakeDownloader {
-    fn download_model(&self, model_id: &str, target_dir: &Path) -> Result<u64> {
+    fn download_model(&self, request: &ModelDownloadRequest, target_dir: &Path) -> Result<u64> {
         std::fs::create_dir_all(target_dir)?;
-        std::fs::write(target_dir.join("model.bin"), model_id.as_bytes())?;
+        std::fs::write(target_dir.join("model.bin"), request.model_id.as_bytes())?;
         Ok(self.bytes_per_model)
+    }
+}
+
+#[derive(Default)]
+struct CapturingDownloader {
+    requests: Mutex<Vec<ModelDownloadRequest>>,
+}
+
+impl CapturingDownloader {
+    fn take_requests(&self) -> Vec<ModelDownloadRequest> {
+        let mut guard = self.requests.lock().expect("lock requests");
+        std::mem::take(&mut *guard)
+    }
+}
+
+impl ModelArtifactProvider for CapturingDownloader {
+    fn download_model(&self, request: &ModelDownloadRequest, target_dir: &Path) -> Result<u64> {
+        self.requests
+            .lock()
+            .expect("lock requests")
+            .push(request.clone());
+        std::fs::create_dir_all(target_dir)?;
+        std::fs::write(target_dir.join("model.bin"), request.model_id.as_bytes())?;
+        Ok(1)
     }
 }
 
@@ -102,7 +131,14 @@ fn pull_downloads_all_missing_models_and_reports_bytes() {
         bytes_per_model: 11,
     };
 
-    let report = pull_with_downloader(&config, root.path(), &downloader).expect("pull models");
+    let report = pull_with_downloader(
+        &config,
+        None,
+        &crate::config::InferenceConfig::default(),
+        root.path(),
+        &downloader,
+    )
+    .expect("pull models");
     assert_eq!(report.downloaded.len(), 3);
     assert_eq!(report.already_present.len(), 0);
     assert_eq!(report.total_bytes, 33);
@@ -122,7 +158,14 @@ fn pull_skips_models_that_are_already_present() {
 
     seed_model(root.path(), "embedder", &config.embedder, b"existing");
 
-    let report = pull_with_downloader(&config, root.path(), &downloader).expect("pull models");
+    let report = pull_with_downloader(
+        &config,
+        None,
+        &crate::config::InferenceConfig::default(),
+        root.path(),
+        &downloader,
+    )
+    .expect("pull models");
     assert_eq!(report.downloaded.len(), 2);
     assert_eq!(report.already_present, vec!["embed-model".to_string()]);
     assert_eq!(report.total_bytes, 10);
@@ -137,9 +180,16 @@ fn pull_emits_progress_events_for_downloaded_and_present_models() {
     seed_model(root.path(), "embedder", &config.embedder, b"existing");
 
     let mut events = Vec::new();
-    let report = pull_with_downloader_and_progress(&config, root.path(), &downloader, |event| {
-        events.push(event);
-    })
+    let report = pull_with_downloader_and_progress(
+        &config,
+        None,
+        &crate::config::InferenceConfig::default(),
+        root.path(),
+        &downloader,
+        |event| {
+            events.push(event);
+        },
+    )
     .expect("pull models");
 
     assert_eq!(report.downloaded, vec!["rerank-model", "expand-model"]);
@@ -201,7 +251,14 @@ fn pull_redownloads_model_when_manifest_does_not_match_source() {
     seed_model(root.path(), "reranker", &config.reranker, b"existing");
     seed_model(root.path(), "expander", &config.expander, b"existing");
 
-    let report = pull_with_downloader(&config, root.path(), &downloader).expect("pull models");
+    let report = pull_with_downloader(
+        &config,
+        None,
+        &crate::config::InferenceConfig::default(),
+        root.path(),
+        &downloader,
+    )
+    .expect("pull models");
     assert_eq!(report.downloaded, vec!["embed-model"]);
     assert_eq!(
         report.already_present,
@@ -268,4 +325,119 @@ fn resolve_model_artifact_errors_when_manifest_is_missing_or_mismatched() {
 fn build_embedder_returns_none_without_embedding_config() {
     let embedder = build_embedder(None).expect("build embedder");
     assert!(embedder.is_none());
+}
+
+#[test]
+fn pull_builds_role_specific_default_download_requirements() {
+    let root = tempdir().expect("create temp root");
+    let config = test_config();
+    let downloader = CapturingDownloader::default();
+    let inference = InferenceConfig::default();
+
+    let report = pull_with_downloader(&config, None, &inference, root.path(), &downloader)
+        .expect("pull models");
+    assert_eq!(report.downloaded.len(), 3);
+
+    let requests = downloader.take_requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].model_id, "embed-model");
+    assert_eq!(
+        requests[0].requirements,
+        vec![
+            ModelFileRequirement::SingleExtension {
+                extension: "onnx",
+                config_field: "embeddings.onnx_file",
+            },
+            ModelFileRequirement::SingleTokenizerJson {
+                config_field: "embeddings.tokenizer_file",
+            },
+        ]
+    );
+    assert_eq!(requests[1].model_id, "rerank-model");
+    assert_eq!(
+        requests[1].requirements,
+        vec![ModelFileRequirement::SingleExtension {
+            extension: "gguf",
+            config_field: "inference.reranker.model_file",
+        }]
+    );
+    assert_eq!(requests[2].model_id, "expand-model");
+    assert_eq!(
+        requests[2].requirements,
+        vec![ModelFileRequirement::SingleExtension {
+            extension: "gguf",
+            config_field: "inference.expander.model_file",
+        }]
+    );
+}
+
+#[test]
+fn pull_uses_configured_relative_file_overrides() {
+    let root = tempdir().expect("create temp root");
+    let config = test_config();
+    let downloader = CapturingDownloader::default();
+    let embeddings = EmbeddingConfig::LocalOnnx {
+        onnx_file: Some("onnx/model.onnx".to_string()),
+        tokenizer_file: Some("tokenizer.json".to_string()),
+        max_length: 512,
+    };
+    let inference = InferenceConfig {
+        reranker: Some(TextInferenceConfig {
+            provider: TextInferenceProvider::LocalLlama {
+                model_file: Some("weights/rerank.gguf".to_string()),
+                max_tokens: 128,
+                n_ctx: 2048,
+                n_gpu_layers: 0,
+            },
+        }),
+        expander: Some(TextInferenceConfig {
+            provider: TextInferenceProvider::OpenAiCompatible {
+                output_mode: TextInferenceOutputMode::JsonObject,
+                model: "remote".to_string(),
+                base_url: "https://example.com/v1".to_string(),
+                api_key_env: None,
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        }),
+    };
+
+    let report = pull_with_downloader(
+        &config,
+        Some(&embeddings),
+        &inference,
+        root.path(),
+        &downloader,
+    )
+    .expect("pull models");
+    assert_eq!(report.downloaded.len(), 3);
+
+    let requests = downloader.take_requests();
+    assert_eq!(
+        requests[0].requirements,
+        vec![
+            ModelFileRequirement::ExactPath {
+                path: "onnx/model.onnx".to_string(),
+                config_field: "embeddings.onnx_file",
+            },
+            ModelFileRequirement::ExactPath {
+                path: "tokenizer.json".to_string(),
+                config_field: "embeddings.tokenizer_file",
+            },
+        ]
+    );
+    assert_eq!(
+        requests[1].requirements,
+        vec![ModelFileRequirement::ExactPath {
+            path: "weights/rerank.gguf".to_string(),
+            config_field: "inference.reranker.model_file",
+        }]
+    );
+    assert_eq!(
+        requests[2].requirements,
+        vec![ModelFileRequirement::SingleExtension {
+            extension: "gguf",
+            config_field: "inference.expander.model_file",
+        }]
+    );
 }
