@@ -19,26 +19,31 @@ use crate::Result;
 
 #[derive(Debug, Clone)]
 struct OpenAiCompatibleEmbedder {
-    config: EmbeddingConfig,
+    client: HttpJsonClient,
+    model: String,
+    batch_size: usize,
 }
 
 #[derive(Debug, Clone)]
 struct VoyageEmbedder {
-    config: EmbeddingConfig,
+    client: HttpJsonClient,
+    model: String,
+    batch_size: usize,
 }
 
 #[derive(Debug, Clone)]
 struct OpenAiCompatibleReranker {
-    config: TextInferenceConfig,
+    chat: ChatClient,
 }
 
 #[derive(Debug, Clone)]
 struct OpenAiCompatibleExpander {
-    config: TextInferenceConfig,
+    chat: ChatClient,
 }
 
 const MAX_RETRY_AFTER_SECONDS: u64 = 30;
 
+#[derive(Debug, Clone)]
 struct HttpJsonClient {
     agent: ureq::Agent,
     base_url: String,
@@ -141,6 +146,7 @@ impl HttpJsonClient {
     }
 }
 
+#[derive(Debug, Clone)]
 struct ChatClient {
     http: HttpJsonClient,
     provider_name: &'static str,
@@ -220,12 +226,25 @@ pub(crate) fn build_embedder(
         return Ok(None);
     };
 
+    let model = config.model.clone();
+    let batch_size = config.batch_size;
+    let client = HttpJsonClient::new(
+        &config.base_url,
+        config.api_key_env.as_deref(),
+        config.timeout_ms,
+        config.max_retries,
+        "embedding",
+    );
     let embedder: Arc<dyn Embedder> = match config.provider {
         EmbeddingProvider::OpenAiCompatible => Arc::new(OpenAiCompatibleEmbedder {
-            config: config.clone(),
+            client,
+            model,
+            batch_size,
         }),
         EmbeddingProvider::Voyage => Arc::new(VoyageEmbedder {
-            config: config.clone(),
+            client,
+            model,
+            batch_size,
         }),
     };
     Ok(Some(embedder))
@@ -235,7 +254,7 @@ pub(crate) fn build_reranker(config: Option<&TextInferenceConfig>) -> Result<Arc
     let reranker: Arc<dyn Reranker> = match config {
         Some(config) => match config.provider {
             TextInferenceProvider::OpenAiCompatible => Arc::new(OpenAiCompatibleReranker {
-                config: config.clone(),
+                chat: ChatClient::new(config, "openai_compatible"),
             }),
         },
         None => Arc::new(HeuristicReranker),
@@ -247,7 +266,7 @@ pub(crate) fn build_expander(config: Option<&TextInferenceConfig>) -> Result<Arc
     let expander: Arc<dyn Expander> = match config {
         Some(config) => match config.provider {
             TextInferenceProvider::OpenAiCompatible => Arc::new(OpenAiCompatibleExpander {
-                config: config.clone(),
+                chat: ChatClient::new(config, "openai_compatible"),
             }),
         },
         None => Arc::new(HeuristicExpander),
@@ -257,13 +276,19 @@ pub(crate) fn build_expander(config: Option<&TextInferenceConfig>) -> Result<Arc
 
 impl Embedder for OpenAiCompatibleEmbedder {
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        embed_with_http_api(&self.config, "openai_compatible", texts)
+        embed_with_http_api(
+            &self.client,
+            &self.model,
+            self.batch_size,
+            "openai_compatible",
+            texts,
+        )
     }
 }
 
 impl Embedder for VoyageEmbedder {
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        embed_with_http_api(&self.config, "voyage", texts)
+        embed_with_http_api(&self.client, &self.model, self.batch_size, "voyage", texts)
     }
 }
 
@@ -280,8 +305,7 @@ impl Reranker for OpenAiCompatibleReranker {
         }
         user.push_str("\nRespond with exactly one score per document, in order.");
 
-        let chat = ChatClient::new(&self.config, "openai_compatible");
-        let content = chat.complete(system, &user)?;
+        let content = self.chat.complete(system, &user)?;
         let parsed: RerankerResponse = parse_json_payload("reranker response", &content)?;
         let mut scores = parsed.into_scores();
         if scores.len() != docs.len() {
@@ -311,8 +335,7 @@ impl Expander for OpenAiCompatibleExpander {
         let user = format!(
             "Original query:\n{normalized}\n\nGenerate variants that improve lexical recall, semantic recall, and one HyDE-style descriptive query."
         );
-        let chat = ChatClient::new(&self.config, "openai_compatible");
-        let content = chat.complete(system, &user)?;
+        let content = self.chat.complete(system, &user)?;
         let parsed: ExpanderResponse = parse_json_payload("expander response", &content)?;
 
         let mut seen = std::collections::HashSet::new();
@@ -338,7 +361,9 @@ impl Expander for OpenAiCompatibleExpander {
 }
 
 fn embed_with_http_api(
-    config: &EmbeddingConfig,
+    client: &HttpJsonClient,
+    model: &str,
+    batch_size: usize,
     provider_name: &str,
     texts: &[String],
 ) -> Result<Vec<Vec<f32>>> {
@@ -346,21 +371,14 @@ fn embed_with_http_api(
         return Ok(Vec::new());
     }
 
-    let http = HttpJsonClient::new(
-        &config.base_url,
-        config.api_key_env.as_deref(),
-        config.timeout_ms,
-        config.max_retries,
-        "embedding",
-    );
     let mut vectors = Vec::new();
-    for batch in texts.chunks(config.batch_size) {
+    for batch in texts.chunks(batch_size) {
         let payload = json!({
-            "model": config.model,
+            "model": model,
             "input": batch,
         });
         let parsed: EmbeddingResponseEnvelope =
-            http.post_json("embeddings", &payload, provider_name, "embedding")?;
+            client.post_json("embeddings", &payload, provider_name, "embedding")?;
         let response_vectors = parsed.into_vectors(batch.len())?;
         vectors.extend(response_vectors);
     }
