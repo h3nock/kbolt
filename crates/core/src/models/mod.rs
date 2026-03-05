@@ -9,6 +9,8 @@ use crate::config::{ModelConfig, ModelProvider, ModelSourceConfig};
 use crate::Result;
 
 mod artifacts;
+mod chat;
+mod completion;
 mod embedder;
 mod expander;
 mod http;
