@@ -3,8 +3,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use kbolt_types::KboltError;
-use llama_cpp::standard_sampler::StandardSampler;
-use llama_cpp::{LlamaModel, LlamaParams, SessionParams};
 use ort::session::Session;
 use ort::value::Tensor;
 use serde::Deserialize;
@@ -17,8 +15,8 @@ use crate::models::chat::HttpChatClient;
 use crate::models::completion::CompletionClient;
 use crate::models::expander::HeuristicExpander;
 use crate::models::http::{HttpJsonClient, HttpOperation};
+use crate::models::local_llama::build_local_llama_completion_client;
 use crate::models::reranker::HeuristicReranker;
-use crate::models::text::strip_json_fences;
 use crate::models::{resolve_model_artifact, Embedder, Expander, ModelRole, Reranker};
 use crate::Result;
 
@@ -49,54 +47,6 @@ struct ChatBackedReranker {
 #[derive(Clone)]
 struct ChatBackedExpander {
     chat: Arc<dyn CompletionClient>,
-}
-
-struct LocalLlamaClient {
-    model: Arc<LlamaModel>,
-    max_tokens: usize,
-    n_ctx: u32,
-}
-
-impl LocalLlamaClient {
-    fn new(model_path: &Path, max_tokens: usize, n_ctx: u32, n_gpu_layers: u32) -> Result<Self> {
-        let mut params = LlamaParams::default();
-        params.n_gpu_layers = n_gpu_layers;
-        let model = LlamaModel::load_from_file(model_path, params).map_err(|err| {
-            KboltError::Inference(format!(
-                "failed to load local llama model {}: {err}",
-                model_path.display()
-            ))
-        })?;
-
-        Ok(Self {
-            model: Arc::new(model),
-            max_tokens,
-            n_ctx,
-        })
-    }
-}
-
-impl CompletionClient for LocalLlamaClient {
-    fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
-        let mut session_params = SessionParams::default();
-        session_params.n_ctx = self.n_ctx;
-        let mut session = self
-            .model
-            .create_session(session_params)
-            .map_err(|err| KboltError::Inference(format!("failed to create llama session: {err}")))?;
-
-        let prompt = format!(
-            "System:\n{system_prompt}\n\nUser:\n{user_prompt}\n\nAssistant:\n"
-        );
-        session
-            .advance_context(prompt.as_bytes())
-            .map_err(|err| KboltError::Inference(format!("llama prompt failed: {err}")))?;
-        let completion = session
-            .start_completing_with(StandardSampler::new_greedy(), self.max_tokens)
-            .map_err(|err| KboltError::Inference(format!("llama completion failed: {err}")))?;
-        let text = completion.into_string();
-        Ok(strip_json_fences(&text).trim().to_string())
-    }
 }
 
 #[cfg(test)]
@@ -515,8 +465,7 @@ fn build_local_llama_client(
 ) -> Result<Arc<dyn CompletionClient>> {
     let artifact = resolve_model_artifact(runtime.model_config, runtime.model_dir, role)?;
     let gguf_path = resolve_file_with_extension(&artifact.path, model_file, "gguf", "model_file")?;
-    let client = LocalLlamaClient::new(&gguf_path, max_tokens, n_ctx, n_gpu_layers)?;
-    Ok(Arc::new(client))
+    build_local_llama_completion_client(&gguf_path, max_tokens, n_ctx, n_gpu_layers)
 }
 
 fn embed_with_local_onnx(embedder: &LocalOnnxEmbedder, texts: &[String]) -> Result<Vec<Vec<f32>>> {

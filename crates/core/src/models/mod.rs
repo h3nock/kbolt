@@ -15,6 +15,7 @@ mod embedder;
 mod expander;
 mod http;
 mod inference;
+mod local_llama;
 mod provider;
 mod providers;
 mod reranker;
