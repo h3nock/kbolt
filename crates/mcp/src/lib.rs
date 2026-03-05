@@ -204,6 +204,7 @@ impl McpAdapter {
                 no_rerank,
             } => {
                 let mode = parse_tool_search_mode(mode.as_deref())?;
+                let no_rerank = resolve_tool_no_rerank(&mode, no_rerank);
                 let collections = match collection {
                     Some(name) => {
                         let trimmed = name.trim();
@@ -225,7 +226,7 @@ impl McpAdapter {
                     collections,
                     limit: limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
                     min_score: 0.0,
-                    no_rerank: no_rerank.unwrap_or(false),
+                    no_rerank,
                     debug: false,
                 })?;
                 Ok(McpToolResponse::Search(response))
@@ -493,6 +494,13 @@ fn parse_tool_search_mode(raw_mode: Option<&str>) -> Result<SearchMode> {
     };
 
     Ok(mode)
+}
+
+fn resolve_tool_no_rerank(mode: &SearchMode, no_rerank: Option<bool>) -> bool {
+    match no_rerank {
+        Some(value) => value,
+        None => matches!(mode, SearchMode::Auto),
+    }
 }
 
 fn parse_tool_locator(raw: &str) -> Locator {
@@ -1115,6 +1123,20 @@ mod tests {
                 no_rerank: Some(true),
             }
         );
+    }
+
+    #[test]
+    fn resolve_tool_no_rerank_defaults_auto_to_true() {
+        assert!(super::resolve_tool_no_rerank(&SearchMode::Auto, None));
+        assert!(!super::resolve_tool_no_rerank(&SearchMode::Deep, None));
+        assert!(!super::resolve_tool_no_rerank(&SearchMode::Keyword, None));
+        assert!(!super::resolve_tool_no_rerank(&SearchMode::Semantic, None));
+    }
+
+    #[test]
+    fn resolve_tool_no_rerank_honors_explicit_override() {
+        assert!(!super::resolve_tool_no_rerank(&SearchMode::Auto, Some(false)));
+        assert!(super::resolve_tool_no_rerank(&SearchMode::Deep, Some(true)));
     }
 
     #[test]

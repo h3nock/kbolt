@@ -105,8 +105,10 @@ pub struct SearchArgs {
     pub keyword: bool,
     #[arg(long)]
     pub semantic: bool,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "rerank")]
     pub no_rerank: bool,
+    #[arg(long, conflicts_with = "no_rerank")]
+    pub rerank: bool,
     #[arg(long)]
     pub debug: bool,
 }
@@ -1120,6 +1122,7 @@ mod tests {
                     keyword: false,
                     semantic: false,
                     no_rerank: false,
+                    rerank: false,
                     debug: false
                 }
             ),
@@ -1166,6 +1169,7 @@ mod tests {
                     keyword: true,
                     semantic: false,
                     no_rerank: true,
+                    rerank: false,
                     debug: true
                 }
             ),
@@ -1199,6 +1203,29 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
             Command::Search(_) => panic!("unexpected search command"),
+        }
+    }
+
+    #[test]
+    fn parses_search_rerank_opt_in_flag() {
+        let parsed = Cli::try_parse_from(["kbolt", "search", "alpha", "--rerank"])
+            .expect("parse cli");
+
+        match parsed.command {
+            Command::Search(search) => {
+                assert!(!search.no_rerank);
+                assert!(search.rerank);
+            }
+            Command::Space(_) => panic!("unexpected space command"),
+            Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Models(_) => panic!("unexpected models command"),
+            Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
+            Command::Get(_) => panic!("unexpected get command"),
+            Command::MultiGet(_) => panic!("unexpected multi-get command"),
         }
     }
 }

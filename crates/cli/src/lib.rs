@@ -464,6 +464,7 @@ impl CliAdapter {
         deep: bool,
         keyword: bool,
         semantic: bool,
+        rerank: bool,
         no_rerank: bool,
         debug: bool,
     ) -> Result<String> {
@@ -486,6 +487,7 @@ impl CliAdapter {
         } else {
             SearchMode::Auto
         };
+        let effective_no_rerank = resolve_no_rerank_for_mode(mode.clone(), rerank, no_rerank);
 
         let response = self.engine.search(SearchRequest {
             query: query.to_string(),
@@ -494,7 +496,7 @@ impl CliAdapter {
             collections: collections.to_vec(),
             limit,
             min_score,
-            no_rerank,
+            no_rerank: effective_no_rerank,
             debug,
         })?;
 
@@ -774,6 +776,14 @@ fn format_search_mode(mode: &SearchMode) -> &'static str {
     }
 }
 
+fn resolve_no_rerank_for_mode(mode: SearchMode, rerank: bool, no_rerank: bool) -> bool {
+    match mode {
+        SearchMode::Auto => !rerank,
+        SearchMode::Deep => no_rerank,
+        SearchMode::Keyword | SearchMode::Semantic => true,
+    }
+}
+
 fn parse_cli_locator(raw: &str) -> Locator {
     let trimmed = raw.trim();
     if trimmed.contains('/') {
@@ -815,9 +825,11 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{parse_editor_command, resolve_editor_command, CliAdapter};
+    use super::{
+        parse_editor_command, resolve_editor_command, resolve_no_rerank_for_mode, CliAdapter,
+    };
     use kbolt_core::engine::Engine;
-    use kbolt_types::AddCollectionRequest;
+    use kbolt_types::{AddCollectionRequest, SearchMode};
 
     const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";
 
@@ -1962,13 +1974,27 @@ mod tests {
             let adapter = CliAdapter::new(engine);
 
             let err = adapter
-                .search(None, "alpha", &[], 10, 0.0, true, true, false, false, false)
+                .search(None, "alpha", &[], 10, 0.0, true, true, false, false, false, false)
                 .expect_err("conflicting search flags should fail");
             assert!(
                 err.to_string().contains("only one of --deep, --keyword, or --semantic"),
                 "unexpected error: {err}"
             );
         });
+    }
+
+    #[test]
+    fn resolve_no_rerank_for_mode_defaults_auto_off_and_allows_opt_in() {
+        assert!(resolve_no_rerank_for_mode(SearchMode::Auto, false, false));
+        assert!(!resolve_no_rerank_for_mode(SearchMode::Auto, true, false));
+    }
+
+    #[test]
+    fn resolve_no_rerank_for_mode_keeps_existing_mode_specific_behavior() {
+        assert!(!resolve_no_rerank_for_mode(SearchMode::Deep, false, false));
+        assert!(resolve_no_rerank_for_mode(SearchMode::Deep, false, true));
+        assert!(resolve_no_rerank_for_mode(SearchMode::Keyword, true, false));
+        assert!(resolve_no_rerank_for_mode(SearchMode::Semantic, true, false));
     }
 
     #[test]
@@ -2000,6 +2026,7 @@ mod tests {
                     0.0,
                     false,
                     true,
+                    false,
                     false,
                     false,
                     true,

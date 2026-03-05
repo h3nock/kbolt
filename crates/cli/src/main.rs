@@ -159,6 +159,7 @@ fn run() -> Result<()> {
                     deep,
                     keyword,
                     semantic,
+                    search.rerank,
                     search.no_rerank,
                     search.debug,
                 )
@@ -333,6 +334,7 @@ mod tests {
             deep: false,
             keyword: false,
             semantic: false,
+            rerank: false,
             no_rerank: false,
             debug: false,
         }
