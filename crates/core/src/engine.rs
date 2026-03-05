@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::Instant;
 
 use crate::config;
 use crate::config::Config;
@@ -13,11 +13,10 @@ use crate::storage::{ChunkInsert, ChunkRow, CollectionRow, DocumentRow, SpaceRes
 use crate::storage::Storage;
 use crate::Result;
 use crate::ModelPullEvent;
-use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 use kbolt_types::{
     ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, CollectionStatus,
-    DocumentResponse, FileEntry, FileError, GetRequest, KboltError, Locator, ModelStatus,
+    DocumentResponse, FileEntry, GetRequest, KboltError, Locator, ModelStatus,
     MultiGetRequest, MultiGetResponse, OmitReason, OmittedFile, PullReport, SearchMode,
     SearchRequest, SearchResponse, SearchResult, SearchSignals, SpaceInfo, SpaceStatus,
     StatusResponse, UpdateOptions, UpdateReport,
@@ -27,6 +26,8 @@ mod scoring;
 mod text_helpers;
 mod ignore_helpers;
 mod path_utils;
+mod file_utils;
+use file_utils::{file_error, file_title, modified_token, sha256_hex};
 use ignore_helpers::{
     collection_ignore_file_path, count_ignore_patterns, is_hard_ignored_dir_name, is_hard_ignored_file,
     load_collection_ignore_matcher, validate_ignore_pattern,
@@ -2090,36 +2091,6 @@ impl Engine {
         }
 
         Ok(())
-    }
-}
-
-fn modified_token(metadata: &std::fs::Metadata) -> Result<String> {
-    let modified = metadata.modified()?;
-    let duration = modified.duration_since(UNIX_EPOCH).map_err(|_| {
-        KboltError::Internal("file modified timestamp predates unix epoch".to_string())
-    })?;
-    Ok(duration.as_nanos().to_string())
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
-}
-
-fn file_title(path: &Path) -> String {
-    path.file_name()
-        .and_then(|item| item.to_str())
-        .map(ToString::to_string)
-        .unwrap_or_else(|| path.to_string_lossy().into_owned())
-}
-
-fn file_error(path: Option<std::path::PathBuf>, error: String) -> FileError {
-    FileError {
-        path: path
-            .map(|item| item.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "<unknown>".to_string()),
-        error,
     }
 }
 
