@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{ModelConfig, ModelProvider, ModelSourceConfig};
 use crate::Result;
 
+mod artifacts;
 mod embedder;
 mod expander;
 mod inference;
