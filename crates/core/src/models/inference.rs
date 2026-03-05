@@ -18,17 +18,11 @@ use crate::models::{Embedder, Expander, Reranker};
 use crate::Result;
 
 #[derive(Debug, Clone)]
-struct OpenAiCompatibleEmbedder {
+struct HttpApiEmbedder {
     client: HttpJsonClient,
     model: String,
     batch_size: usize,
-}
-
-#[derive(Debug, Clone)]
-struct VoyageEmbedder {
-    client: HttpJsonClient,
-    model: String,
-    batch_size: usize,
+    provider_name: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -235,18 +229,16 @@ pub(crate) fn build_embedder(
         config.max_retries,
         "embedding",
     );
-    let embedder: Arc<dyn Embedder> = match config.provider {
-        EmbeddingProvider::OpenAiCompatible => Arc::new(OpenAiCompatibleEmbedder {
-            client,
-            model,
-            batch_size,
-        }),
-        EmbeddingProvider::Voyage => Arc::new(VoyageEmbedder {
-            client,
-            model,
-            batch_size,
-        }),
+    let provider_name = match config.provider {
+        EmbeddingProvider::OpenAiCompatible => "openai_compatible",
+        EmbeddingProvider::Voyage => "voyage",
     };
+    let embedder: Arc<dyn Embedder> = Arc::new(HttpApiEmbedder {
+        client,
+        model,
+        batch_size,
+        provider_name,
+    });
     Ok(Some(embedder))
 }
 
@@ -274,21 +266,15 @@ pub(crate) fn build_expander(config: Option<&TextInferenceConfig>) -> Result<Arc
     Ok(expander)
 }
 
-impl Embedder for OpenAiCompatibleEmbedder {
+impl Embedder for HttpApiEmbedder {
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         embed_with_http_api(
             &self.client,
             &self.model,
             self.batch_size,
-            "openai_compatible",
+            self.provider_name,
             texts,
         )
-    }
-}
-
-impl Embedder for VoyageEmbedder {
-    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        embed_with_http_api(&self.client, &self.model, self.batch_size, "voyage", texts)
     }
 }
 
