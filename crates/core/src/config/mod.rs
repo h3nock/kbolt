@@ -27,6 +27,7 @@ const DEFAULT_EMBEDDING_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 32;
 const DEFAULT_EMBEDDING_MAX_RETRIES: u32 = 2;
 const DEFAULT_LOCAL_EMBEDDING_MAX_LENGTH: usize = 512;
+const DEFAULT_LOCAL_GGUF_EMBEDDING_BATCH_SIZE: usize = 8;
 const DEFAULT_INFERENCE_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_INFERENCE_MAX_RETRIES: u32 = 2;
 const DEFAULT_LOCAL_INFERENCE_MAX_TOKENS: usize = 256;
@@ -80,6 +81,16 @@ pub enum EmbeddingConfig {
         tokenizer_file: Option<String>,
         #[serde(default = "default_local_embedding_max_length")]
         max_length: usize,
+    },
+    LocalGguf {
+        #[serde(default)]
+        model_file: Option<String>,
+        #[serde(default = "default_local_gguf_embedding_batch_size")]
+        batch_size: usize,
+        #[serde(default)]
+        n_threads: Option<u32>,
+        #[serde(default)]
+        n_threads_batch: Option<u32>,
     },
 }
 
@@ -362,13 +373,16 @@ fn validate_embeddings(embeddings: Option<&EmbeddingConfig>) -> Result<()> {
             ..
         } => {
             if model.trim().is_empty() {
-                return Err(KboltError::Config("embeddings.model must not be empty".to_string()).into());
+                return Err(
+                    KboltError::Config("embeddings.model must not be empty".to_string()).into(),
+                );
             }
 
             if base_url.trim().is_empty() {
-                return Err(
-                    KboltError::Config("embeddings.base_url must not be empty".to_string()).into(),
-                );
+                return Err(KboltError::Config(
+                    "embeddings.base_url must not be empty".to_string(),
+                )
+                .into());
             }
 
             if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
@@ -431,6 +445,44 @@ fn validate_embeddings(embeddings: Option<&EmbeddingConfig>) -> Result<()> {
                     )
                     .into());
                 }
+            }
+
+            Ok(())
+        }
+        EmbeddingConfig::LocalGguf {
+            model_file,
+            batch_size,
+            n_threads,
+            n_threads_batch,
+        } => {
+            if *batch_size == 0 {
+                return Err(KboltError::Config(
+                    "embeddings.batch_size must be greater than zero".to_string(),
+                )
+                .into());
+            }
+
+            if let Some(model_file) = model_file {
+                if model_file.trim().is_empty() {
+                    return Err(KboltError::Config(
+                        "embeddings.model_file must not be empty when set".to_string(),
+                    )
+                    .into());
+                }
+            }
+
+            if matches!(n_threads, Some(0)) {
+                return Err(KboltError::Config(
+                    "embeddings.n_threads must be greater than zero when set".to_string(),
+                )
+                .into());
+            }
+
+            if matches!(n_threads_batch, Some(0)) {
+                return Err(KboltError::Config(
+                    "embeddings.n_threads_batch must be greater than zero when set".to_string(),
+                )
+                .into());
             }
 
             Ok(())
@@ -499,10 +551,10 @@ fn validate_text_inference(scope: &str, config: Option<&TextInferenceConfig>) ->
             ..
         } => {
             if *max_tokens == 0 {
-                return Err(
-                    KboltError::Config(format!("{scope}.max_tokens must be greater than zero"))
-                        .into(),
-                );
+                return Err(KboltError::Config(format!(
+                    "{scope}.max_tokens must be greater than zero"
+                ))
+                .into());
             }
 
             if *n_ctx == 0 {
@@ -678,6 +730,10 @@ fn default_embedding_max_retries() -> u32 {
 
 fn default_local_embedding_max_length() -> usize {
     DEFAULT_LOCAL_EMBEDDING_MAX_LENGTH
+}
+
+fn default_local_gguf_embedding_batch_size() -> usize {
+    DEFAULT_LOCAL_GGUF_EMBEDDING_BATCH_SIZE
 }
 
 fn default_inference_timeout_ms() -> u64 {

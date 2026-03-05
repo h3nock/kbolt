@@ -310,37 +310,60 @@ fn download_request_for_target(
 fn embedder_download_requirements(
     embeddings: Option<&EmbeddingConfig>,
 ) -> Vec<ModelFileRequirement> {
-    let (onnx_override, tokenizer_override) = match embeddings {
+    match embeddings {
         Some(EmbeddingConfig::LocalOnnx {
             onnx_file,
             tokenizer_file,
             ..
-        }) => (
-            configured_repo_path(onnx_file.as_deref()),
-            configured_repo_path(tokenizer_file.as_deref()),
-        ),
-        _ => (None, None),
-    };
-
-    vec![
-        onnx_override
-            .map(|path| ModelFileRequirement::ExactPath {
-                path,
-                config_field: "embeddings.onnx_file",
-            })
-            .unwrap_or(ModelFileRequirement::SingleExtension {
-                extension: "onnx",
-                config_field: "embeddings.onnx_file",
-            }),
-        tokenizer_override
-            .map(|path| ModelFileRequirement::ExactPath {
-                path,
-                config_field: "embeddings.tokenizer_file",
-            })
-            .unwrap_or(ModelFileRequirement::SingleTokenizerJson {
-                config_field: "embeddings.tokenizer_file",
-            }),
-    ]
+        }) => {
+            let onnx_override = configured_repo_path(onnx_file.as_deref());
+            let tokenizer_override = configured_repo_path(tokenizer_file.as_deref());
+            vec![
+                onnx_override
+                    .map(|path| ModelFileRequirement::ExactPath {
+                        path,
+                        config_field: "embeddings.onnx_file",
+                    })
+                    .unwrap_or(ModelFileRequirement::SingleExtension {
+                        extension: "onnx",
+                        config_field: "embeddings.onnx_file",
+                    }),
+                tokenizer_override
+                    .map(|path| ModelFileRequirement::ExactPath {
+                        path,
+                        config_field: "embeddings.tokenizer_file",
+                    })
+                    .unwrap_or(ModelFileRequirement::SingleTokenizerJson {
+                        config_field: "embeddings.tokenizer_file",
+                    }),
+            ]
+        }
+        Some(EmbeddingConfig::LocalGguf { model_file, .. }) => {
+            let configured = configured_repo_path(model_file.as_deref()).map(|path| {
+                ModelFileRequirement::ExactPath {
+                    path,
+                    config_field: "embeddings.model_file",
+                }
+            });
+            vec![configured.unwrap_or(ModelFileRequirement::SingleExtension {
+                extension: "gguf",
+                config_field: "embeddings.model_file",
+            })]
+        }
+        Some(EmbeddingConfig::OpenAiCompatible { .. })
+        | Some(EmbeddingConfig::Voyage { .. })
+        | None => {
+            vec![
+                ModelFileRequirement::SingleExtension {
+                    extension: "onnx",
+                    config_field: "embeddings.onnx_file",
+                },
+                ModelFileRequirement::SingleTokenizerJson {
+                    config_field: "embeddings.tokenizer_file",
+                },
+            ]
+        }
+    }
 }
 
 fn text_role_download_requirements(

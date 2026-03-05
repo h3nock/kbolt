@@ -508,6 +508,101 @@ base_url = "api.openai.com/v1"
 }
 
 #[test]
+fn load_reads_local_gguf_embeddings_config() {
+    let tmp = tempdir().expect("create tempdir");
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    let config_file = config_dir.join(CONFIG_FILENAME);
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        &config_file,
+        r#"
+[embeddings]
+provider = "local_gguf"
+model_file = "embeddinggemma-300M-Q8_0.gguf"
+batch_size = 4
+n_threads = 6
+n_threads_batch = 6
+"#,
+    )
+    .expect("write config file");
+
+    let config = load_from_file(&config_file, &config_dir, &cache_dir).expect("load config");
+    assert_eq!(
+        config.embeddings,
+        Some(EmbeddingConfig::LocalGguf {
+            model_file: Some("embeddinggemma-300M-Q8_0.gguf".to_string()),
+            batch_size: 4,
+            n_threads: Some(6),
+            n_threads_batch: Some(6),
+        })
+    );
+}
+
+#[test]
+fn load_defaults_local_gguf_batch_size_when_unspecified() {
+    let tmp = tempdir().expect("create tempdir");
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    let config_file = config_dir.join(CONFIG_FILENAME);
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        &config_file,
+        r#"
+[embeddings]
+provider = "local_gguf"
+"#,
+    )
+    .expect("write config file");
+
+    let config = load_from_file(&config_file, &config_dir, &cache_dir).expect("load config");
+    assert_eq!(
+        config.embeddings,
+        Some(EmbeddingConfig::LocalGguf {
+            model_file: None,
+            batch_size: DEFAULT_LOCAL_GGUF_EMBEDDING_BATCH_SIZE,
+            n_threads: None,
+            n_threads_batch: None,
+        })
+    );
+}
+
+#[test]
+fn load_rejects_invalid_local_gguf_embeddings_config() {
+    let tmp = tempdir().expect("create tempdir");
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    let config_file = config_dir.join(CONFIG_FILENAME);
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        &config_file,
+        r#"
+[embeddings]
+provider = "local_gguf"
+batch_size = 0
+"#,
+    )
+    .expect("write config file");
+
+    let err = load_from_file(&config_file, &config_dir, &cache_dir)
+        .expect_err("invalid local gguf config should fail");
+    assert!(err.to_string().contains("embeddings.batch_size"));
+
+    fs::write(
+        &config_file,
+        r#"
+[embeddings]
+provider = "local_gguf"
+n_threads = 0
+"#,
+    )
+    .expect("rewrite config file");
+    let err = load_from_file(&config_file, &config_dir, &cache_dir)
+        .expect_err("zero n_threads should fail");
+    assert!(err.to_string().contains("embeddings.n_threads"));
+}
+
+#[test]
 fn load_rejects_invalid_inference_config() {
     let tmp = tempdir().expect("create tempdir");
     let config_dir = tmp.path().join("config");

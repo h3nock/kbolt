@@ -441,3 +441,36 @@ fn pull_uses_configured_relative_file_overrides() {
         }]
     );
 }
+
+#[test]
+fn pull_uses_gguf_requirements_when_embedder_is_local_gguf() {
+    let root = tempdir().expect("create temp root");
+    let config = test_config();
+    let downloader = CapturingDownloader::default();
+    let embeddings = EmbeddingConfig::LocalGguf {
+        model_file: Some("embeddinggemma-300M-Q8_0.gguf".to_string()),
+        batch_size: 4,
+        n_threads: Some(6),
+        n_threads_batch: Some(6),
+    };
+
+    let report = pull_with_downloader(
+        &config,
+        Some(&embeddings),
+        &InferenceConfig::default(),
+        root.path(),
+        &downloader,
+    )
+    .expect("pull models");
+    assert_eq!(report.downloaded.len(), 3);
+
+    let requests = downloader.take_requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[0].requirements,
+        vec![ModelFileRequirement::ExactPath {
+            path: "embeddinggemma-300M-Q8_0.gguf".to_string(),
+            config_field: "embeddings.model_file",
+        }]
+    );
+}

@@ -9,31 +9,33 @@ use crate::ingest::chunk::{chunk_document, resolve_policy};
 use crate::ingest::extract::default_registry;
 use crate::lock::{LockMode, OperationLock};
 use crate::models;
-use crate::storage::{ChunkInsert, ChunkRow, CollectionRow, DocumentRow, SpaceResolution, TantivyEntry};
 use crate::storage::Storage;
-use crate::Result;
+use crate::storage::{
+    ChunkInsert, ChunkRow, CollectionRow, DocumentRow, SpaceResolution, TantivyEntry,
+};
 use crate::ModelPullEvent;
-use walkdir::WalkDir;
+use crate::Result;
 use kbolt_types::{
     ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, CollectionStatus,
-    DocumentResponse, FileEntry, GetRequest, KboltError, Locator, ModelStatus,
-    MultiGetRequest, MultiGetResponse, OmitReason, OmittedFile, PullReport, SearchMode,
-    SearchRequest, SearchResponse, SearchResult, SearchSignals, SpaceInfo, SpaceStatus,
-    StatusResponse, UpdateOptions, UpdateReport,
+    DocumentResponse, FileEntry, GetRequest, KboltError, Locator, ModelStatus, MultiGetRequest,
+    MultiGetResponse, OmitReason, OmittedFile, PullReport, SearchMode, SearchRequest,
+    SearchResponse, SearchResult, SearchSignals, SpaceInfo, SpaceStatus, StatusResponse,
+    UpdateOptions, UpdateReport,
 };
+use walkdir::WalkDir;
 
-mod scoring;
-mod text_helpers;
+mod file_utils;
 mod ignore_helpers;
 mod ignore_ops;
 mod path_utils;
-mod file_utils;
+mod scoring;
 mod search_ops;
+mod text_helpers;
 mod update_ops;
 use file_utils::{file_error, file_title, modified_token, sha256_hex};
 use ignore_helpers::{
-    collection_ignore_file_path, count_ignore_patterns, is_hard_ignored_dir_name, is_hard_ignored_file,
-    load_collection_ignore_matcher, validate_ignore_pattern,
+    collection_ignore_file_path, count_ignore_patterns, is_hard_ignored_dir_name,
+    is_hard_ignored_file, load_collection_ignore_matcher, validate_ignore_pattern,
 };
 use path_utils::{
     collection_relative_path, extension_allowed, normalize_docid, normalize_list_prefix,
@@ -258,7 +260,8 @@ impl Engine {
         let resolved = self.resolve_space_row(space, Some(name))?;
         self.storage.delete_collection(resolved.id, name)?;
 
-        let ignore_path = collection_ignore_file_path(&self.config.config_dir, &resolved.name, name);
+        let ignore_path =
+            collection_ignore_file_path(&self.config.config_dir, &resolved.name, name);
         if ignore_path.is_file() {
             std::fs::remove_file(ignore_path)?;
         }
@@ -269,8 +272,10 @@ impl Engine {
     pub fn rename_collection(&self, space: Option<&str>, old: &str, new: &str) -> Result<()> {
         let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
         let resolved = self.resolve_space_row(space, Some(old))?;
-        let old_ignore_path = collection_ignore_file_path(&self.config.config_dir, &resolved.name, old);
-        let new_ignore_path = collection_ignore_file_path(&self.config.config_dir, &resolved.name, new);
+        let old_ignore_path =
+            collection_ignore_file_path(&self.config.config_dir, &resolved.name, old);
+        let new_ignore_path =
+            collection_ignore_file_path(&self.config.config_dir, &resolved.name, new);
         if old_ignore_path.is_file() && new_ignore_path.exists() {
             return Err(KboltError::Internal(format!(
                 "cannot rename ignore file: destination already exists: {}",
@@ -309,7 +314,8 @@ impl Engine {
     pub fn describe_collection(&self, space: Option<&str>, name: &str, desc: &str) -> Result<()> {
         let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
         let resolved = self.resolve_space_row(space, Some(name))?;
-        self.storage.update_collection_description(resolved.id, name, desc)
+        self.storage
+            .update_collection_description(resolved.id, name, desc)
     }
 
     pub fn list_collections(&self, space: Option<&str>) -> Result<Vec<CollectionInfo>> {
@@ -360,9 +366,7 @@ impl Engine {
     ) -> Result<Vec<FileEntry>> {
         let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let resolved_space = self.resolve_space_row(space, Some(collection))?;
-        let collection_row = self
-            .storage
-            .get_collection(resolved_space.id, collection)?;
+        let collection_row = self.storage.get_collection(resolved_space.id, collection)?;
         let normalized_prefix = normalize_list_prefix(prefix)?;
         let file_rows = self
             .storage
@@ -426,7 +430,8 @@ impl Engine {
                     .get_document_by_hash_prefix(&prefix)?
                     .into_iter()
                     .map(|document| {
-                        let collection = self.storage.get_collection_by_id(document.collection_id)?;
+                        let collection =
+                            self.storage.get_collection_by_id(document.collection_id)?;
                         Ok((document, collection))
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -496,10 +501,14 @@ impl Engine {
     pub fn multi_get(&self, req: MultiGetRequest) -> Result<MultiGetResponse> {
         let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         if req.max_files == 0 {
-            return Err(KboltError::InvalidInput("max_files must be greater than 0".to_string()).into());
+            return Err(
+                KboltError::InvalidInput("max_files must be greater than 0".to_string()).into(),
+            );
         }
         if req.max_bytes == 0 {
-            return Err(KboltError::InvalidInput("max_bytes must be greater than 0".to_string()).into());
+            return Err(
+                KboltError::InvalidInput("max_bytes must be greater than 0".to_string()).into(),
+            );
         }
 
         let mut documents = Vec::new();
@@ -648,7 +657,9 @@ impl Engine {
         }
 
         let ranked_chunks = match mode {
-            SearchMode::Keyword => self.rank_keyword_chunks(&targets, query, req.limit, req.min_score)?,
+            SearchMode::Keyword => {
+                self.rank_keyword_chunks(&targets, query, req.limit, req.min_score)?
+            }
             SearchMode::Auto => {
                 let retrieval_limit = if rerank_enabled {
                     req.limit.max(20).saturating_mul(4)
@@ -738,7 +749,9 @@ impl Engine {
                 let documents = self
                     .storage
                     .count_documents_in_collection(collection.id, false)?;
-                let active_documents = self.storage.count_documents_in_collection(collection.id, true)?;
+                let active_documents = self
+                    .storage
+                    .count_documents_in_collection(collection.id, true)?;
                 let chunks = self.storage.count_chunks_in_collection(collection.id)?;
                 let embedded_chunks = self
                     .storage
@@ -825,7 +838,8 @@ impl Engine {
             .and_then(|config| match config {
                 config::EmbeddingConfig::OpenAiCompatible { model, .. }
                 | config::EmbeddingConfig::Voyage { model, .. } => Some(model.as_str()),
-                config::EmbeddingConfig::LocalOnnx { .. } => None,
+                config::EmbeddingConfig::LocalOnnx { .. }
+                | config::EmbeddingConfig::LocalGguf { .. } => None,
             })
             .unwrap_or(self.config.models.embedder.id.as_str())
     }
@@ -853,11 +867,17 @@ impl Engine {
         })
     }
 
-    fn build_collection_info(&self, space_name: &str, collection: &CollectionRow) -> Result<CollectionInfo> {
+    fn build_collection_info(
+        &self,
+        space_name: &str,
+        collection: &CollectionRow,
+    ) -> Result<CollectionInfo> {
         let document_count = self
             .storage
             .count_documents_in_collection(collection.id, false)?;
-        let active_document_count = self.storage.count_documents_in_collection(collection.id, true)?;
+        let active_document_count = self
+            .storage
+            .count_documents_in_collection(collection.id, true)?;
         let chunk_count = self.storage.count_chunks_in_collection(collection.id)?;
         let embedded_chunk_count = self
             .storage
@@ -929,7 +949,6 @@ impl Engine {
 
         Ok(None)
     }
-
 }
 
 #[cfg(test)]

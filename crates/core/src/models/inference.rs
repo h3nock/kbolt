@@ -185,6 +185,12 @@ fn build_embedder_inner(
                 });
                 return Ok(Some(embedder));
             }
+            EmbeddingConfig::LocalGguf { .. } => {
+                return Err(KboltError::Inference(
+                    "local_gguf embedder is configured but not yet implemented".to_string(),
+                )
+                .into());
+            }
         };
     let client = HttpJsonClient::new(
         base_url,
@@ -977,9 +983,8 @@ mod tests {
         let model_config = test_model_config();
         let config = base_local_llama_text_config();
 
-        let reranker =
-            build_reranker_with_local_runtime(Some(&config), &model_config, root.path())
-                .expect("build reranker");
+        let reranker = build_reranker_with_local_runtime(Some(&config), &model_config, root.path())
+            .expect("build reranker");
         let err = reranker
             .rerank("query", &["doc".to_string()])
             .expect_err("missing local model should fail on first use");
