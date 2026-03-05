@@ -396,7 +396,17 @@ fn parse_retry_after_seconds(header_value: Option<&str>) -> Option<u64> {
     if raw.is_empty() {
         return None;
     }
-    raw.parse::<u64>().ok()
+    if let Ok(seconds) = raw.parse::<u64>() {
+        return Some(seconds);
+    }
+
+    let retry_at = httpdate::parse_http_date(raw).ok()?;
+    let now = std::time::SystemTime::now();
+    let seconds = match retry_at.duration_since(now) {
+        Ok(duration) => duration.as_secs(),
+        Err(_) => 0,
+    };
+    Some(seconds)
 }
 
 fn parse_json_payload<T>(label: &str, content: &str) -> Result<T>
@@ -988,5 +998,20 @@ mod tests {
             .embed_batch(&["hello".to_string()])
             .expect("embed should retry then succeed");
         assert_eq!(vectors, vec![vec![0.1, 0.2]]);
+    }
+
+    #[test]
+    fn parse_retry_after_seconds_accepts_delta_seconds() {
+        assert_eq!(parse_retry_after_seconds(Some("7")), Some(7));
+    }
+
+    #[test]
+    fn parse_retry_after_seconds_accepts_http_date() {
+        let retry_at = std::time::SystemTime::now() + Duration::from_secs(60);
+        let header = httpdate::fmt_http_date(retry_at);
+        let parsed = parse_retry_after_seconds(Some(&header));
+        assert!(parsed.is_some());
+        let seconds = parsed.expect("parsed seconds");
+        assert!(seconds <= 60);
     }
 }
