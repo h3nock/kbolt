@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 
 const APP_NAME: &str = "kbolt";
 const CONFIG_FILENAME: &str = "index.toml";
-const DEFAULT_EMBED_MODEL: &str = "sentence-transformers/all-MiniLM-L6-v2";
-const DEFAULT_RERANKER_MODEL: &str = "Qwen/Qwen3-0.6B-GGUF";
-const DEFAULT_EXPANDER_MODEL: &str = "Qwen/Qwen3-0.6B-GGUF";
+const DEFAULT_EMBED_MODEL: &str = "ggml-org/embeddinggemma-300M-GGUF";
+const DEFAULT_RERANKER_MODEL: &str = "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF";
+const DEFAULT_EXPANDER_MODEL: &str = "tobil/qmd-query-expansion-1.7B-gguf";
 const DEFAULT_REAP_DAYS: u32 = 7;
 const DEFAULT_CHUNK_TARGET_TOKENS: usize = 450;
 const DEFAULT_CHUNK_SOFT_MAX_TOKENS: usize = 550;
