@@ -213,10 +213,10 @@ fn run() -> Result<()> {
                         let retried = run_update(false)?;
                         println!("{retried}");
                     } else {
-                        return Err(err);
+                        return Err(with_update_model_missing_guidance(err));
                     }
                 }
-                Err(err) => return Err(err),
+                Err(err) => return Err(with_update_model_missing_guidance(err)),
             }
         }
         Command::Status => {
@@ -304,11 +304,21 @@ fn should_offer_model_pull_for_update(no_embed: bool, is_tty: bool, err: &CoreEr
     !no_embed && is_tty && is_model_not_available_error(err)
 }
 
+fn with_update_model_missing_guidance(err: CoreError) -> CoreError {
+    if is_model_not_available_error(&err) {
+        return CoreError::Domain(KboltError::InvalidInput(format!(
+            "{err}. for update, run `kbolt models pull` or re-run with `--no-embed`"
+        )));
+    }
+    err
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         is_model_not_available_error, parse_pull_confirmation, requested_search_mode,
-        should_offer_model_pull_for_update, RequestedSearchMode,
+        should_offer_model_pull_for_update, with_update_model_missing_guidance,
+        RequestedSearchMode,
     };
     use kbolt_cli::args::SearchArgs;
     use kbolt_core::error::CoreError;
@@ -387,5 +397,21 @@ mod tests {
 
         let other = CoreError::Domain(KboltError::InvalidInput("bad input".to_string()));
         assert!(!should_offer_model_pull_for_update(false, true, &other));
+    }
+
+    #[test]
+    fn update_model_missing_guidance_adds_no_embed_hint() {
+        let missing = CoreError::Domain(KboltError::ModelNotAvailable {
+            name: "test-model".to_string(),
+        });
+        let rewritten = with_update_model_missing_guidance(missing);
+        let message = rewritten.to_string();
+        assert!(message.contains("kbolt models pull"));
+        assert!(message.contains("--no-embed"));
+
+        let unchanged =
+            CoreError::Domain(KboltError::InvalidInput("bad input".to_string()));
+        let rewritten_other = with_update_model_missing_guidance(unchanged);
+        assert_eq!(rewritten_other.to_string(), "invalid input: bad input");
     }
 }
