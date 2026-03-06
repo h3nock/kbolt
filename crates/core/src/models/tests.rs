@@ -343,15 +343,10 @@ fn pull_builds_role_specific_default_download_requirements() {
     assert_eq!(requests[0].model_id, "embed-model");
     assert_eq!(
         requests[0].requirements,
-        vec![
-            ModelFileRequirement::SingleExtension {
-                extension: "onnx",
-                config_field: "embeddings.onnx_file",
-            },
-            ModelFileRequirement::SingleTokenizerJson {
-                config_field: "embeddings.tokenizer_file",
-            },
-        ]
+        vec![ModelFileRequirement::SingleExtension {
+            extension: "gguf",
+            config_field: "embeddings.model_file",
+        }]
     );
     assert_eq!(requests[1].model_id, "rerank-model");
     assert_eq!(

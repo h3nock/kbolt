@@ -354,15 +354,10 @@ fn embedder_download_requirements(
         Some(EmbeddingConfig::OpenAiCompatible { .. })
         | Some(EmbeddingConfig::Voyage { .. })
         | None => {
-            vec![
-                ModelFileRequirement::SingleExtension {
-                    extension: "onnx",
-                    config_field: "embeddings.onnx_file",
-                },
-                ModelFileRequirement::SingleTokenizerJson {
-                    config_field: "embeddings.tokenizer_file",
-                },
-            ]
+            vec![ModelFileRequirement::SingleExtension {
+                extension: "gguf",
+                config_field: "embeddings.model_file",
+            }]
         }
     }
 }
