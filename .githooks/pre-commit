@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+staged_rust_files="$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')"
+if [ -z "$staged_rust_files" ]; then
+  exit 0
+fi
+
+if ! cargo fmt --all --check; then
+  echo >&2
+  echo "pre-commit: formatting check failed." >&2
+  echo "Run 'cargo fmt --all', review the diff, re-stage, and commit again." >&2
+  exit 1
+fi
