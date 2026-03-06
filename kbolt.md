@@ -1751,7 +1751,7 @@ All tools accept an optional `space` parameter. If omitted, search and status op
 
 ### Resources
 
-Documents accessible via `kbolt://{space}/{collection}/{path}` URIs. MCP clients can read documents directly via resource URIs.
+Deferred to V2: MCP resource URIs (`kbolt://{space}/{collection}/{path}`) are not exposed in V1. Document reads are available through the `get` and `multi_get` tools.
 
 ### Dynamic Instructions
 
