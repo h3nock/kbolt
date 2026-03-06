@@ -1461,7 +1461,7 @@ mod tests {
     }
 
     #[test]
-    fn collection_add_without_no_index_triggers_index_update() {
+    fn collection_add_then_update_no_embed_triggers_index_update() {
         with_isolated_xdg_dirs(|| {
             let root = tempdir().expect("create collection root");
             let engine = Engine::new(None).expect("create engine");
@@ -1472,9 +1472,13 @@ mod tests {
             let adapter = CliAdapter::new(engine);
 
             let output = adapter
-                .collection_add(Some("work"), &collection_path, Some("api"), None, None, false)
-                .expect("collection add should trigger update");
+                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .expect("add collection without initial indexing");
             assert_eq!(output, "collection added: work/api");
+
+            adapter
+                .update(Some("work"), &["api".to_string()], true, false, false)
+                .expect("update should index collection without embeddings");
 
             let info = adapter
                 .collection_info(Some("work"), "api")
