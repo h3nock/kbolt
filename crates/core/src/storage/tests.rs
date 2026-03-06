@@ -1,5 +1,6 @@
 use tempfile::tempdir;
 
+use crate::ingest::chunk::FinalChunkKind;
 use super::Storage;
 use kbolt_types::KboltError;
 use rusqlite::Connection;
@@ -1491,14 +1492,14 @@ fn list_collection_file_rows_reports_counts_and_active_filter() {
                     offset: 0,
                     length: 10,
                     heading: None,
-                    kind: "section".to_string(),
+                    kind: FinalChunkKind::Section,
                 },
                 super::ChunkInsert {
                     seq: 1,
                     offset: 10,
                     length: 8,
                     heading: None,
-                    kind: "section".to_string(),
+                    kind: FinalChunkKind::Section,
                 },
             ],
         )
@@ -1511,7 +1512,7 @@ fn list_collection_file_rows_reports_counts_and_active_filter() {
                 offset: 0,
                 length: 12,
                 heading: None,
-                kind: "section".to_string(),
+                kind: FinalChunkKind::Section,
             }],
         )
         .expect("insert chunk for doc b");
@@ -1861,14 +1862,14 @@ fn insert_and_get_chunks_for_document() {
             offset: 0,
             length: 100,
             heading: Some("# Intro".to_string()),
-            kind: "section".to_string(),
+            kind: FinalChunkKind::Section,
         },
         super::ChunkInsert {
             seq: 1,
             offset: 100,
             length: 80,
             heading: Some("# Usage".to_string()),
-            kind: "section".to_string(),
+            kind: FinalChunkKind::Section,
         },
     ];
 
@@ -1885,7 +1886,51 @@ fn insert_and_get_chunks_for_document() {
     assert_eq!(chunks[0].offset, 0);
     assert_eq!(chunks[0].length, 100);
     assert_eq!(chunks[0].heading.as_deref(), Some("# Intro"));
+    assert_eq!(chunks[0].kind, FinalChunkKind::Section);
     assert_eq!(chunks[1].seq, 1);
+    assert_eq!(chunks[1].kind, FinalChunkKind::Section);
+}
+
+#[test]
+fn get_chunks_for_document_rejects_invalid_stored_chunk_kind() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/lib.rs",
+            "lib",
+            "hash-1",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc");
+
+    {
+        let conn = storage.db.lock().expect("lock db");
+        conn.execute(
+            "INSERT INTO chunks (doc_id, seq, offset, length, heading, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![doc_id, 0, 0, 10, Option::<String>::None, "broken"],
+        )
+        .expect("insert invalid chunk kind");
+    }
+
+    let err = storage
+        .get_chunks_for_document(doc_id)
+        .expect_err("invalid chunk kind should fail");
+    assert!(err.to_string().contains("invalid stored chunk kind"));
 }
 
 #[test]
@@ -1920,14 +1965,14 @@ fn delete_chunks_for_document_returns_deleted_ids() {
             offset: 0,
             length: 100,
             heading: None,
-            kind: "section".to_string(),
+            kind: FinalChunkKind::Section,
         },
         super::ChunkInsert {
             seq: 1,
             offset: 100,
             length: 50,
             heading: None,
-            kind: "section".to_string(),
+            kind: FinalChunkKind::Section,
         },
     ];
     let inserted_ids = storage
@@ -1977,14 +2022,14 @@ fn get_chunks_by_id_returns_requested_chunks() {
             offset: 0,
             length: 100,
             heading: None,
-            kind: "section".to_string(),
+            kind: FinalChunkKind::Section,
         },
         super::ChunkInsert {
             seq: 1,
             offset: 100,
             length: 50,
             heading: None,
-            kind: "section".to_string(),
+            kind: FinalChunkKind::Section,
         },
     ];
     let inserted_ids = storage
@@ -2009,7 +2054,7 @@ fn chunk_methods_missing_document_return_not_found() {
         offset: 0,
         length: 10,
         heading: None,
-        kind: "section".to_string(),
+        kind: FinalChunkKind::Section,
     }];
 
     let insert_err = storage
@@ -2071,14 +2116,14 @@ fn insert_count_and_delete_embeddings_by_model() {
                     offset: 0,
                     length: 100,
                     heading: None,
-                    kind: "section".to_string(),
+                    kind: FinalChunkKind::Section,
                 },
                 super::ChunkInsert {
                     seq: 1,
                     offset: 100,
                     length: 50,
                     heading: None,
-                    kind: "section".to_string(),
+                    kind: FinalChunkKind::Section,
                 },
             ],
         )
@@ -2170,14 +2215,14 @@ fn list_embedding_models_in_space_returns_distinct_sorted_models() {
                     offset: 0,
                     length: 10,
                     heading: None,
-                    kind: "section".to_string(),
+                    kind: FinalChunkKind::Section,
                 },
                 super::ChunkInsert {
                     seq: 1,
                     offset: 10,
                     length: 12,
                     heading: None,
-                    kind: "section".to_string(),
+                    kind: FinalChunkKind::Section,
                 },
             ],
         )
@@ -2190,7 +2235,7 @@ fn list_embedding_models_in_space_returns_distinct_sorted_models() {
                 offset: 0,
                 length: 7,
                 heading: None,
-                kind: "section".to_string(),
+                kind: FinalChunkKind::Section,
             }],
         )
         .expect("insert notes chunks");
@@ -2277,14 +2322,14 @@ fn get_unembedded_chunks_filters_active_and_model_specific_backlog() {
                     offset: 0,
                     length: 100,
                     heading: None,
-                    kind: "section".to_string(),
+                    kind: FinalChunkKind::Section,
                 },
                 super::ChunkInsert {
                     seq: 1,
                     offset: 100,
                     length: 50,
                     heading: None,
-                    kind: "section".to_string(),
+                    kind: FinalChunkKind::Section,
                 },
             ],
         )
@@ -2297,7 +2342,7 @@ fn get_unembedded_chunks_filters_active_and_model_specific_backlog() {
                 offset: 0,
                 length: 42,
                 heading: None,
-                kind: "section".to_string(),
+                kind: FinalChunkKind::Section,
             }],
         )
         .expect("insert inactive chunk");
@@ -2367,14 +2412,14 @@ fn get_fts_dirty_documents_returns_context_and_chunks() {
                     offset: 0,
                     length: 100,
                     heading: Some("# Intro".to_string()),
-                    kind: "section".to_string(),
+                    kind: FinalChunkKind::Section,
                 },
                 super::ChunkInsert {
                     seq: 1,
                     offset: 100,
                     length: 80,
                     heading: Some("# Usage".to_string()),
-                    kind: "section".to_string(),
+                    kind: FinalChunkKind::Section,
                 },
             ],
         )
@@ -2635,14 +2680,14 @@ fn count_chunks_scopes_by_space() {
                     offset: 0,
                     length: 10,
                     heading: None,
-                    kind: "section".to_string(),
+                    kind: FinalChunkKind::Section,
                 },
                 super::ChunkInsert {
                     seq: 1,
                     offset: 10,
                     length: 12,
                     heading: None,
-                    kind: "section".to_string(),
+                    kind: FinalChunkKind::Section,
                 },
             ],
         )
@@ -2655,7 +2700,7 @@ fn count_chunks_scopes_by_space() {
                 offset: 0,
                 length: 7,
                 heading: None,
-                kind: "section".to_string(),
+                kind: FinalChunkKind::Section,
             }],
         )
         .expect("insert notes chunk");
@@ -2733,14 +2778,14 @@ fn count_embedded_chunks_scopes_by_space_and_deduplicates_models() {
                     offset: 0,
                     length: 10,
                     heading: None,
-                    kind: "section".to_string(),
+                    kind: FinalChunkKind::Section,
                 },
                 super::ChunkInsert {
                     seq: 1,
                     offset: 10,
                     length: 12,
                     heading: None,
-                    kind: "section".to_string(),
+                    kind: FinalChunkKind::Section,
                 },
             ],
         )
@@ -2753,7 +2798,7 @@ fn count_embedded_chunks_scopes_by_space_and_deduplicates_models() {
                 offset: 0,
                 length: 7,
                 heading: None,
-                kind: "section".to_string(),
+                kind: FinalChunkKind::Section,
             }],
         )
         .expect("insert notes chunk");
@@ -2831,14 +2876,14 @@ fn per_collection_count_methods_return_expected_values() {
                     offset: 0,
                     length: 10,
                     heading: None,
-                    kind: "section".to_string(),
+                    kind: FinalChunkKind::Section,
                 },
                 super::ChunkInsert {
                     seq: 1,
                     offset: 10,
                     length: 12,
                     heading: None,
-                    kind: "section".to_string(),
+                    kind: FinalChunkKind::Section,
                 },
             ],
         )
@@ -2851,7 +2896,7 @@ fn per_collection_count_methods_return_expected_values() {
                 offset: 0,
                 length: 9,
                 heading: None,
-                kind: "section".to_string(),
+                kind: FinalChunkKind::Section,
             }],
         )
         .expect("insert chunks for doc b");

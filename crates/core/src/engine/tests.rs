@@ -9,6 +9,7 @@ use crate::config::{
     ModelSourceConfig, ReapingConfig,
 };
 use crate::engine::{retrieval_text_with_prefix, Engine};
+use crate::ingest::chunk::FinalChunkKind;
 use crate::storage::Storage;
 use crate::ModelPullEvent;
 use kbolt_types::{
@@ -2599,7 +2600,7 @@ fn update_markdown_uses_structural_chunking_and_heading_metadata() {
 
         assert!(chunks.len() >= 2, "expected markdown hard-split chunks");
         assert!(
-            chunks.iter().any(|chunk| chunk.kind == "paragraph"),
+            chunks.iter().any(|chunk| chunk.kind == FinalChunkKind::Paragraph),
             "expected paragraph chunk kind"
         );
         assert!(
@@ -2660,7 +2661,7 @@ fn update_code_files_use_code_chunking_profile() {
             "expected hard split from code profile (560 hard max)"
         );
         assert!(
-            chunks.iter().all(|chunk| chunk.kind == "code"),
+            chunks.iter().all(|chunk| chunk.kind == FinalChunkKind::Code),
             "expected code chunk kind for code extractor output"
         );
     });
@@ -2717,7 +2718,7 @@ fn update_code_uses_blank_line_grouping_before_token_fallback() {
             .expect("load chunks");
 
         assert_eq!(chunks.len(), 2);
-        assert!(chunks.iter().all(|chunk| chunk.kind == "code"));
+        assert!(chunks.iter().all(|chunk| chunk.kind == FinalChunkKind::Code));
 
         let bytes = std::fs::read(&file_path).expect("read source bytes");
         let first = {
@@ -2794,11 +2795,18 @@ gamma delta
             .expect("load chunks");
         let kinds = chunks
             .iter()
-            .map(|chunk| chunk.kind.as_str())
+            .map(|chunk| chunk.kind)
             .collect::<Vec<_>>();
 
-        assert_eq!(kinds, vec!["section", "code", "paragraph"]);
-        assert!(!kinds.contains(&"mixed"));
+        assert_eq!(
+            kinds,
+            vec![
+                FinalChunkKind::Section,
+                FinalChunkKind::Code,
+                FinalChunkKind::Paragraph,
+            ]
+        );
+        assert!(!kinds.contains(&FinalChunkKind::Mixed));
     });
 }
 

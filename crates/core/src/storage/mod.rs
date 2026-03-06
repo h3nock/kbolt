@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::error::{CoreError, Result};
+use crate::ingest::chunk::FinalChunkKind;
 use kbolt_types::{DiskUsage, KboltError};
 use rusqlite::{params, params_from_iter, Connection, Error, ErrorCode};
 use tantivy::collector::TopDocs;
@@ -75,7 +76,7 @@ pub struct ChunkRow {
     pub offset: usize,
     pub length: usize,
     pub heading: Option<String>,
-    pub kind: String,
+    pub kind: FinalChunkKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,7 +85,7 @@ pub struct ChunkInsert {
     pub offset: usize,
     pub length: usize,
     pub heading: Option<String>,
-    pub kind: String,
+    pub kind: FinalChunkKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1121,7 +1122,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
                 chunk.offset as i64,
                 chunk.length as i64,
                 chunk.heading,
-                chunk.kind,
+                chunk.kind.as_storage_kind(),
             ])?;
             ids.push(tx.last_insert_rowid());
         }
@@ -2188,6 +2189,10 @@ fn decode_document_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentRow>
 fn decode_chunk_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRow> {
     let offset_value: i64 = row.get(3)?;
     let length_value: i64 = row.get(4)?;
+    let kind_raw: String = row.get(6)?;
+    let kind = FinalChunkKind::try_from(kind_raw.as_str()).map_err(|err| {
+        Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(err))
+    })?;
     Ok(ChunkRow {
         id: row.get(0)?,
         doc_id: row.get(1)?,
@@ -2195,7 +2200,7 @@ fn decode_chunk_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRow> {
         offset: offset_value as usize,
         length: length_value as usize,
         heading: row.get(5)?,
-        kind: row.get(6)?,
+        kind,
     })
 }
 

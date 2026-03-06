@@ -539,7 +539,7 @@ impl Engine {
                     offset: chunk.offset,
                     length: chunk.length,
                     heading: chunk.heading.clone(),
-                    kind: chunk.kind.as_storage_kind().to_string(),
+                    kind: chunk.kind,
                 })
                 .collect::<Vec<_>>();
             let body = String::from_utf8_lossy(&bytes).into_owned();

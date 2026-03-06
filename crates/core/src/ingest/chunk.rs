@@ -1,5 +1,6 @@
 use crate::config::{ChunkPolicy, ChunkingConfig};
 use crate::ingest::extract::{BlockKind, ExtractedBlock, ExtractedDocument};
+use kbolt_types::KboltError;
 
 const TABLE_HEADER_ATTR: &str = "__kbolt_table_header";
 
@@ -57,6 +58,23 @@ impl FinalChunkKind {
             Self::Code => "code",
             Self::Table => "table",
             Self::Mixed => "mixed",
+        }
+    }
+}
+
+impl TryFrom<&str> for FinalChunkKind {
+    type Error = KboltError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "section" => Ok(Self::Section),
+            "paragraph" => Ok(Self::Paragraph),
+            "code" => Ok(Self::Code),
+            "table" => Ok(Self::Table),
+            "mixed" => Ok(Self::Mixed),
+            other => Err(KboltError::Internal(format!(
+                "invalid stored chunk kind: {other}"
+            ))),
         }
     }
 }
@@ -874,6 +892,36 @@ mod tests {
         assert_eq!(FinalChunkKind::Code.as_storage_kind(), "code");
         assert_eq!(FinalChunkKind::Table.as_storage_kind(), "table");
         assert_eq!(FinalChunkKind::Mixed.as_storage_kind(), "mixed");
+    }
+
+    #[test]
+    fn chunk_kind_parses_storage_labels() {
+        assert_eq!(
+            FinalChunkKind::try_from("section").expect("parse section"),
+            FinalChunkKind::Section
+        );
+        assert_eq!(
+            FinalChunkKind::try_from("paragraph").expect("parse paragraph"),
+            FinalChunkKind::Paragraph
+        );
+        assert_eq!(
+            FinalChunkKind::try_from("code").expect("parse code"),
+            FinalChunkKind::Code
+        );
+        assert_eq!(
+            FinalChunkKind::try_from("table").expect("parse table"),
+            FinalChunkKind::Table
+        );
+        assert_eq!(
+            FinalChunkKind::try_from("mixed").expect("parse mixed"),
+            FinalChunkKind::Mixed
+        );
+    }
+
+    #[test]
+    fn chunk_kind_rejects_unknown_storage_labels() {
+        let err = FinalChunkKind::try_from("unknown").expect_err("unknown label should fail");
+        assert!(err.to_string().contains("invalid stored chunk kind"));
     }
 
     #[test]
