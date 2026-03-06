@@ -1893,6 +1893,66 @@ fn search_deep_mode_returns_results_with_reranker_signal() {
 }
 
 #[test]
+fn initial_search_candidate_limit_uses_single_rerank_expansion() {
+    let engine = test_engine();
+
+    assert_eq!(
+        engine.initial_search_candidate_limit(&SearchMode::Auto, 10, true),
+        20
+    );
+    assert_eq!(
+        engine.initial_search_candidate_limit(&SearchMode::Deep, 10, true),
+        20
+    );
+    assert_eq!(
+        engine.initial_search_candidate_limit(&SearchMode::Auto, 10, false),
+        10
+    );
+}
+
+#[test]
+fn search_keyword_refills_after_deactivated_result_is_filtered() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        let strong = work_path.join("strong.md");
+        let weak = work_path.join("weak.md");
+        write_text_file(&strong, "token token token token token\n");
+        write_text_file(&weak, "token\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        std::fs::remove_file(&strong).expect("remove strong file");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("deactivate removed file");
+
+        let response = engine
+            .search(SearchRequest {
+                query: "token".to_string(),
+                mode: SearchMode::Keyword,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 1,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: false,
+            })
+            .expect("run keyword search");
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].path, "api/weak.md");
+    });
+}
+
+#[test]
 fn search_validates_semantic_and_collection_scope() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);

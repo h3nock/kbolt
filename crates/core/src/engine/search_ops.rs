@@ -1,6 +1,52 @@
 use super::*;
 
 impl Engine {
+    pub(super) fn initial_search_candidate_limit(
+        &self,
+        mode: &SearchMode,
+        requested_limit: usize,
+        rerank_enabled: bool,
+    ) -> usize {
+        match mode {
+            SearchMode::Keyword | SearchMode::Semantic => requested_limit,
+            SearchMode::Auto => {
+                if rerank_enabled {
+                    requested_limit.max(20)
+                } else {
+                    requested_limit
+                }
+            }
+            SearchMode::Deep => requested_limit.max(20),
+        }
+    }
+
+    pub(super) fn max_search_candidates(&self, targets: &[UpdateTarget]) -> Result<usize> {
+        let mut total = 0usize;
+        for target in targets {
+            total = total.saturating_add(
+                self.storage
+                    .count_chunks_in_collection(target.collection.id)?,
+            );
+        }
+        Ok(total)
+    }
+
+    pub(super) fn rank_chunks_for_mode(
+        &self,
+        mode: &SearchMode,
+        targets: &[UpdateTarget],
+        query: &str,
+        limit: usize,
+        min_score: f32,
+    ) -> Result<Vec<RankedChunk>> {
+        match mode {
+            SearchMode::Keyword => self.rank_keyword_chunks(targets, query, limit, min_score),
+            SearchMode::Auto => self.rank_auto_chunks(targets, query, limit, min_score),
+            SearchMode::Semantic => self.rank_semantic_chunks(targets, query, limit, min_score),
+            SearchMode::Deep => self.rank_deep_chunks(targets, query, limit, min_score),
+        }
+    }
+
     pub(super) fn rank_keyword_chunks(
         &self,
         targets: &[UpdateTarget],

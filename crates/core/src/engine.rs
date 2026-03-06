@@ -664,49 +664,46 @@ impl Engine {
             );
         }
 
-        let ranked_chunks = match mode {
-            SearchMode::Keyword => {
-                self.rank_keyword_chunks(&targets, query, req.limit, req.min_score)?
+        let max_candidates = self.max_search_candidates(&targets)?;
+        let mut retrieval_limit =
+            self.initial_search_candidate_limit(&mode, req.limit, rerank_enabled);
+        let results = loop {
+            let ranked_chunks =
+                self.rank_chunks_for_mode(&mode, &targets, query, retrieval_limit, req.min_score)?;
+
+            if ranked_chunks.is_empty() {
+                return Ok(SearchResponse {
+                    results: Vec::new(),
+                    query: req.query,
+                    mode,
+                    staleness_hint,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                });
             }
-            SearchMode::Auto => {
-                let retrieval_limit = if rerank_enabled {
-                    req.limit.max(20).saturating_mul(4)
-                } else {
-                    req.limit
-                };
-                self.rank_auto_chunks(&targets, query, retrieval_limit, req.min_score)?
+
+            let ranked_len = ranked_chunks.len();
+            let results = self.assemble_search_results(
+                query,
+                ranked_chunks,
+                &collections_by_id,
+                req.debug,
+                rerank_enabled,
+                req.limit,
+            )?;
+
+            if results.len() >= req.limit
+                || ranked_len < retrieval_limit
+                || retrieval_limit >= max_candidates
+            {
+                break results;
             }
-            SearchMode::Semantic => {
-                self.rank_semantic_chunks(&targets, query, req.limit, req.min_score)?
+
+            let next_limit = retrieval_limit.saturating_mul(2).min(max_candidates);
+            if next_limit <= retrieval_limit {
+                break results;
             }
-            SearchMode::Deep => {
-                let retrieval_limit = if rerank_enabled {
-                    req.limit.max(20).saturating_mul(4)
-                } else {
-                    req.limit.max(20)
-                };
-                self.rank_deep_chunks(&targets, query, retrieval_limit, req.min_score)?
-            }
+            retrieval_limit = next_limit;
         };
-
-        if ranked_chunks.is_empty() {
-            return Ok(SearchResponse {
-                results: Vec::new(),
-                query: req.query,
-                mode,
-                staleness_hint,
-                elapsed_ms: started.elapsed().as_millis() as u64,
-            });
-        }
-
-        let results = self.assemble_search_results(
-            query,
-            ranked_chunks,
-            &collections_by_id,
-            req.debug,
-            rerank_enabled,
-            req.limit,
-        )?;
 
         Ok(SearchResponse {
             results,
