@@ -42,31 +42,12 @@ struct ChatBackedExpander {
     chat: Arc<dyn CompletionClient>,
 }
 
-struct LazyLocalOnnxEmbedder {
-    runtime: LocalRuntimeContext,
-    onnx_file: Option<String>,
-    tokenizer_file: Option<String>,
-    max_length: usize,
-    initialized: Mutex<Option<Arc<dyn Embedder>>>,
-}
+type LazyBuilder<T> = dyn Fn() -> Result<Arc<T>> + Send + Sync;
 
-struct LazyLocalGgufEmbedder {
-    runtime: LocalRuntimeContext,
-    model_file: Option<String>,
-    batch_size: usize,
-    n_threads: Option<u32>,
-    n_threads_batch: Option<u32>,
-    initialized: Mutex<Option<Arc<dyn Embedder>>>,
-}
-
-struct LazyLocalLlamaCompletionClient {
-    runtime: LocalRuntimeContext,
-    role: ModelRole,
-    model_file: Option<String>,
-    max_tokens: usize,
-    n_ctx: u32,
-    n_gpu_layers: u32,
-    initialized: Mutex<Option<Arc<dyn CompletionClient>>>,
+struct LazyArc<T: ?Sized> {
+    label: &'static str,
+    value: Mutex<Option<Arc<T>>>,
+    builder: Box<LazyBuilder<T>>,
 }
 
 #[cfg(test)]
@@ -186,13 +167,25 @@ fn build_embedder_inner(
                         "local_onnx embedder requires local runtime context".to_string(),
                     )
                 })?;
-                let embedder: Arc<dyn Embedder> = Arc::new(LazyLocalOnnxEmbedder {
-                    runtime,
-                    onnx_file: onnx_file.clone(),
-                    tokenizer_file: tokenizer_file.clone(),
-                    max_length: *max_length,
-                    initialized: Mutex::new(None),
-                });
+                let onnx_file = onnx_file.clone();
+                let tokenizer_file = tokenizer_file.clone();
+                let max_length = *max_length;
+                let embedder: Arc<dyn Embedder> =
+                    Arc::new(LazyArc::new("local onnx embedder", move || {
+                        let artifact = resolve_model_artifact(
+                            &runtime.model_config,
+                            &runtime.model_dir,
+                            ModelRole::Embedder,
+                        )?;
+                        let embedder = build_local_onnx_embedder(
+                            &artifact.path,
+                            onnx_file.as_deref(),
+                            tokenizer_file.as_deref(),
+                            max_length,
+                        )?;
+                        let embedder: Arc<dyn Embedder> = Arc::new(embedder);
+                        Ok(embedder)
+                    }));
                 return Ok(Some(embedder));
             }
             EmbeddingConfig::LocalGguf {
@@ -206,14 +199,21 @@ fn build_embedder_inner(
                         "local_gguf embedder requires local runtime context".to_string(),
                     )
                 })?;
-                let embedder: Arc<dyn Embedder> = Arc::new(LazyLocalGgufEmbedder {
-                    runtime,
-                    model_file: model_file.clone(),
-                    batch_size: *batch_size,
-                    n_threads: *n_threads,
-                    n_threads_batch: *n_threads_batch,
-                    initialized: Mutex::new(None),
-                });
+                let model_file = model_file.clone();
+                let batch_size = *batch_size;
+                let n_threads = *n_threads;
+                let n_threads_batch = *n_threads_batch;
+                let embedder: Arc<dyn Embedder> =
+                    Arc::new(LazyArc::new("local gguf embedder", move || {
+                        build_local_gguf_embedder_with_runtime(
+                            &runtime.model_config,
+                            &runtime.model_dir,
+                            model_file.as_deref(),
+                            batch_size,
+                            n_threads,
+                            n_threads_batch,
+                        )
+                    }));
                 return Ok(Some(embedder));
             }
         };
@@ -303,15 +303,21 @@ fn build_completion_client_for_role(
                     "local_llama {role_label} requires local runtime context"
                 ))
             })?;
-            Ok(Arc::new(LazyLocalLlamaCompletionClient {
-                runtime,
-                role,
-                model_file: model_file.clone(),
-                max_tokens: *max_tokens,
-                n_ctx: *n_ctx,
-                n_gpu_layers: *n_gpu_layers,
-                initialized: Mutex::new(None),
-            }))
+            let model_file = model_file.clone();
+            let max_tokens = *max_tokens;
+            let n_ctx = *n_ctx;
+            let n_gpu_layers = *n_gpu_layers;
+            Ok(Arc::new(LazyArc::new("local llama client", move || {
+                build_local_llama_client(
+                    &runtime.model_config,
+                    &runtime.model_dir,
+                    role,
+                    model_file.as_deref(),
+                    max_tokens,
+                    n_ctx,
+                    n_gpu_layers,
+                )
+            })))
         }
     }
 }
@@ -322,122 +328,43 @@ impl Embedder for HttpApiEmbedder {
     }
 }
 
-impl Embedder for LazyLocalOnnxEmbedder {
+impl Embedder for LazyArc<dyn Embedder> {
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        let embedder = self.ensure_embedder()?;
+        let embedder = self.get()?;
         embedder.embed_batch(texts)
     }
 }
 
-impl Embedder for LazyLocalGgufEmbedder {
-    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        let embedder = self.ensure_embedder()?;
-        embedder.embed_batch(texts)
-    }
-}
-
-impl CompletionClient for LazyLocalLlamaCompletionClient {
+impl CompletionClient for LazyArc<dyn CompletionClient> {
     fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
-        let client = self.ensure_client()?;
+        let client = self.get()?;
         client.complete(system_prompt, user_prompt)
     }
 }
 
-impl LazyLocalOnnxEmbedder {
-    fn ensure_embedder(&self) -> Result<Arc<dyn Embedder>> {
-        {
-            let guard = self.initialized.lock().map_err(|_| {
-                KboltError::Inference("local onnx embedder mutex poisoned".to_string())
-            })?;
-            if let Some(embedder) = guard.as_ref() {
-                return Ok(embedder.clone());
-            }
+impl<T: ?Sized> LazyArc<T> {
+    fn new(
+        label: &'static str,
+        builder: impl Fn() -> Result<Arc<T>> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            label,
+            value: Mutex::new(None),
+            builder: Box::new(builder),
         }
-
-        let artifact = resolve_model_artifact(
-            &self.runtime.model_config,
-            &self.runtime.model_dir,
-            ModelRole::Embedder,
-        )?;
-        let embedder = build_local_onnx_embedder(
-            &artifact.path,
-            self.onnx_file.as_deref(),
-            self.tokenizer_file.as_deref(),
-            self.max_length,
-        )?;
-        let built: Arc<dyn Embedder> = Arc::new(embedder);
-
-        let mut guard = self
-            .initialized
-            .lock()
-            .map_err(|_| KboltError::Inference("local onnx embedder mutex poisoned".to_string()))?;
-        if let Some(existing) = guard.as_ref() {
-            return Ok(existing.clone());
-        }
-        *guard = Some(built.clone());
-        Ok(built)
     }
-}
 
-impl LazyLocalGgufEmbedder {
-    fn ensure_embedder(&self) -> Result<Arc<dyn Embedder>> {
-        {
-            let guard = self.initialized.lock().map_err(|_| {
-                KboltError::Inference("local gguf embedder mutex poisoned".to_string())
-            })?;
-            if let Some(embedder) = guard.as_ref() {
-                return Ok(embedder.clone());
-            }
-        }
-
-        let built = build_local_gguf_embedder_with_runtime(
-            &self.runtime.model_config,
-            &self.runtime.model_dir,
-            self.model_file.as_deref(),
-            self.batch_size,
-            self.n_threads,
-            self.n_threads_batch,
-        )?;
+    fn get(&self) -> Result<Arc<T>> {
         let mut guard = self
-            .initialized
+            .value
             .lock()
-            .map_err(|_| KboltError::Inference("local gguf embedder mutex poisoned".to_string()))?;
-        if let Some(existing) = guard.as_ref() {
-            return Ok(existing.clone());
-        }
-        *guard = Some(built.clone());
-        Ok(built)
-    }
-}
-
-impl LazyLocalLlamaCompletionClient {
-    fn ensure_client(&self) -> Result<Arc<dyn CompletionClient>> {
-        {
-            let guard = self.initialized.lock().map_err(|_| {
-                KboltError::Inference("local llama client mutex poisoned".to_string())
-            })?;
-            if let Some(client) = guard.as_ref() {
-                return Ok(client.clone());
-            }
+            .map_err(|_| KboltError::Inference(format!("{} mutex poisoned", self.label)))?;
+        if let Some(value) = guard.as_ref() {
+            return Ok(Arc::clone(value));
         }
 
-        let built = build_local_llama_client(
-            &self.runtime.model_config,
-            &self.runtime.model_dir,
-            self.role,
-            self.model_file.as_deref(),
-            self.max_tokens,
-            self.n_ctx,
-            self.n_gpu_layers,
-        )?;
-        let mut guard = self
-            .initialized
-            .lock()
-            .map_err(|_| KboltError::Inference("local llama client mutex poisoned".to_string()))?;
-        if let Some(existing) = guard.as_ref() {
-            return Ok(existing.clone());
-        }
-        *guard = Some(built.clone());
+        let built = (self.builder)()?;
+        *guard = Some(Arc::clone(&built));
         Ok(built)
     }
 }
@@ -700,7 +627,8 @@ impl EmbeddingVector {
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
     use tempfile::tempdir;
@@ -1103,6 +1031,79 @@ mod tests {
             .rerank("query", &["doc".to_string()])
             .expect_err("missing local model should fail on first use");
         assert!(err.to_string().contains("model not available"));
+    }
+
+    #[test]
+    fn lazy_arc_reuses_cached_value() {
+        let build_calls = Arc::new(AtomicUsize::new(0));
+        let lazy = LazyArc::new("test lazy", {
+            let build_calls = Arc::clone(&build_calls);
+            move || {
+                build_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new("ready".to_string()))
+            }
+        });
+
+        let first = lazy.get().expect("first get");
+        let second = lazy.get().expect("second get");
+
+        assert_eq!(build_calls.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn lazy_arc_retries_after_failed_initialization() {
+        let build_calls = Arc::new(AtomicUsize::new(0));
+        let lazy = LazyArc::new("test lazy", {
+            let build_calls = Arc::clone(&build_calls);
+            move || {
+                let attempt = build_calls.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    return Err(KboltError::Inference("not ready".to_string()).into());
+                }
+                Ok(Arc::new("ready".to_string()))
+            }
+        });
+
+        let err = lazy.get().expect_err("first init should fail");
+        assert!(err.to_string().contains("not ready"));
+
+        let second = lazy.get().expect("second init should retry");
+        let third = lazy.get().expect("cached get should succeed");
+
+        assert_eq!(build_calls.load(Ordering::SeqCst), 2);
+        assert!(Arc::ptr_eq(&second, &third));
+    }
+
+    #[test]
+    fn lazy_arc_initializes_once_under_concurrency() {
+        let build_calls = Arc::new(AtomicUsize::new(0));
+        let start = Arc::new(Barrier::new(3));
+        let lazy = Arc::new(LazyArc::new("test lazy", {
+            let build_calls = Arc::clone(&build_calls);
+            move || {
+                build_calls.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(50));
+                Ok(Arc::new("ready".to_string()))
+            }
+        }));
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let lazy = Arc::clone(&lazy);
+            let start = Arc::clone(&start);
+            handles.push(std::thread::spawn(move || {
+                start.wait();
+                lazy.get().expect("concurrent get")
+            }));
+        }
+
+        start.wait();
+        let first = handles.remove(0).join().expect("first join");
+        let second = handles.remove(0).join().expect("second join");
+
+        assert_eq!(build_calls.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(&first, &second));
     }
 
     #[test]
