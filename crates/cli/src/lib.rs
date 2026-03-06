@@ -1,8 +1,8 @@
 pub mod args;
 
 use kbolt_core::engine::Engine;
-use kbolt_core::Result;
 use kbolt_core::ModelPullEvent;
+use kbolt_core::Result;
 use kbolt_types::{
     ActiveSpaceSource, AddCollectionRequest, GetRequest, KboltError, Locator, MultiGetRequest,
     OmitReason, SearchMode, SearchRequest, UpdateOptions,
@@ -10,6 +10,20 @@ use kbolt_types::{
 
 pub struct CliAdapter {
     pub engine: Engine,
+}
+
+pub struct CliSearchOptions<'a> {
+    pub space: Option<&'a str>,
+    pub query: &'a str,
+    pub collections: &'a [String],
+    pub limit: usize,
+    pub min_score: f32,
+    pub deep: bool,
+    pub keyword: bool,
+    pub semantic: bool,
+    pub rerank: bool,
+    pub no_rerank: bool,
+    pub debug: bool,
 }
 
 impl CliAdapter {
@@ -54,9 +68,7 @@ impl CliAdapter {
 
             if !validation_errors.is_empty() {
                 let mut lines = Vec::new();
-                lines.push(
-                    "strict mode aborted: one or more directories are invalid".to_string(),
-                );
+                lines.push("strict mode aborted: one or more directories are invalid".to_string());
                 lines.extend(validation_errors);
                 return Err(kbolt_types::KboltError::InvalidInput(lines.join("\n")).into());
             }
@@ -209,7 +221,11 @@ impl CliAdapter {
 
         Ok(format!(
             "name: {}\n{description_line}\ncollections: {}\ndocuments: {}\nchunks: {}\ncreated: {}",
-            space.name, space.collection_count, space.document_count, space.chunk_count, space.created
+            space.name,
+            space.collection_count,
+            space.document_count,
+            space.chunk_count,
+            space.created
         ))
     }
 
@@ -286,7 +302,12 @@ impl CliAdapter {
         ))
     }
 
-    pub fn collection_describe(&self, space: Option<&str>, name: &str, text: &str) -> Result<String> {
+    pub fn collection_describe(
+        &self,
+        space: Option<&str>,
+        name: &str,
+        text: &str,
+    ) -> Result<String> {
         self.engine.describe_collection(space, name, text)?;
         Ok(format!("collection description updated: {name}"))
     }
@@ -313,7 +334,12 @@ impl CliAdapter {
         ))
     }
 
-    pub fn ignore_add(&self, space: Option<&str>, collection: &str, pattern: &str) -> Result<String> {
+    pub fn ignore_add(
+        &self,
+        space: Option<&str>,
+        collection: &str,
+        pattern: &str,
+    ) -> Result<String> {
         let (resolved_space, normalized_pattern) = self
             .engine
             .add_collection_ignore_pattern(space, collection, pattern)?;
@@ -367,7 +393,9 @@ impl CliAdapter {
     }
 
     pub fn ignore_edit(&self, space: Option<&str>, collection: &str) -> Result<String> {
-        let (resolved_space, path) = self.engine.prepare_collection_ignore_edit(space, collection)?;
+        let (resolved_space, path) = self
+            .engine
+            .prepare_collection_ignore_edit(space, collection)?;
         let editor_command = resolve_editor_command()?;
 
         let mut process = std::process::Command::new(&editor_command[0]);
@@ -383,7 +411,9 @@ impl CliAdapter {
             ))
         })?;
         if !status.success() {
-            return Err(KboltError::Internal(format!("editor exited with status: {status}")).into());
+            return Err(
+                KboltError::Internal(format!("editor exited with status: {status}")).into(),
+            );
         }
 
         Ok(format!(
@@ -402,7 +432,11 @@ impl CliAdapter {
             ("reranker", status.reranker),
             ("expander", status.expander),
         ] {
-            let availability = if info.downloaded { "downloaded" } else { "missing" };
+            let availability = if info.downloaded {
+                "downloaded"
+            } else {
+                "missing"
+            };
             let mut line = format!("- {label}: {} ({availability})", info.name);
             if let Some(size_bytes) = info.size_bytes {
                 line.push_str(&format!(", size_bytes: {size_bytes}"));
@@ -454,28 +488,26 @@ impl CliAdapter {
         Ok(lines.join("\n"))
     }
 
-    pub fn search(
-        &self,
-        space: Option<&str>,
-        query: &str,
-        collections: &[String],
-        limit: usize,
-        min_score: f32,
-        deep: bool,
-        keyword: bool,
-        semantic: bool,
-        rerank: bool,
-        no_rerank: bool,
-        debug: bool,
-    ) -> Result<String> {
+    pub fn search(&self, options: CliSearchOptions<'_>) -> Result<String> {
+        let CliSearchOptions {
+            space,
+            query,
+            collections,
+            limit,
+            min_score,
+            deep,
+            keyword,
+            semantic,
+            rerank,
+            no_rerank,
+            debug,
+        } = options;
         let mode_flags = deep as u8 + keyword as u8 + semantic as u8;
         if mode_flags > 1 {
-            return Err(
-                KboltError::InvalidInput(
-                    "only one of --deep, --keyword, or --semantic can be set".to_string(),
-                )
-                .into(),
-            );
+            return Err(KboltError::InvalidInput(
+                "only one of --deep, --keyword, or --semantic can be set".to_string(),
+            )
+            .into());
         }
 
         let mode = if deep {
@@ -513,7 +545,10 @@ impl CliAdapter {
                 item.score
             ));
             lines.push(format!("title: {}", item.title));
-            lines.push(format!("space: {} | collection: {}", item.space, item.collection));
+            lines.push(format!(
+                "space: {} | collection: {}",
+                item.space, item.collection
+            ));
             if let Some(heading) = &item.heading {
                 lines.push(format!("heading: {heading}"));
             }
@@ -612,8 +647,14 @@ impl CliAdapter {
         lines.push(format!("total_chunks: {}", status.total_chunks));
         lines.push(format!("total_embedded: {}", status.total_embedded));
         lines.push(format!("sqlite_bytes: {}", status.disk_usage.sqlite_bytes));
-        lines.push(format!("tantivy_bytes: {}", status.disk_usage.tantivy_bytes));
-        lines.push(format!("usearch_bytes: {}", status.disk_usage.usearch_bytes));
+        lines.push(format!(
+            "tantivy_bytes: {}",
+            status.disk_usage.tantivy_bytes
+        ));
+        lines.push(format!(
+            "usearch_bytes: {}",
+            status.disk_usage.usearch_bytes
+        ));
         lines.push(format!("models_bytes: {}", status.disk_usage.models_bytes));
         lines.push(format!("total_bytes: {}", status.disk_usage.total_bytes));
         lines.push(format!(
@@ -809,8 +850,9 @@ fn resolve_editor_command() -> Result<Vec<String>> {
 }
 
 fn parse_editor_command(raw: &str) -> Result<Vec<String>> {
-    let args = shell_words::split(raw)
-        .map_err(|err| KboltError::InvalidInput(format!("invalid editor command '{raw}': {err}")))?;
+    let args = shell_words::split(raw).map_err(|err| {
+        KboltError::InvalidInput(format!("invalid editor command '{raw}': {err}"))
+    })?;
     if args.is_empty() {
         return Err(KboltError::InvalidInput("editor command cannot be empty".to_string()).into());
     }
@@ -821,12 +863,16 @@ fn parse_editor_command(raw: &str) -> Result<Vec<String>> {
 mod tests {
     use std::ffi::OsString;
     use std::sync::{Mutex, OnceLock};
-    use std::{fs, path::PathBuf};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     use tempfile::tempdir;
 
     use super::{
         parse_editor_command, resolve_editor_command, resolve_no_rerank_for_mode, CliAdapter,
+        CliSearchOptions,
     };
     use kbolt_core::engine::Engine;
     use kbolt_types::{AddCollectionRequest, SearchMode};
@@ -1052,9 +1098,18 @@ mod tests {
                     &[valid_api.clone(), missing.clone(), valid_wiki.clone()],
                 )
                 .expect("add space with dirs");
-            assert!(output.contains("space added: work - work docs"), "unexpected output: {output}");
-            assert!(output.contains("collections added: 2"), "unexpected output: {output}");
-            assert!(output.contains("collections failed: 1"), "unexpected output: {output}");
+            assert!(
+                output.contains("space added: work - work docs"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("collections added: 2"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("collections failed: 1"),
+                "unexpected output: {output}"
+            );
             assert!(
                 output.contains(&format!("- {} ->", missing.display())),
                 "unexpected output: {output}"
@@ -1126,7 +1181,10 @@ mod tests {
                     &[valid_api.clone(), valid_wiki.clone()],
                 )
                 .expect("strict mode should succeed");
-            assert!(output.contains("collections added: 2"), "unexpected output: {output}");
+            assert!(
+                output.contains("collections added: 2"),
+                "unexpected output: {output}"
+            );
             assert!(
                 !output.contains("collections failed:"),
                 "unexpected output: {output}"
@@ -1165,9 +1223,7 @@ mod tests {
                 .space_add("work", None, false, &[])
                 .expect("add work");
 
-            let output = adapter
-                .space_rename("work", "team")
-                .expect("rename space");
+            let output = adapter.space_rename("work", "team").expect("rename space");
             assert_eq!(output, "space renamed: work -> team");
 
             let info = adapter.space_info("team").expect("team space info");
@@ -1206,15 +1262,14 @@ mod tests {
             let output = adapter.space_remove("default").expect("clear default");
             assert_eq!(output, "default space cleared");
 
-            let info = adapter.space_info("default").expect("default should remain");
-            assert!(
-                info.contains("name: default"),
-                "unexpected output: {info}"
-            );
+            let info = adapter
+                .space_info("default")
+                .expect("default should remain");
+            assert!(info.contains("name: default"), "unexpected output: {info}");
         });
     }
 
-    fn new_collection_dir(root: &PathBuf, name: &str) -> PathBuf {
+    fn new_collection_dir(root: &Path, name: &str) -> PathBuf {
         let path = root.join(name);
         fs::create_dir_all(&path).expect("create collection directory");
         path
@@ -1224,7 +1279,7 @@ mod tests {
         value.replace('\\', "\\\\").replace('"', "\\\"")
     }
 
-    fn seed_model_artifact(model_root: &PathBuf, role: &str, model_id: &str, payload: &[u8]) {
+    fn seed_model_artifact(model_root: &Path, role: &str, model_id: &str, payload: &[u8]) {
         let role_dir = model_root.join(role);
         fs::create_dir_all(&role_dir).expect("create model role dir");
         fs::write(role_dir.join("model.bin"), payload).expect("write model payload");
@@ -1255,7 +1310,7 @@ mod tests {
             engine.add_space("work", None).expect("add work");
             engine.add_space("notes", None).expect("add notes");
 
-            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let work_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: work_path.clone(),
@@ -1267,7 +1322,7 @@ mod tests {
                 })
                 .expect("add work collection");
 
-            let notes_path = new_collection_dir(&root.path().to_path_buf(), "notes-wiki");
+            let notes_path = new_collection_dir(root.path(), "notes-wiki");
             engine
                 .add_collection(AddCollectionRequest {
                     path: notes_path.clone(),
@@ -1293,9 +1348,7 @@ mod tests {
                 "unexpected scoped output: {scoped}"
             );
 
-            let all = adapter
-                .collection_list(None)
-                .expect("list all collections");
+            let all = adapter.collection_list(None).expect("list all collections");
             assert!(all.contains("- work/api"), "unexpected all output: {all}");
             assert!(all.contains("- notes/wiki"), "unexpected all output: {all}");
         });
@@ -1308,7 +1361,7 @@ mod tests {
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
 
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: collection_path.clone(),
@@ -1325,7 +1378,10 @@ mod tests {
                 .collection_info(Some("work"), "api")
                 .expect("collection info");
             assert!(output.contains("name: api"), "unexpected output: {output}");
-            assert!(output.contains("space: work"), "unexpected output: {output}");
+            assert!(
+                output.contains("space: work"),
+                "unexpected output: {output}"
+            );
             assert!(
                 output.contains("description: API docs"),
                 "unexpected output: {output}"
@@ -1344,7 +1400,7 @@ mod tests {
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
 
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: collection_path,
@@ -1379,7 +1435,7 @@ mod tests {
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
 
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: collection_path,
@@ -1411,7 +1467,7 @@ mod tests {
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
 
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: collection_path,
@@ -1445,11 +1501,18 @@ mod tests {
             let root = tempdir().expect("create collection root");
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             let adapter = CliAdapter::new(engine);
 
             let output = adapter
-                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .collection_add(
+                    Some("work"),
+                    &collection_path,
+                    Some("api"),
+                    None,
+                    None,
+                    true,
+                )
                 .expect("add collection");
             assert_eq!(output, "collection added: work/api");
 
@@ -1466,13 +1529,20 @@ mod tests {
             let root = tempdir().expect("create collection root");
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             fs::create_dir_all(collection_path.join("src")).expect("create src dir");
             fs::write(collection_path.join("src/lib.rs"), "fn alpha() {}\n").expect("write file");
             let adapter = CliAdapter::new(engine);
 
             let output = adapter
-                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .collection_add(
+                    Some("work"),
+                    &collection_path,
+                    Some("api"),
+                    None,
+                    None,
+                    true,
+                )
                 .expect("add collection without initial indexing");
             assert_eq!(output, "collection added: work/api");
 
@@ -1496,7 +1566,7 @@ mod tests {
             let root = tempdir().expect("create collection root");
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: collection_path,
@@ -1522,7 +1592,7 @@ mod tests {
             let root = tempdir().expect("create collection root");
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: collection_path,
@@ -1534,14 +1604,8 @@ mod tests {
                 })
                 .expect("add collection");
 
-            fs::create_dir_all(
-                engine
-                    .config()
-                    .config_dir
-                    .join("ignores")
-                    .join("work"),
-            )
-            .expect("create ignore dir");
+            fs::create_dir_all(engine.config().config_dir.join("ignores").join("work"))
+                .expect("create ignore dir");
             fs::write(
                 engine
                     .config()
@@ -1554,11 +1618,10 @@ mod tests {
             .expect("write ignore file");
 
             let adapter = CliAdapter::new(engine);
-            let output = adapter.ignore_show(None, "api").expect("show ignore patterns");
-            assert_eq!(
-                output,
-                "ignore patterns for work/api:\ndist/\n*.tmp"
-            );
+            let output = adapter
+                .ignore_show(None, "api")
+                .expect("show ignore patterns");
+            assert_eq!(output, "ignore patterns for work/api:\ndist/\n*.tmp");
         });
     }
 
@@ -1568,7 +1631,7 @@ mod tests {
             let root = tempdir().expect("create collection root");
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: collection_path,
@@ -1611,7 +1674,7 @@ mod tests {
             let root = tempdir().expect("create collection root");
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: collection_path,
@@ -1640,7 +1703,7 @@ mod tests {
             let root = tempdir().expect("create collection root");
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: collection_path,
@@ -1651,14 +1714,8 @@ mod tests {
                     no_index: true,
                 })
                 .expect("add collection");
-            fs::create_dir_all(
-                engine
-                    .config()
-                    .config_dir
-                    .join("ignores")
-                    .join("work"),
-            )
-            .expect("create ignore dir");
+            fs::create_dir_all(engine.config().config_dir.join("ignores").join("work"))
+                .expect("create ignore dir");
             fs::write(
                 engine
                     .config()
@@ -1699,7 +1756,7 @@ mod tests {
             let root = tempdir().expect("create collection root");
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: collection_path,
@@ -1725,7 +1782,7 @@ mod tests {
             let root = tempdir().expect("create collection root");
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: collection_path,
@@ -1750,8 +1807,8 @@ mod tests {
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
             engine.add_space("notes", None).expect("add notes");
-            let work_collection = new_collection_dir(&root.path().to_path_buf(), "work-api");
-            let notes_collection = new_collection_dir(&root.path().to_path_buf(), "notes-wiki");
+            let work_collection = new_collection_dir(root.path(), "work-api");
+            let notes_collection = new_collection_dir(root.path(), "notes-wiki");
             engine
                 .add_collection(AddCollectionRequest {
                     path: work_collection,
@@ -1773,14 +1830,8 @@ mod tests {
                 })
                 .expect("add notes collection");
 
-            fs::create_dir_all(
-                engine
-                    .config()
-                    .config_dir
-                    .join("ignores")
-                    .join("work"),
-            )
-            .expect("create work ignore dir");
+            fs::create_dir_all(engine.config().config_dir.join("ignores").join("work"))
+                .expect("create work ignore dir");
             fs::write(
                 engine
                     .config()
@@ -1792,14 +1843,8 @@ mod tests {
             )
             .expect("write work ignore file");
 
-            fs::create_dir_all(
-                engine
-                    .config()
-                    .config_dir
-                    .join("ignores")
-                    .join("notes"),
-            )
-            .expect("create notes ignore dir");
+            fs::create_dir_all(engine.config().config_dir.join("ignores").join("notes"))
+                .expect("create notes ignore dir");
             fs::write(
                 engine
                     .config()
@@ -1813,7 +1858,10 @@ mod tests {
 
             let adapter = CliAdapter::new(engine);
             let output = adapter.ignore_list(None).expect("list all ignores");
-            assert!(output.contains("ignore patterns:"), "unexpected output: {output}");
+            assert!(
+                output.contains("ignore patterns:"),
+                "unexpected output: {output}"
+            );
             assert!(output.contains("notes:"), "unexpected output: {output}");
             assert!(
                 output.contains("- wiki (patterns: 1)"),
@@ -1870,7 +1918,7 @@ mod tests {
             let root = tempdir().expect("create collection root");
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: collection_path,
@@ -1942,7 +1990,10 @@ mod tests {
             seed_model_artifact(&model_dir, "expander", &expander_model, b"x");
 
             let output = adapter.models_pull().expect("pull models");
-            assert!(output.contains("downloaded: 0"), "unexpected output: {output}");
+            assert!(
+                output.contains("downloaded: 0"),
+                "unexpected output: {output}"
+            );
             assert!(
                 output.contains("downloaded_models:\n- none"),
                 "unexpected output: {output}"
@@ -1952,7 +2003,9 @@ mod tests {
                 "unexpected output: {output}"
             );
             assert!(
-                output.contains(&format!("already present embedder: {embed_model} (1 bytes)")),
+                output.contains(&format!(
+                    "already present embedder: {embed_model} (1 bytes)"
+                )),
                 "unexpected output: {output}"
             );
             assert!(
@@ -1967,7 +2020,10 @@ mod tests {
                 )),
                 "unexpected output: {output}"
             );
-            assert!(output.contains("total_bytes: 0"), "unexpected output: {output}");
+            assert!(
+                output.contains("total_bytes: 0"),
+                "unexpected output: {output}"
+            );
         });
     }
 
@@ -1978,10 +2034,23 @@ mod tests {
             let adapter = CliAdapter::new(engine);
 
             let err = adapter
-                .search(None, "alpha", &[], 10, 0.0, true, true, false, false, false, false)
+                .search(CliSearchOptions {
+                    space: None,
+                    query: "alpha",
+                    collections: &[],
+                    limit: 10,
+                    min_score: 0.0,
+                    deep: true,
+                    keyword: true,
+                    semantic: false,
+                    rerank: false,
+                    no_rerank: false,
+                    debug: false,
+                })
                 .expect_err("conflicting search flags should fail");
             assert!(
-                err.to_string().contains("only one of --deep, --keyword, or --semantic"),
+                err.to_string()
+                    .contains("only one of --deep, --keyword, or --semantic"),
                 "unexpected error: {err}"
             );
         });
@@ -1998,7 +2067,11 @@ mod tests {
         assert!(!resolve_no_rerank_for_mode(SearchMode::Deep, false, false));
         assert!(resolve_no_rerank_for_mode(SearchMode::Deep, false, true));
         assert!(resolve_no_rerank_for_mode(SearchMode::Keyword, true, false));
-        assert!(resolve_no_rerank_for_mode(SearchMode::Semantic, true, false));
+        assert!(resolve_no_rerank_for_mode(
+            SearchMode::Semantic,
+            true,
+            false
+        ));
     }
 
     #[test]
@@ -2011,9 +2084,16 @@ mod tests {
             adapter
                 .space_add("work", None, false, &[])
                 .expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             adapter
-                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .collection_add(
+                    Some("work"),
+                    &collection_path,
+                    Some("api"),
+                    None,
+                    None,
+                    true,
+                )
                 .expect("add collection");
 
             fs::write(collection_path.join("a.md"), "alpha query token\n").expect("write file");
@@ -2022,22 +2102,28 @@ mod tests {
                 .expect("run update");
 
             let output = adapter
-                .search(
-                    Some("work"),
-                    "alpha",
-                    &["api".to_string()],
-                    5,
-                    0.0,
-                    false,
-                    true,
-                    false,
-                    false,
-                    false,
-                    true,
-                )
+                .search(CliSearchOptions {
+                    space: Some("work"),
+                    query: "alpha",
+                    collections: &["api".to_string()],
+                    limit: 5,
+                    min_score: 0.0,
+                    deep: false,
+                    keyword: true,
+                    semantic: false,
+                    rerank: false,
+                    no_rerank: false,
+                    debug: true,
+                })
                 .expect("run search");
-            assert!(output.contains("query: alpha"), "unexpected output: {output}");
-            assert!(output.contains("mode: keyword"), "unexpected output: {output}");
+            assert!(
+                output.contains("query: alpha"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("mode: keyword"),
+                "unexpected output: {output}"
+            );
             assert!(output.contains("results: 1"), "unexpected output: {output}");
             assert!(output.contains("1. #"), "unexpected output: {output}");
             assert!(output.contains("api/a.md"), "unexpected output: {output}");
@@ -2055,9 +2141,16 @@ mod tests {
             adapter
                 .space_add("work", None, false, &[])
                 .expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             adapter
-                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .collection_add(
+                    Some("work"),
+                    &collection_path,
+                    Some("api"),
+                    None,
+                    None,
+                    true,
+                )
                 .expect("add collection");
 
             let file_path = collection_path.join("src/lib.rs");
@@ -2090,9 +2183,16 @@ mod tests {
             adapter
                 .space_add("work", None, false, &[])
                 .expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             adapter
-                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .collection_add(
+                    Some("work"),
+                    &collection_path,
+                    Some("api"),
+                    None,
+                    None,
+                    true,
+                )
                 .expect("add collection");
 
             let file_path = collection_path.join("src/lib.rs");
@@ -2104,7 +2204,11 @@ mod tests {
                 .expect("run dry-run update");
             assert!(output.contains("added: 1"), "unexpected output: {output}");
 
-            let space = adapter.engine.storage().get_space("work").expect("get space");
+            let space = adapter
+                .engine
+                .storage()
+                .get_space("work")
+                .expect("get space");
             let collection = adapter
                 .engine
                 .storage()
@@ -2129,9 +2233,16 @@ mod tests {
             adapter
                 .space_add("work", None, false, &[])
                 .expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             adapter
-                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .collection_add(
+                    Some("work"),
+                    &collection_path,
+                    Some("api"),
+                    None,
+                    None,
+                    true,
+                )
                 .expect("add collection");
 
             fs::create_dir_all(collection_path.join("src")).expect("create src dir");
@@ -2142,7 +2253,11 @@ mod tests {
                 .update(Some("work"), &["api".to_string()], true, false, false)
                 .expect("run update");
 
-            let space = adapter.engine.storage().get_space("work").expect("get space");
+            let space = adapter
+                .engine
+                .storage()
+                .get_space("work")
+                .expect("get space");
             let collection = adapter
                 .engine
                 .storage()
@@ -2163,7 +2278,10 @@ mod tests {
             let default_output = adapter
                 .ls(Some("work"), "api", None, false)
                 .expect("run ls");
-            assert!(default_output.contains("files:"), "unexpected output: {default_output}");
+            assert!(
+                default_output.contains("files:"),
+                "unexpected output: {default_output}"
+            );
             assert!(
                 default_output.contains("- src/lib.rs | lib.rs | #"),
                 "unexpected output: {default_output}"
@@ -2197,9 +2315,16 @@ mod tests {
             adapter
                 .space_add("work", None, false, &[])
                 .expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             adapter
-                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .collection_add(
+                    Some("work"),
+                    &collection_path,
+                    Some("api"),
+                    None,
+                    None,
+                    true,
+                )
                 .expect("add collection");
 
             fs::create_dir_all(collection_path.join("src")).expect("create src dir");
@@ -2232,9 +2357,16 @@ mod tests {
             adapter
                 .space_add("work", None, false, &[])
                 .expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             adapter
-                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .collection_add(
+                    Some("work"),
+                    &collection_path,
+                    Some("api"),
+                    None,
+                    None,
+                    true,
+                )
                 .expect("add collection");
 
             fs::create_dir_all(collection_path.join("src")).expect("create src dir");
@@ -2255,8 +2387,14 @@ mod tests {
                 output.contains("path: api/src/lib.rs"),
                 "unexpected output: {output}"
             );
-            assert!(output.contains("stale: false"), "unexpected output: {output}");
-            assert!(output.contains("total_lines: 3"), "unexpected output: {output}");
+            assert!(
+                output.contains("stale: false"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("total_lines: 3"),
+                "unexpected output: {output}"
+            );
             assert!(
                 output.contains("returned_lines: 1"),
                 "unexpected output: {output}"
@@ -2275,9 +2413,16 @@ mod tests {
             adapter
                 .space_add("work", None, false, &[])
                 .expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             adapter
-                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .collection_add(
+                    Some("work"),
+                    &collection_path,
+                    Some("api"),
+                    None,
+                    None,
+                    true,
+                )
                 .expect("add collection");
 
             fs::create_dir_all(collection_path.join("src")).expect("create src dir");
@@ -2297,8 +2442,14 @@ mod tests {
             let output = adapter
                 .get(Some("work"), &docid, None, None)
                 .expect("get by docid");
-            assert!(output.contains("stale: true"), "unexpected output: {output}");
-            assert!(output.contains("content:\nfn beta() {}"), "unexpected output: {output}");
+            assert!(
+                output.contains("stale: true"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("content:\nfn beta() {}"),
+                "unexpected output: {output}"
+            );
 
             let bare_docid = docid.trim_start_matches('#').to_string();
             let bare_output = adapter
@@ -2321,9 +2472,16 @@ mod tests {
             adapter
                 .space_add("work", None, false, &[])
                 .expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             adapter
-                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .collection_add(
+                    Some("work"),
+                    &collection_path,
+                    Some("api"),
+                    None,
+                    None,
+                    true,
+                )
                 .expect("add collection");
 
             fs::write(collection_path.join("a.md"), "alpha\n").expect("write a");
@@ -2345,7 +2503,10 @@ mod tests {
                     51_200,
                 )
                 .expect("run multi-get");
-            assert!(output.contains("documents: 2"), "unexpected output: {output}");
+            assert!(
+                output.contains("documents: 2"),
+                "unexpected output: {output}"
+            );
             assert!(output.contains("omitted: 1"), "unexpected output: {output}");
             assert!(
                 output.contains("reason: max_files"),
@@ -2368,9 +2529,16 @@ mod tests {
             adapter
                 .space_add("work", None, false, &[])
                 .expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             adapter
-                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .collection_add(
+                    Some("work"),
+                    &collection_path,
+                    Some("api"),
+                    None,
+                    None,
+                    true,
+                )
                 .expect("add collection");
 
             let existing = collection_path.join("a.md");
@@ -2391,10 +2559,19 @@ mod tests {
                     51_200,
                 )
                 .expect("run multi-get");
-            assert!(output.contains("documents: 1"), "unexpected output: {output}");
+            assert!(
+                output.contains("documents: 1"),
+                "unexpected output: {output}"
+            );
             assert!(output.contains("omitted: 0"), "unexpected output: {output}");
-            assert!(output.contains("resolved_count: 1"), "unexpected output: {output}");
-            assert!(output.contains("warnings: 1"), "unexpected output: {output}");
+            assert!(
+                output.contains("resolved_count: 1"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("warnings: 1"),
+                "unexpected output: {output}"
+            );
             assert!(
                 output.contains("file deleted since indexing:"),
                 "unexpected output: {output}"
@@ -2413,9 +2590,16 @@ mod tests {
             adapter
                 .space_add("work", None, false, &[])
                 .expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             adapter
-                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .collection_add(
+                    Some("work"),
+                    &collection_path,
+                    Some("api"),
+                    None,
+                    None,
+                    true,
+                )
                 .expect("add collection");
 
             fs::write(collection_path.join("a.md"), "alpha\n").expect("write a");
@@ -2435,9 +2619,18 @@ mod tests {
                     51_200,
                 )
                 .expect("run multi-get");
-            assert!(output.contains("documents: 1"), "unexpected output: {output}");
-            assert!(output.contains("resolved_count: 1"), "unexpected output: {output}");
-            assert!(output.contains("warnings: 2"), "unexpected output: {output}");
+            assert!(
+                output.contains("documents: 1"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("resolved_count: 1"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("warnings: 2"),
+                "unexpected output: {output}"
+            );
             assert!(
                 output.contains("document not found: api/missing.md"),
                 "unexpected output: {output}"
@@ -2459,9 +2652,16 @@ mod tests {
             adapter
                 .space_add("work", Some("work docs"), false, &[])
                 .expect("add work");
-            let collection_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let collection_path = new_collection_dir(root.path(), "work-api");
             adapter
-                .collection_add(Some("work"), &collection_path, Some("api"), None, None, true)
+                .collection_add(
+                    Some("work"),
+                    &collection_path,
+                    Some("api"),
+                    None,
+                    None,
+                    true,
+                )
                 .expect("add collection");
 
             let file_path = collection_path.join("src/lib.rs");
@@ -2477,10 +2677,7 @@ mod tests {
                 output.contains("- work (collections: 1"),
                 "unexpected output: {output}"
             );
-            assert!(
-                output.contains("  - api ("),
-                "unexpected output: {output}"
-            );
+            assert!(output.contains("  - api ("), "unexpected output: {output}");
             assert!(
                 output.contains("total_documents: 1"),
                 "unexpected output: {output}"
@@ -2494,7 +2691,10 @@ mod tests {
                 "unexpected output: {output}"
             );
             assert!(output.contains("cache_dir:"), "unexpected output: {output}");
-            assert!(output.contains("config_dir:"), "unexpected output: {output}");
+            assert!(
+                output.contains("config_dir:"),
+                "unexpected output: {output}"
+            );
         });
     }
 
@@ -2512,13 +2712,27 @@ mod tests {
                 .space_add("notes", None, false, &[])
                 .expect("add notes");
 
-            let work_collection = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let work_collection = new_collection_dir(root.path(), "work-api");
             adapter
-                .collection_add(Some("work"), &work_collection, Some("api"), None, None, true)
+                .collection_add(
+                    Some("work"),
+                    &work_collection,
+                    Some("api"),
+                    None,
+                    None,
+                    true,
+                )
                 .expect("add work collection");
-            let notes_collection = new_collection_dir(&root.path().to_path_buf(), "notes-wiki");
+            let notes_collection = new_collection_dir(root.path(), "notes-wiki");
             adapter
-                .collection_add(Some("notes"), &notes_collection, Some("wiki"), None, None, true)
+                .collection_add(
+                    Some("notes"),
+                    &notes_collection,
+                    Some("wiki"),
+                    None,
+                    None,
+                    true,
+                )
                 .expect("add notes collection");
 
             fs::write(work_collection.join("a.md"), "alpha\n").expect("write work file");

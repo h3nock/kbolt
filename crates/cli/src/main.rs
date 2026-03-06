@@ -2,7 +2,7 @@ use clap::Parser;
 use kbolt_cli::args::{
     Cli, CollectionCommand, Command, IgnoreCommand, ModelsCommand, SearchArgs, SpaceCommand,
 };
-use kbolt_cli::CliAdapter;
+use kbolt_cli::{CliAdapter, CliSearchOptions};
 use kbolt_core::config;
 use kbolt_core::engine::Engine;
 use kbolt_core::error::CoreError;
@@ -175,19 +175,19 @@ fn run() -> Result<()> {
         Command::Search(search) => {
             let requested_mode = requested_search_mode(&search);
             let run_search = |deep: bool, keyword: bool, semantic: bool| {
-                adapter.search(
-                    cli.space.as_deref(),
-                    &search.query,
-                    &search.collections,
-                    search.limit,
-                    search.min_score,
+                adapter.search(CliSearchOptions {
+                    space: cli.space.as_deref(),
+                    query: &search.query,
+                    collections: &search.collections,
+                    limit: search.limit,
+                    min_score: search.min_score,
                     deep,
                     keyword,
                     semantic,
-                    search.rerank,
-                    search.no_rerank,
-                    search.debug,
-                )
+                    rerank: search.rerank,
+                    no_rerank: search.no_rerank,
+                    debug: search.debug,
+                })
             };
 
             match run_search(search.deep, search.keyword, search.semantic) {
@@ -372,9 +372,8 @@ mod tests {
     use super::{
         is_model_not_available_error, parse_pull_confirmation, requested_search_mode,
         should_offer_model_pull_for_collection_add, should_offer_model_pull_for_update,
-        should_show_first_run_models_hint,
-        with_collection_add_model_missing_guidance, with_update_model_missing_guidance,
-        RequestedSearchMode,
+        should_show_first_run_models_hint, with_collection_add_model_missing_guidance,
+        with_update_model_missing_guidance, RequestedSearchMode,
     };
     use kbolt_cli::args::{Command, SearchArgs};
     use kbolt_core::error::CoreError;
@@ -525,6 +524,10 @@ mod tests {
             false,
             false
         ));
-        assert!(!should_show_first_run_models_hint(&Command::Mcp, true, false));
+        assert!(!should_show_first_run_models_hint(
+            &Command::Mcp,
+            true,
+            false
+        ));
     }
 }
