@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::error::{CoreError, Result};
 use kbolt_types::{DiskUsage, KboltError};
@@ -20,7 +20,7 @@ const USEARCH_FILENAME: &str = "vectors.usearch";
 pub struct Storage {
     db: Mutex<Connection>,
     cache_dir: PathBuf,
-    spaces: RwLock<HashMap<String, SpaceIndexes>>,
+    spaces: RwLock<HashMap<String, Arc<SpaceIndexes>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,14 +279,14 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             .spaces
             .write()
             .map_err(|_| CoreError::poisoned("spaces"))?;
-        spaces.entry(name.to_string()).or_insert(SpaceIndexes {
+        spaces.entry(name.to_string()).or_insert(Arc::new(SpaceIndexes {
             _tantivy_dir: tantivy_dir,
             usearch_path,
             tantivy_index,
             tantivy_writer: Mutex::new(tantivy_writer),
             usearch_index: RwLock::new(usearch_index),
             fields,
-        });
+        }));
 
         Ok(())
     }
@@ -1317,14 +1317,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             return Ok(());
         }
 
-        self.open_space(space)?;
-        let spaces = self
-            .spaces
-            .read()
-            .map_err(|_| CoreError::poisoned("spaces"))?;
-        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
-            name: space.to_string(),
-        })?;
+        let space_indexes = self.get_space_indexes(space)?;
         let writer = space_indexes
             .tantivy_writer
             .lock()
@@ -1364,14 +1357,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             return Ok(());
         }
 
-        self.open_space(space)?;
-        let spaces = self
-            .spaces
-            .read()
-            .map_err(|_| CoreError::poisoned("spaces"))?;
-        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
-            name: space.to_string(),
-        })?;
+        let space_indexes = self.get_space_indexes(space)?;
         let writer = space_indexes
             .tantivy_writer
             .lock()
@@ -1393,14 +1379,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
     }
 
     pub fn delete_tantivy_by_doc(&self, space: &str, doc_id: i64) -> Result<()> {
-        self.open_space(space)?;
-        let spaces = self
-            .spaces
-            .read()
-            .map_err(|_| CoreError::poisoned("spaces"))?;
-        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
-            name: space.to_string(),
-        })?;
+        let space_indexes = self.get_space_indexes(space)?;
         let writer = space_indexes
             .tantivy_writer
             .lock()
@@ -1431,14 +1410,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             ));
         }
 
-        self.open_space(space)?;
-        let spaces = self
-            .spaces
-            .read()
-            .map_err(|_| CoreError::poisoned("spaces"))?;
-        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
-            name: space.to_string(),
-        })?;
+        let space_indexes = self.get_space_indexes(space)?;
 
         let query_fields = fields
             .iter()
@@ -1477,14 +1449,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
     }
 
     pub fn commit_tantivy(&self, space: &str) -> Result<()> {
-        self.open_space(space)?;
-        let spaces = self
-            .spaces
-            .read()
-            .map_err(|_| CoreError::poisoned("spaces"))?;
-        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
-            name: space.to_string(),
-        })?;
+        let space_indexes = self.get_space_indexes(space)?;
         let mut writer = space_indexes
             .tantivy_writer
             .lock()
@@ -1502,14 +1467,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             return Ok(());
         }
 
-        self.open_space(space)?;
-        let spaces = self
-            .spaces
-            .read()
-            .map_err(|_| CoreError::poisoned("spaces"))?;
-        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
-            name: space.to_string(),
-        })?;
+        let space_indexes = self.get_space_indexes(space)?;
 
         let expected_dimensions = entries[0].1.len();
         if expected_dimensions == 0 {
@@ -1556,14 +1514,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             return Ok(());
         }
 
-        self.open_space(space)?;
-        let spaces = self
-            .spaces
-            .read()
-            .map_err(|_| CoreError::poisoned("spaces"))?;
-        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
-            name: space.to_string(),
-        })?;
+        let space_indexes = self.get_space_indexes(space)?;
         let index = space_indexes
             .usearch_index
             .write()
@@ -1592,14 +1543,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             ));
         }
 
-        self.open_space(space)?;
-        let spaces = self
-            .spaces
-            .read()
-            .map_err(|_| CoreError::poisoned("spaces"))?;
-        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
-            name: space.to_string(),
-        })?;
+        let space_indexes = self.get_space_indexes(space)?;
         let index = space_indexes
             .usearch_index
             .read()
@@ -1632,14 +1576,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
     }
 
     pub fn count_usearch(&self, space: &str) -> Result<usize> {
-        self.open_space(space)?;
-        let spaces = self
-            .spaces
-            .read()
-            .map_err(|_| CoreError::poisoned("spaces"))?;
-        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
-            name: space.to_string(),
-        })?;
+        let space_indexes = self.get_space_indexes(space)?;
         let index = space_indexes
             .usearch_index
             .read()
@@ -1648,14 +1585,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
     }
 
     pub fn clear_usearch(&self, space: &str) -> Result<()> {
-        self.open_space(space)?;
-        let spaces = self
-            .spaces
-            .read()
-            .map_err(|_| CoreError::poisoned("spaces"))?;
-        let space_indexes = spaces.get(space).ok_or_else(|| KboltError::SpaceNotFound {
-            name: space.to_string(),
-        })?;
+        let space_indexes = self.get_space_indexes(space)?;
         let index = space_indexes
             .usearch_index
             .write()
@@ -1980,6 +1910,20 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let tantivy_dir = space_root.join(TANTIVY_DIR_NAME);
         let usearch_path = space_root.join(USEARCH_FILENAME);
         (tantivy_dir, usearch_path)
+    }
+
+    fn get_space_indexes(&self, name: &str) -> Result<Arc<SpaceIndexes>> {
+        self.open_space(name)?;
+        let spaces = self
+            .spaces
+            .read()
+            .map_err(|_| CoreError::poisoned("spaces"))?;
+        spaces.get(name).cloned().ok_or_else(|| {
+            KboltError::SpaceNotFound {
+                name: name.to_string(),
+            }
+            .into()
+        })
     }
 }
 
