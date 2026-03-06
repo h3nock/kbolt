@@ -1842,6 +1842,10 @@ fn search_validates_semantic_and_collection_scope() {
                     message.contains("semantic search requires embeddings configuration"),
                     "unexpected message: {message}"
                 );
+                assert!(
+                    message.contains("\"local_gguf\""),
+                    "expected local_gguf guidance in message: {message}"
+                );
             }
             other => panic!("unexpected error: {other}"),
         }

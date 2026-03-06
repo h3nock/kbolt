@@ -71,7 +71,7 @@ impl Engine {
     ) -> Result<Vec<RankedChunk>> {
         let Some(embedder) = self.embedder.as_ref() else {
             return Err(KboltError::InvalidInput(
-                "semantic search requires embeddings configuration. add [embeddings] to index.toml with provider = \"openai_compatible\", \"voyage\", or \"local_onnx\"".to_string(),
+                "semantic search requires embeddings configuration. add [embeddings] to index.toml with provider = \"openai_compatible\", \"voyage\", \"local_onnx\", or \"local_gguf\"".to_string(),
             )
             .into());
         };
