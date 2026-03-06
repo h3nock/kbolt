@@ -6,6 +6,17 @@ pub enum Locator {
     DocId(String),
 }
 
+impl Locator {
+    pub fn parse(raw: &str) -> Self {
+        let trimmed = raw.trim();
+        if trimmed.contains('/') {
+            return Self::Path(trimmed.to_string());
+        }
+
+        Self::DocId(trimmed.trim_start_matches('#').to_string())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GetRequest {
     pub locator: Locator,
@@ -65,4 +76,25 @@ pub struct FileEntry {
     pub active: bool,
     pub chunk_count: usize,
     pub embedded: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Locator;
+
+    #[test]
+    fn parse_preserves_relative_paths() {
+        assert_eq!(
+            Locator::parse(" api/src/lib.rs "),
+            Locator::Path("api/src/lib.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_normalizes_docids() {
+        assert_eq!(
+            Locator::parse(" #abc123 "),
+            Locator::DocId("abc123".to_string())
+        );
+    }
 }

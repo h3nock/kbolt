@@ -246,7 +246,7 @@ impl McpAdapter {
             }
             McpToolCall::Get { identifier, space } => {
                 let response = self.get_document(GetRequest {
-                    locator: parse_tool_locator(&identifier),
+                    locator: Locator::parse(&identifier),
                     space,
                     offset: None,
                     limit: None,
@@ -268,7 +268,7 @@ impl McpAdapter {
                 let response = self.multi_get(MultiGetRequest {
                     locators: locators
                         .iter()
-                        .map(|item| parse_tool_locator(item))
+                        .map(|item| Locator::parse(item))
                         .collect::<Vec<_>>(),
                     space,
                     max_files: max_files.unwrap_or(DEFAULT_MULTI_GET_MAX_FILES),
@@ -519,15 +519,6 @@ fn resolve_tool_no_rerank(mode: &SearchMode, no_rerank: Option<bool>) -> bool {
 fn should_fallback_to_keyword_search(req: &SearchRequest, err: &CoreError) -> bool {
     matches!(req.mode, SearchMode::Auto)
         && matches!(err, CoreError::Domain(KboltError::ModelNotAvailable { .. }))
-}
-
-fn parse_tool_locator(raw: &str) -> Locator {
-    let trimmed = raw.trim();
-    if trimmed.contains('/') {
-        return Locator::Path(trimmed.to_string());
-    }
-
-    Locator::DocId(trimmed.trim_start_matches('#').to_string())
 }
 
 #[cfg(test)]

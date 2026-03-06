@@ -730,7 +730,7 @@ impl CliAdapter {
         offset: Option<usize>,
         limit: Option<usize>,
     ) -> Result<String> {
-        let locator = parse_cli_locator(identifier);
+        let locator = Locator::parse(identifier);
 
         let document = self.engine.get_document(GetRequest {
             locator,
@@ -762,7 +762,7 @@ impl CliAdapter {
     ) -> Result<String> {
         let locators = locators
             .iter()
-            .map(|item| parse_cli_locator(item))
+            .map(|item| Locator::parse(item))
             .collect::<Vec<_>>();
 
         let response = self.engine.multi_get(MultiGetRequest {
@@ -823,16 +823,6 @@ fn resolve_no_rerank_for_mode(mode: SearchMode, rerank: bool, no_rerank: bool) -
         SearchMode::Deep => no_rerank,
         SearchMode::Keyword | SearchMode::Semantic => true,
     }
-}
-
-fn parse_cli_locator(raw: &str) -> Locator {
-    let trimmed = raw.trim();
-    if trimmed.contains('/') {
-        return Locator::Path(trimmed.to_string());
-    }
-
-    let docid = trimmed.trim_start_matches('#').to_string();
-    Locator::DocId(docid)
 }
 
 fn resolve_editor_command() -> Result<Vec<String>> {
