@@ -1000,7 +1000,7 @@ UNIQUE constraint on `(doc_id, seq)`. Offset and length define a byte slice into
 | Column | Type | Purpose |
 |---|---|---|
 | `chunk_id` | INTEGER FK | References `chunks.id`, CASCADE delete |
-| `model` | TEXT | Model identifier (e.g. `sentence-transformers/all-MiniLM-L6-v2`) |
+| `model` | TEXT | Model identifier (e.g. `ggml-org/embeddinggemma-300M-GGUF`) |
 | `embedded_at` | TEXT | ISO 8601, when the embedding was created |
 
 PRIMARY KEY on `(chunk_id, model)`. Tracks which chunks have been embedded and by which model. When the embedding model changes, stale entries are detected by comparing the `model` column against the current model config.
@@ -1585,7 +1585,7 @@ default_space = "work"    # optional, set via `kbolt space default`
 
 [models.embedder]
 provider = "huggingface"
-id = "sentence-transformers/all-MiniLM-L6-v2"
+id = "ggml-org/embeddinggemma-300M-GGUF"
 # revision = "main"
 
 [models.reranker]
@@ -1597,27 +1597,25 @@ provider = "huggingface"
 id = "tobil/qmd-query-expansion-1.7B-gguf"
 
 [embeddings]
-provider = "openai_compatible"   # V1: openai_compatible | voyage | local_onnx | local_gguf
-model = "text-embedding-3-small"
-base_url = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"
-timeout_ms = 30000
-batch_size = 32
-max_retries = 2
+provider = "local_gguf"          # V1: openai_compatible | voyage | local_onnx | local_gguf
+model_file = "embeddinggemma-300M-Q8_0.gguf"
+batch_size = 8
+# n_threads = 8
+# n_threads_batch = 8
 
 [inference.reranker]
 provider = "local_llama"         # V1: openai_compatible | local_llama
+model_file = "qwen3-reranker-0.6b-q8_0.gguf"
 max_tokens = 256
 n_ctx = 2048
 n_gpu_layers = 0
-# model_file = "qwen-reranker.gguf"  # optional when multiple gguf files exist
 
 [inference.expander]
 provider = "local_llama"
+model_file = "qmd-query-expansion-1.7B-q4_k_m.gguf"
 max_tokens = 256
 n_ctx = 2048
 n_gpu_layers = 0
-# model_file = "qwen-expander.gguf"
 
 [reaping]
 days = 7    # hard-delete documents deactivated longer than this
@@ -1768,7 +1766,7 @@ Injected into LLM system prompt on connection:
 
 | Role | Model | Format | Size | Runtime |
 |---|---|---|---|---|
-| Embedding | all-MiniLM-L6-v2 | ONNX + tokenizer | ~100MB | ONNX Runtime (CPU) |
+| Embedding | embeddinggemma 300M | GGUF Q8 | ~314MB | llama-cpp-rs (GPU/CPU) |
 | Reranker | Qwen3-Reranker 0.6B | GGUF Q8 | ~640MB | llama-cpp-rs (GPU/CPU) |
 | Expander | qmd-query-expansion 1.7B | GGUF Q4 | ~1.2GB | llama-cpp-rs (GPU/CPU) |
 
