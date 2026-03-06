@@ -28,12 +28,8 @@ pub(super) fn build_local_onnx_embedder(
     tokenizer_file: Option<&str>,
     max_length: usize,
 ) -> Result<LocalOnnxEmbedder> {
-    let onnx_path = resolve_file_with_extension(
-        artifact_dir,
-        onnx_file,
-        "onnx",
-        "embeddings.onnx_file",
-    )?;
+    let onnx_path =
+        resolve_file_with_extension(artifact_dir, onnx_file, "onnx", "embeddings.onnx_file")?;
     let tokenizer_path =
         resolve_tokenizer_file(artifact_dir, tokenizer_file, "embeddings.tokenizer_file")?;
 
@@ -66,7 +62,9 @@ pub(super) fn build_local_onnx_embedder(
         .map_err(|err| KboltError::Inference(format!("failed to configure tokenizer: {err}")))?;
 
     let session = Session::builder()
-        .map_err(|err| KboltError::Inference(format!("failed to create ONNX session builder: {err}")))?
+        .map_err(|err| {
+            KboltError::Inference(format!("failed to create ONNX session builder: {err}"))
+        })?
         .commit_from_file(&onnx_path)
         .map_err(|err| {
             KboltError::Inference(format!(
@@ -106,13 +104,18 @@ fn embed_with_local_onnx(embedder: &LocalOnnxEmbedder, texts: &[String]) -> Resu
     let mut token_type_ids = Vec::with_capacity(batch_size * seq_len);
     for encoding in &encodings {
         if encoding.get_ids().len() != seq_len {
-            return Err(
-                KboltError::Inference("tokenizer produced uneven sequence lengths".to_string())
-                    .into(),
-            );
+            return Err(KboltError::Inference(
+                "tokenizer produced uneven sequence lengths".to_string(),
+            )
+            .into());
         }
         input_ids.extend(encoding.get_ids().iter().map(|value| *value as i64));
-        attention_mask.extend(encoding.get_attention_mask().iter().map(|value| *value as i64));
+        attention_mask.extend(
+            encoding
+                .get_attention_mask()
+                .iter()
+                .map(|value| *value as i64),
+        );
         if encoding.get_type_ids().is_empty() {
             token_type_ids.extend(std::iter::repeat_n(0_i64, seq_len));
         } else {
@@ -123,9 +126,13 @@ fn embed_with_local_onnx(embedder: &LocalOnnxEmbedder, texts: &[String]) -> Resu
     let ids_tensor = Tensor::<i64>::from_array(([batch_size, seq_len], input_ids.clone()))
         .map_err(|err| KboltError::Inference(format!("failed to build input_ids tensor: {err}")))?;
     let mask_tensor = Tensor::<i64>::from_array(([batch_size, seq_len], attention_mask.clone()))
-        .map_err(|err| KboltError::Inference(format!("failed to build attention_mask tensor: {err}")))?;
-    let type_tensor = Tensor::<i64>::from_array(([batch_size, seq_len], token_type_ids))
-        .map_err(|err| KboltError::Inference(format!("failed to build token_type_ids tensor: {err}")))?;
+        .map_err(|err| {
+            KboltError::Inference(format!("failed to build attention_mask tensor: {err}"))
+        })?;
+    let type_tensor =
+        Tensor::<i64>::from_array(([batch_size, seq_len], token_type_ids)).map_err(|err| {
+            KboltError::Inference(format!("failed to build token_type_ids tensor: {err}"))
+        })?;
 
     let mut session = embedder
         .session
@@ -151,16 +158,18 @@ fn embed_with_local_onnx(embedder: &LocalOnnxEmbedder, texts: &[String]) -> Resu
             continue;
         }
 
-        return Err(
-            KboltError::Inference(format!("unsupported ONNX input '{}' for local embedder", name))
-                .into(),
-        );
+        return Err(KboltError::Inference(format!(
+            "unsupported ONNX input '{}' for local embedder",
+            name
+        ))
+        .into());
     }
 
     if !mapped_ids {
-        return Err(
-            KboltError::Inference("ONNX embedder inputs do not include input_ids".to_string()).into(),
-        );
+        return Err(KboltError::Inference(
+            "ONNX embedder inputs do not include input_ids".to_string(),
+        )
+        .into());
     }
 
     let outputs = session
@@ -186,10 +195,10 @@ fn extract_embedding_vectors(
         }
     }
 
-    Err(KboltError::Inference(
-        "onnx output did not contain a usable embedding tensor".to_string(),
+    Err(
+        KboltError::Inference("onnx output did not contain a usable embedding tensor".to_string())
+            .into(),
     )
-    .into())
 }
 
 fn parse_embedding_tensor(
@@ -240,7 +249,7 @@ fn parse_embedding_tensor(
         };
 
         let mut vectors = vec![vec![0.0_f32; hidden]; batch];
-        for batch_index in 0..batch {
+        for (batch_index, vector) in vectors.iter_mut().enumerate() {
             let mut weight_sum = 0.0_f32;
             for token_index in 0..tokens {
                 let mask_index = batch_index
@@ -261,7 +270,7 @@ fn parse_embedding_tensor(
                     .saturating_add(token_index)
                     .saturating_mul(hidden);
                 for hidden_index in 0..hidden {
-                    vectors[batch_index][hidden_index] += values[value_offset + hidden_index];
+                    vector[hidden_index] += values[value_offset + hidden_index];
                 }
             }
 
@@ -271,7 +280,7 @@ fn parse_embedding_tensor(
                 )
                 .into());
             }
-            for value in &mut vectors[batch_index] {
+            for value in vector {
                 *value /= weight_sum;
             }
         }

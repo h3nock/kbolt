@@ -17,8 +17,10 @@ struct LocalLlamaClient {
 
 impl LocalLlamaClient {
     fn new(model_path: &Path, max_tokens: usize, n_ctx: u32, n_gpu_layers: u32) -> Result<Self> {
-        let mut params = LlamaParams::default();
-        params.n_gpu_layers = n_gpu_layers;
+        let params = LlamaParams {
+            n_gpu_layers,
+            ..LlamaParams::default()
+        };
         let model = LlamaModel::load_from_file(model_path, params).map_err(|err| {
             KboltError::Inference(format!(
                 "failed to load local llama model {}: {err}",
@@ -36,12 +38,13 @@ impl LocalLlamaClient {
 
 impl CompletionClient for LocalLlamaClient {
     fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
-        let mut session_params = SessionParams::default();
-        session_params.n_ctx = self.n_ctx;
-        let mut session = self
-            .model
-            .create_session(session_params)
-            .map_err(|err| KboltError::Inference(format!("failed to create llama session: {err}")))?;
+        let session_params = SessionParams {
+            n_ctx: self.n_ctx,
+            ..SessionParams::default()
+        };
+        let mut session = self.model.create_session(session_params).map_err(|err| {
+            KboltError::Inference(format!("failed to create llama session: {err}"))
+        })?;
 
         let prompt = format!("System:\n{system_prompt}\n\nUser:\n{user_prompt}\n\nAssistant:\n");
         session

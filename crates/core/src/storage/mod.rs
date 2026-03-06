@@ -1383,7 +1383,10 @@ CREATE TABLE IF NOT EXISTS llm_cache (
                     "chunk_id must be non-negative for tantivy delete: {chunk_id}"
                 ))
             })?;
-            writer.delete_term(Term::from_field_u64(space_indexes.fields.chunk_id, chunk_key));
+            writer.delete_term(Term::from_field_u64(
+                space_indexes.fields.chunk_id,
+                chunk_key,
+            ));
         }
 
         Ok(())
@@ -1530,15 +1533,14 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         ensure_usearch_dimensions(&mut index, expected_dimensions)?;
         let target_capacity = index.size().saturating_add(entries.len());
         index.reserve(target_capacity).map_err(|err| {
-            CoreError::Internal(format!("usearch reserve failed for {target_capacity} items: {err}"))
+            CoreError::Internal(format!(
+                "usearch reserve failed for {target_capacity} items: {err}"
+            ))
         })?;
 
         for (key, vector) in entries {
             let key = u64::try_from(*key).map_err(|_| {
-                CoreError::Internal(format!(
-                    "usearch key must be non-negative: {}",
-                    *key
-                ))
+                CoreError::Internal(format!("usearch key must be non-negative: {}", *key))
             })?;
             index
                 .add::<f32>(key, vector)
@@ -1569,10 +1571,7 @@ CREATE TABLE IF NOT EXISTS llm_cache (
 
         for key in keys {
             let key = u64::try_from(*key).map_err(|_| {
-                CoreError::Internal(format!(
-                    "usearch key must be non-negative: {}",
-                    *key
-                ))
+                CoreError::Internal(format!("usearch key must be non-negative: {}", *key))
             })?;
             index
                 .remove(key)
@@ -1894,9 +1893,11 @@ CREATE TABLE IF NOT EXISTS llm_cache (
                     |row| row.get(0),
                 )?
             }
-            None => conn.query_row("SELECT COUNT(DISTINCT chunk_id) FROM embeddings", [], |row| {
-                row.get(0)
-            })?,
+            None => conn.query_row(
+                "SELECT COUNT(DISTINCT chunk_id) FROM embeddings",
+                [],
+                |row| row.get(0),
+            )?,
         };
 
         Ok(count as usize)
@@ -2085,13 +2086,15 @@ fn open_or_create_tantivy_index(path: &Path) -> Result<Index> {
 }
 
 fn new_usearch_index(dimensions: usize) -> Result<usearch::Index> {
-    let mut options = IndexOptions::default();
-    options.dimensions = dimensions;
-    options.metric = MetricKind::Cos;
-    options.quantization = ScalarKind::F32;
-    options.connectivity = 16;
-    options.expansion_add = 200;
-    options.expansion_search = 100;
+    let options = IndexOptions {
+        dimensions,
+        metric: MetricKind::Cos,
+        quantization: ScalarKind::F32,
+        connectivity: 16,
+        expansion_add: 200,
+        expansion_search: 100,
+        ..IndexOptions::default()
+    };
     usearch::Index::new(&options)
         .map_err(|err| CoreError::Internal(format!("usearch init failed: {err}")))
 }
@@ -2157,9 +2160,9 @@ fn tantivy_fields_from_schema(schema: &tantivy::schema::Schema) -> Result<Tantiv
         chunk_id: schema.get_field("chunk_id").map_err(|_| {
             CoreError::Internal("tantivy schema missing field: chunk_id".to_string())
         })?,
-        doc_id: schema.get_field("doc_id").map_err(|_| {
-            CoreError::Internal("tantivy schema missing field: doc_id".to_string())
-        })?,
+        doc_id: schema
+            .get_field("doc_id")
+            .map_err(|_| CoreError::Internal("tantivy schema missing field: doc_id".to_string()))?,
         filepath: schema.get_field("filepath").map_err(|_| {
             CoreError::Internal("tantivy schema missing field: filepath".to_string())
         })?,

@@ -545,12 +545,7 @@ fn build_local_gguf_embedder_with_runtime(
     let artifact = resolve_model_artifact(model_config, model_dir, ModelRole::Embedder)?;
     let gguf_path =
         resolve_file_with_extension(&artifact.path, model_file, "gguf", "embeddings.model_file")?;
-    let embedder = build_local_gguf_embedder(
-        &gguf_path,
-        batch_size,
-        n_threads,
-        n_threads_batch,
-    )?;
+    let embedder = build_local_gguf_embedder(&gguf_path, batch_size, n_threads, n_threads_batch)?;
     Ok(Arc::new(embedder))
 }
 
@@ -808,7 +803,7 @@ mod tests {
             };
             let response = format!(
                 "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                payload.as_bytes().len(),
+                payload.len(),
                 payload
             );
             stream
@@ -845,7 +840,7 @@ mod tests {
                     .unwrap_or_default();
                 let response = format!(
                     "{status_line}\r\nContent-Type: application/json\r\n{retry_after}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    response_spec.body.as_bytes().len(),
+                    response_spec.body.len(),
                     response_spec.body
                 );
                 stream
