@@ -117,7 +117,7 @@ kbolt space remove {name}
 **Parameters**:
 - **name** (required) — space to remove
 
-CASCADE deletes all collections, documents, chunks, embeddings. Removes the space's Tantivy index and USearch file from `~/.cache/kbolt/spaces/{name}/`. Does not touch actual files on disk. Cannot remove the `default` space.
+CASCADE deletes all collections, documents, chunks, embeddings. Removes the space's Tantivy index and USearch file from `~/.cache/kbolt/spaces/{name}/`. Does not touch actual files on disk. For non-default spaces, the space itself is removed. `kbolt space remove default` is a clear operation: it deletes the default space's contents and recreates its empty index artifacts, but preserves the reserved `default` space.
 
 ---
 
