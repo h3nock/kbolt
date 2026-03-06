@@ -25,7 +25,7 @@ impl crate::models::Embedder for DeterministicEmbedder {
             .iter()
             .map(|text| {
                 let token_count = text.split_whitespace().count().max(1) as f32;
-                let byte_count = text.as_bytes().len().max(1) as f32;
+                let byte_count = text.len().max(1) as f32;
                 vec![token_count, byte_count]
             })
             .collect())
@@ -1494,14 +1494,16 @@ fn multi_get_skips_missing_and_invalid_locators_with_warnings() {
         assert_eq!(result.documents[0].path, "api/a.md");
         assert!(result.omitted.is_empty());
         assert_eq!(result.warnings.len(), 3);
-        assert!(result.warnings.iter().any(|warning| warning.contains("api/missing.md")));
-        assert!(
-            result
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("invalid locator: path locator must be '<collection>/<path>'"))
-        );
-        assert!(result.warnings.iter().any(|warning| warning.contains("#invalid")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("api/missing.md")));
+        assert!(result.warnings.iter().any(|warning| warning
+            .contains("invalid locator: path locator must be '<collection>/<path>'")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("#invalid")));
     });
 }
 

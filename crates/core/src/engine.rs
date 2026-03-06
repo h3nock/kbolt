@@ -565,7 +565,7 @@ impl Engine {
             };
             resolved_count = resolved_count.saturating_add(1);
 
-            let size_bytes = document.content.as_bytes().len();
+            let size_bytes = document.content.len();
             if documents.len() >= req.max_files {
                 omitted.push(OmittedFile {
                     path: document.path,

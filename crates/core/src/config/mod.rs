@@ -156,16 +156,11 @@ pub struct ModelConfig {
     pub expander: ModelSourceConfig,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ModelProvider {
     #[serde(rename = "huggingface")]
+    #[default]
     HuggingFace,
-}
-
-impl Default for ModelProvider {
-    fn default() -> Self {
-        Self::HuggingFace
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

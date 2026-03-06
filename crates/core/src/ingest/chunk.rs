@@ -226,15 +226,17 @@ fn attach_table_header_attr(block: &ExtractedBlock, table_header: Option<&str>) 
 }
 
 fn is_narrative_block_kind(kind: &BlockKind) -> bool {
-    matches!(kind, BlockKind::Paragraph | BlockKind::ListItem | BlockKind::BlockQuote)
+    matches!(
+        kind,
+        BlockKind::Paragraph | BlockKind::ListItem | BlockKind::BlockQuote
+    )
 }
 
 fn pack_class_for_kind(kind: &BlockKind) -> PackClass {
     match kind {
-        BlockKind::Heading
-        | BlockKind::Paragraph
-        | BlockKind::ListItem
-        | BlockKind::BlockQuote => PackClass::Narrative,
+        BlockKind::Heading | BlockKind::Paragraph | BlockKind::ListItem | BlockKind::BlockQuote => {
+            PackClass::Narrative
+        }
         BlockKind::CodeFence => PackClass::Code,
         BlockKind::TableHeader | BlockKind::TableRow => PackClass::Table,
         BlockKind::HtmlBlock => PackClass::Opaque,
@@ -269,7 +271,11 @@ fn heading_scopes_compatible(current: &ExtractedBlock, next: &ExtractedBlock) ->
     current.heading_path == next.heading_path
 }
 
-fn split_block_by_tokens(block: &ExtractedBlock, hard_max: usize, overlap: usize) -> Vec<ExtractedBlock> {
+fn split_block_by_tokens(
+    block: &ExtractedBlock,
+    hard_max: usize,
+    overlap: usize,
+) -> Vec<ExtractedBlock> {
     let spans = token_byte_spans(block.text.as_str());
     if spans.is_empty() {
         return vec![block.clone()];
@@ -317,7 +323,11 @@ fn split_code_block_by_blank_lines(
             }
             Some((current_start, current_end, current_tokens)) => {
                 if current_tokens.saturating_add(group_tokens) <= hard_max {
-                    current = Some((current_start, end, current_tokens.saturating_add(group_tokens)));
+                    current = Some((
+                        current_start,
+                        end,
+                        current_tokens.saturating_add(group_tokens),
+                    ));
                 } else {
                     packed_ranges.push((current_start, current_end));
                     current = Some((start, end, group_tokens));
@@ -378,16 +388,15 @@ fn split_block_by_sentence_boundaries(
                 .map(|index| (index + 1, NarrativeBoundary::Clause)),
         );
         candidates.push((max_end, NarrativeBoundary::TokenWindow));
-        let end_token =
-            best_narrative_cut(&candidates, target_tokens, start_token, spans.len()).unwrap_or(max_end);
+        let end_token = best_narrative_cut(&candidates, target_tokens, start_token, spans.len())
+            .unwrap_or(max_end);
         if matches!(
             candidates
                 .iter()
                 .find(|(candidate_end, _)| *candidate_end == end_token)
                 .map(|(_, boundary)| *boundary),
             Some(NarrativeBoundary::Sentence | NarrativeBoundary::Clause)
-        )
-        {
+        ) {
             used_structural_boundary = true;
         }
 
@@ -413,17 +422,30 @@ fn split_block_range_by_tokens(
     start_token: usize,
     end_token: usize,
 ) -> ExtractedBlock {
-    debug_assert!(start_token < end_token, "split range must include at least one token");
+    debug_assert!(
+        start_token < end_token,
+        "split range must include at least one token"
+    );
     let byte_start = spans[start_token].0;
     let byte_end = spans[end_token - 1].1;
-    debug_assert!(byte_end <= block.text.len(), "split range exceeds block text");
+    debug_assert!(
+        byte_end <= block.text.len(),
+        "split range exceeds block text"
+    );
 
     split_block_range_by_bytes(block, byte_start, byte_end)
 }
 
-fn split_block_range_by_bytes(block: &ExtractedBlock, byte_start: usize, byte_end: usize) -> ExtractedBlock {
+fn split_block_range_by_bytes(
+    block: &ExtractedBlock,
+    byte_start: usize,
+    byte_end: usize,
+) -> ExtractedBlock {
     debug_assert!(byte_start < byte_end, "byte range must be non-empty");
-    debug_assert!(byte_end <= block.text.len(), "byte range exceeds block text");
+    debug_assert!(
+        byte_end <= block.text.len(),
+        "byte range exceeds block text"
+    );
 
     let mut split = block.clone();
     split.offset = block.offset.saturating_add(byte_start);
@@ -433,7 +455,10 @@ fn split_block_range_by_bytes(block: &ExtractedBlock, byte_start: usize, byte_en
 }
 
 fn next_start_token(start_token: usize, end_token: usize, overlap: usize) -> usize {
-    debug_assert!(end_token > start_token, "end token must advance beyond start token");
+    debug_assert!(
+        end_token > start_token,
+        "end token must advance beyond start token"
+    );
     let next = end_token.saturating_sub(overlap);
     if next <= start_token {
         end_token
@@ -456,19 +481,17 @@ fn clause_end_token_indices(text: &str, spans: &[(usize, usize)]) -> Vec<usize> 
     spans
         .iter()
         .enumerate()
-        .filter_map(|(index, (start, end))| {
-            token_ends_clause(&text[*start..*end]).then_some(index)
-        })
+        .filter_map(|(index, (start, end))| token_ends_clause(&text[*start..*end]).then_some(index))
         .collect()
 }
 
 fn token_ends_sentence(token: &str) -> bool {
-    let trimmed = token.trim_end_matches(|ch: char| matches!(ch, '"' | '\'' | ')' | ']' | '}'));
+    let trimmed = token.trim_end_matches(['"', '\'', ')', ']', '}']);
     trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?')
 }
 
 fn token_ends_clause(token: &str) -> bool {
-    let trimmed = token.trim_end_matches(|ch: char| matches!(ch, '"' | '\'' | ')' | ']' | '}'));
+    let trimmed = token.trim_end_matches(['"', '\'', ')', ']', '}']);
     trimmed.ends_with(',') || trimmed.ends_with(';') || trimmed.ends_with(':')
 }
 
@@ -639,7 +662,9 @@ fn finalize_chunk(blocks: &[ExtractedBlock]) -> FinalChunk {
     let heading = resolve_heading(blocks);
     let kind = derive_chunk_kind(blocks);
     if kind == FinalChunkKind::Table {
-        let has_header = blocks.iter().any(|block| block.kind == BlockKind::TableHeader);
+        let has_header = blocks
+            .iter()
+            .any(|block| block.kind == BlockKind::TableHeader);
         if !has_header {
             if let Some(header) = blocks
                 .first()
@@ -672,7 +697,10 @@ pub fn derive_chunk_kind(blocks: &[ExtractedBlock]) -> FinalChunkKind {
         return FinalChunkKind::Mixed;
     }
 
-    if blocks.iter().all(|block| block.kind == BlockKind::CodeFence) {
+    if blocks
+        .iter()
+        .all(|block| block.kind == BlockKind::CodeFence)
+    {
         return FinalChunkKind::Code;
     }
 
@@ -696,7 +724,10 @@ pub fn derive_chunk_kind(blocks: &[ExtractedBlock]) -> FinalChunkKind {
         && blocks.iter().all(|block| {
             matches!(
                 block.kind,
-                BlockKind::Heading | BlockKind::Paragraph | BlockKind::ListItem | BlockKind::BlockQuote
+                BlockKind::Heading
+                    | BlockKind::Paragraph
+                    | BlockKind::ListItem
+                    | BlockKind::BlockQuote
             )
         })
     {
@@ -713,8 +744,8 @@ mod tests {
     use crate::config::{ChunkPolicy, ChunkingConfig};
     use crate::ingest::chunk::{
         best_narrative_cut, can_pack_together, chunk_document, chunk_document_with_counter,
-        derive_chunk_kind, resolve_policy, score_narrative_cut, NarrativeBoundary,
-        FinalChunkKind, TokenCounter, WhitespaceTokenCounter,
+        derive_chunk_kind, resolve_policy, score_narrative_cut, FinalChunkKind, NarrativeBoundary,
+        TokenCounter, WhitespaceTokenCounter,
     };
     use crate::ingest::extract::{BlockKind, ExtractedBlock, ExtractedDocument};
 
@@ -1011,7 +1042,9 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].text, "alpha. beta gamma delta");
         assert_eq!(chunks[1].text, "epsilon zeta");
-        assert!(chunks.iter().all(|chunk| chunk.kind == FinalChunkKind::Code));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.kind == FinalChunkKind::Code));
     }
 
     #[test]
@@ -1048,7 +1081,9 @@ mod tests {
         assert_eq!(chunks[2].text, "h1 h2 h3 h4\nr2a r2b r2c r2d");
         assert_eq!(chunks[2].offset, 40);
         assert_eq!(chunks[2].length, 15);
-        assert!(chunks.iter().all(|chunk| chunk.kind == FinalChunkKind::Table));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.kind == FinalChunkKind::Table));
     }
 
     #[test]
@@ -1094,12 +1129,7 @@ mod tests {
                 block_with(BlockKind::Heading, "# Intro", 0, &[]),
                 block_with(BlockKind::Paragraph, "alpha beta", 8, &["Intro"]),
                 block_with(BlockKind::Heading, "## Setup", 20, &["Intro"]),
-                block_with(
-                    BlockKind::Paragraph,
-                    "gamma delta",
-                    30,
-                    &["Intro", "Setup"],
-                ),
+                block_with(BlockKind::Paragraph, "gamma delta", 30, &["Intro", "Setup"]),
             ],
             metadata: HashMap::new(),
             title: None,
@@ -1190,12 +1220,7 @@ mod tests {
             contextual_prefix: true,
         };
         let document = ExtractedDocument {
-            blocks: vec![block_with(
-                BlockKind::CodeFence,
-                "a b c d e f",
-                0,
-                &[],
-            )],
+            blocks: vec![block_with(BlockKind::CodeFence, "a b c d e f", 0, &[])],
             metadata: HashMap::new(),
             title: None,
         };
@@ -1257,7 +1282,9 @@ mod tests {
         assert_eq!(chunks[0].text, "a1 a2 a3 a4");
         assert_eq!(chunks[1].text, "a5 a6 a7 a8");
         assert_eq!(chunks[2].text, "a9 a10 a11 a12");
-        assert!(chunks.iter().all(|chunk| chunk.kind == FinalChunkKind::Code));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.kind == FinalChunkKind::Code));
     }
 
     #[test]
