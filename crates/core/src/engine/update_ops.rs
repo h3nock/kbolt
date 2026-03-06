@@ -56,8 +56,25 @@ impl Engine {
 
             self.embed_pending_chunks(&options, &mut report)?;
 
-            let reaped = self.storage.reap_documents(self.config.reaping.days)?;
-            report.reaped = reaped.len();
+            let reaped = self
+                .storage
+                .list_reapable_documents(self.config.reaping.days)?;
+            let mut reaped_doc_ids = Vec::with_capacity(reaped.len());
+            let mut chunk_ids_by_space: HashMap<String, Vec<i64>> = HashMap::new();
+            for document in reaped {
+                reaped_doc_ids.push(document.doc_id);
+                if !document.chunk_ids.is_empty() {
+                    chunk_ids_by_space
+                        .entry(document.space_name)
+                        .or_default()
+                        .extend(document.chunk_ids);
+                }
+            }
+            for (space, chunk_ids) in chunk_ids_by_space {
+                self.purge_space_chunks(&space, &chunk_ids)?;
+            }
+            self.storage.delete_documents(&reaped_doc_ids)?;
+            report.reaped = reaped_doc_ids.len();
         }
 
         report.elapsed_ms = started.elapsed().as_millis() as u64;

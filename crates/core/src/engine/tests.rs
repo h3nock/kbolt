@@ -187,6 +187,42 @@ fn test_engine_with_default_space(default_space: Option<&str>) -> Engine {
     Engine::from_parts(storage, config)
 }
 
+fn test_engine_with_reaping_days(days: u32) -> Engine {
+    let root = tempdir().expect("create temp root");
+    let root_path = root.path().to_path_buf();
+    std::mem::forget(root);
+    let config_dir = root_path.join("config");
+    let cache_dir = root_path.join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+    let config = Config {
+        config_dir,
+        cache_dir,
+        default_space: None,
+        models: ModelConfig {
+            embedder: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "embed-model".to_string(),
+                revision: None,
+            },
+            reranker: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "reranker-model".to_string(),
+                revision: None,
+            },
+            expander: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "expander-model".to_string(),
+                revision: None,
+            },
+        },
+        embeddings: None,
+        inference: InferenceConfig::default(),
+        reaping: ReapingConfig { days },
+        chunking: ChunkingConfig::default(),
+    };
+    Engine::from_parts(storage, config)
+}
+
 fn with_kbolt_space_env<T>(value: Option<&str>, run: impl FnOnce() -> T) -> T {
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     let lock = ENV_LOCK.get_or_init(|| Mutex::new(()));
@@ -710,6 +746,50 @@ fn collection_mutation_wrappers_delegate_to_storage_with_explicit_space() {
         KboltError::CollectionNotFound { name } => assert_eq!(name, "backend"),
         other => panic!("unexpected error: {other}"),
     }
+}
+
+#[test]
+fn remove_collection_purges_search_indexes() {
+    let engine = test_engine_with_default_space(None);
+    engine.add_space("work", None).expect("add work");
+
+    let root = tempdir().expect("create temp root");
+    let alpha_path = root.path().join("alpha");
+    let beta_path = root.path().join("beta");
+    std::fs::create_dir_all(&alpha_path).expect("create alpha dir");
+    std::fs::create_dir_all(&beta_path).expect("create beta dir");
+    add_collection_fixture(&engine, "work", "alpha", alpha_path.clone());
+    add_collection_fixture(&engine, "work", "beta", beta_path.clone());
+
+    write_text_file(
+        &alpha_path.join("strong.md"),
+        "token token token token token\n",
+    );
+    write_text_file(&beta_path.join("weak.md"), "token\n");
+    engine
+        .update(update_options(Some("work"), &["alpha", "beta"]))
+        .expect("initial update");
+
+    engine
+        .remove_collection(Some("work"), "alpha")
+        .expect("remove alpha collection");
+
+    let response = engine
+        .search(SearchRequest {
+            query: "token".to_string(),
+            mode: SearchMode::Keyword,
+            space: Some("work".to_string()),
+            collections: vec!["beta".to_string()],
+            limit: 1,
+            min_score: 0.0,
+            no_rerank: false,
+            debug: false,
+        })
+        .expect("run keyword search");
+
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].path, "beta/weak.md");
+    assert_eq!(response.results[0].collection, "beta");
 }
 
 #[test]
@@ -2923,6 +3003,61 @@ fn update_tracks_modified_and_deactivated_documents() {
             .expect("list all documents");
         assert_eq!(docs.len(), 1);
         assert!(!docs[0].active, "removed document should be inactive");
+    });
+}
+
+#[test]
+fn update_reap_purges_search_indexes_for_old_removed_files() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_reaping_days(0);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let strong = collection_path.join("strong.md");
+        let weak = collection_path.join("weak.md");
+        write_text_file(&strong, "token token token token token\n");
+        write_text_file(&weak, "token\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        std::fs::remove_file(&strong).expect("remove strong file");
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("reap removed file");
+        assert_eq!(report.reaped, 1);
+
+        let response = engine
+            .search(SearchRequest {
+                query: "token".to_string(),
+                mode: SearchMode::Keyword,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 1,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: false,
+            })
+            .expect("run keyword search");
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].path, "api/weak.md");
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let docs = engine
+            .storage()
+            .list_documents(collection.id, false)
+            .expect("list documents");
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].path, "weak.md");
     });
 }
 

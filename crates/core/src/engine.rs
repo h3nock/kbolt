@@ -264,6 +264,11 @@ impl Engine {
     pub fn remove_collection(&self, space: Option<&str>, name: &str) -> Result<()> {
         let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
         let resolved = self.resolve_space_row(space, Some(name))?;
+        let collection = self.storage.get_collection(resolved.id, name)?;
+        let documents = self.storage.list_documents(collection.id, false)?;
+        let doc_ids = documents.into_iter().map(|doc| doc.id).collect::<Vec<_>>();
+        let chunk_ids = self.collect_document_chunk_ids(&doc_ids)?;
+        self.purge_space_chunks(&resolved.name, &chunk_ids)?;
         self.storage.delete_collection(resolved.id, name)?;
 
         let ignore_path =
@@ -853,6 +858,26 @@ impl Engine {
 
     fn acquire_operation_lock(&self, mode: LockMode) -> Result<OperationLock> {
         OperationLock::acquire(&self.config.cache_dir, mode)
+    }
+
+    fn collect_document_chunk_ids(&self, doc_ids: &[i64]) -> Result<Vec<i64>> {
+        let mut chunk_ids = Vec::new();
+        for doc_id in doc_ids {
+            let chunks = self.storage.get_chunks_for_document(*doc_id)?;
+            chunk_ids.extend(chunks.into_iter().map(|chunk| chunk.id));
+        }
+        Ok(chunk_ids)
+    }
+
+    fn purge_space_chunks(&self, space: &str, chunk_ids: &[i64]) -> Result<()> {
+        if chunk_ids.is_empty() {
+            return Ok(());
+        }
+
+        self.storage.delete_tantivy(space, chunk_ids)?;
+        self.storage.commit_tantivy(space)?;
+        self.storage.delete_usearch(space, chunk_ids)?;
+        Ok(())
     }
 
     fn build_space_info(&self, space: &crate::storage::SpaceRow) -> Result<SpaceInfo> {

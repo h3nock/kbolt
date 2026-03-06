@@ -110,6 +110,13 @@ pub struct FtsDirtyRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReapableDocument {
+    pub doc_id: i64,
+    pub space_name: String,
+    pub chunk_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TantivyEntry {
     pub chunk_id: i64,
     pub doc_id: i64,
@@ -1069,6 +1076,13 @@ CREATE TABLE IF NOT EXISTS llm_cache (
     }
 
     pub fn reap_documents(&self, older_than_days: u32) -> Result<Vec<i64>> {
+        let reaped = self.list_reapable_documents(older_than_days)?;
+        let doc_ids = reaped.iter().map(|item| item.doc_id).collect::<Vec<_>>();
+        self.delete_documents(&doc_ids)?;
+        Ok(doc_ids)
+    }
+
+    pub fn list_reapable_documents(&self, older_than_days: u32) -> Result<Vec<ReapableDocument>> {
         let conn = self
             .db
             .lock()
@@ -1076,25 +1090,47 @@ CREATE TABLE IF NOT EXISTS llm_cache (
 
         let modifier = format!("-{} days", older_than_days);
         let mut stmt = conn.prepare(
-            "SELECT id
-             FROM documents
-             WHERE active = 0
-               AND deactivated_at IS NOT NULL
-               AND deactivated_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)
-             ORDER BY id ASC",
+            "SELECT d.id, s.name
+             FROM documents d
+             JOIN collections c ON c.id = d.collection_id
+             JOIN spaces s ON s.id = c.space_id
+             WHERE d.active = 0
+               AND d.deactivated_at IS NOT NULL
+               AND d.deactivated_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)
+             ORDER BY d.id ASC",
         )?;
-        let rows = stmt.query_map(params![modifier], |row| row.get::<_, i64>(0))?;
-        let doc_ids = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let rows = stmt.query_map(params![modifier], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let headers = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
 
-        if doc_ids.is_empty() {
-            return Ok(doc_ids);
+        let mut documents = Vec::with_capacity(headers.len());
+        for (doc_id, space_name) in headers {
+            documents.push(ReapableDocument {
+                doc_id,
+                space_name,
+                chunk_ids: load_chunk_ids_for_doc(&conn, doc_id)?,
+            });
         }
+
+        Ok(documents)
+    }
+
+    pub fn delete_documents(&self, doc_ids: &[i64]) -> Result<()> {
+        if doc_ids.is_empty() {
+            return Ok(());
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
 
         let placeholders = vec!["?"; doc_ids.len()].join(", ");
         let sql = format!("DELETE FROM documents WHERE id IN ({placeholders})");
         conn.execute(&sql, params_from_iter(doc_ids.iter()))?;
-
-        Ok(doc_ids)
+        Ok(())
     }
 
     pub fn insert_chunks(&self, doc_id: i64, chunks: &[ChunkInsert]) -> Result<Vec<i64>> {
@@ -1986,6 +2022,13 @@ fn load_chunks_for_doc(conn: &Connection, doc_id: i64) -> Result<Vec<ChunkRow>> 
     let rows = stmt.query_map(params![doc_id], decode_chunk_row)?;
     let chunks = rows.collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(chunks)
+}
+
+fn load_chunk_ids_for_doc(conn: &Connection, doc_id: i64) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare("SELECT id FROM chunks WHERE doc_id = ?1 ORDER BY seq ASC")?;
+    let rows = stmt.query_map(params![doc_id], |row| row.get::<_, i64>(0))?;
+    let chunk_ids = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(chunk_ids)
 }
 
 fn file_size_or_zero(path: &Path) -> Result<u64> {
