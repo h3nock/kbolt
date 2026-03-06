@@ -66,6 +66,12 @@ pub struct UpdateTarget {
     pub collection: CollectionRow,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TargetScope<'a> {
+    space: Option<&'a str>,
+    collections: &'a [String],
+}
+
 #[derive(Debug, Clone)]
 struct SearchCollectionMeta {
     space: String,
@@ -620,12 +626,9 @@ impl Engine {
         };
         let rerank_enabled = matches!(mode, SearchMode::Auto | SearchMode::Deep) && !req.no_rerank;
 
-        let targets = self.resolve_update_targets(&UpdateOptions {
-            space: req.space.clone(),
-            collections: req.collections.clone(),
-            no_embed: true,
-            dry_run: false,
-            verbose: false,
+        let targets = self.resolve_targets(TargetScope {
+            space: req.space.as_deref(),
+            collections: &req.collections,
         })?;
 
         let staleness_hint = targets

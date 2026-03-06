@@ -26,7 +26,10 @@ impl Engine {
             self.replay_fts_dirty_documents(&mut report)?;
         }
 
-        let targets = self.resolve_update_targets(&options)?;
+        let targets = self.resolve_targets(TargetScope {
+            space: options.space.as_deref(),
+            collections: &options.collections,
+        })?;
         if targets.is_empty() {
             report.elapsed_ms = started.elapsed().as_millis() as u64;
             return Ok(report);
@@ -273,14 +276,21 @@ impl Engine {
     }
 
     pub fn resolve_update_targets(&self, options: &UpdateOptions) -> Result<Vec<UpdateTarget>> {
+        self.resolve_targets(TargetScope {
+            space: options.space.as_deref(),
+            collections: &options.collections,
+        })
+    }
+
+    pub(super) fn resolve_targets(&self, scope: TargetScope<'_>) -> Result<Vec<UpdateTarget>> {
         let mut targets = Vec::new();
 
-        if options.collections.is_empty() {
-            return self.resolve_update_targets_for_all_collections(options.space.as_deref());
+        if scope.collections.is_empty() {
+            return self.resolve_update_targets_for_all_collections(scope.space);
         }
 
         let mut seen = std::collections::HashSet::new();
-        for raw_collection_name in &options.collections {
+        for raw_collection_name in scope.collections {
             let collection_name = raw_collection_name.trim();
             if collection_name.is_empty() {
                 return Err(
@@ -288,8 +298,7 @@ impl Engine {
                 );
             }
 
-            let resolved_space =
-                self.resolve_space_row(options.space.as_deref(), Some(collection_name))?;
+            let resolved_space = self.resolve_space_row(scope.space, Some(collection_name))?;
             let collection = self
                 .storage
                 .get_collection(resolved_space.id, collection_name)?;
