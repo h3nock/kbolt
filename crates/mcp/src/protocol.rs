@@ -431,7 +431,7 @@ mod tests {
     fn with_isolated_xdg_dirs<T>(run: impl FnOnce() -> T) -> T {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let lock = ENV_LOCK.get_or_init(|| Mutex::new(()));
-        let _guard = lock.lock().expect("lock env mutex");
+        let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let _restore = EnvRestore::capture();
 
         let root = tempdir().expect("create temp root");

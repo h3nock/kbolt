@@ -2,7 +2,7 @@ pub mod protocol;
 pub mod stdio;
 
 use kbolt_core::engine::Engine;
-use kbolt_core::Result;
+use kbolt_core::{CoreError, Result};
 use kbolt_types::{
     CollectionInfo, DocumentResponse, FileEntry, GetRequest, KboltError, Locator, ModelStatus,
     MultiGetRequest, MultiGetResponse, SearchMode, SearchRequest, SearchResponse, SpaceInfo,
@@ -112,6 +112,19 @@ impl McpAdapter {
         self.engine.search(req)
     }
 
+    fn search_with_auto_fallback(&self, req: SearchRequest) -> Result<SearchResponse> {
+        match self.search(req.clone()) {
+            Ok(response) => Ok(response),
+            Err(err) if should_fallback_to_keyword_search(&req, &err) => {
+                let mut fallback = req;
+                fallback.mode = SearchMode::Keyword;
+                fallback.no_rerank = true;
+                self.search(fallback)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     pub fn tool_definitions() -> Vec<McpToolDefinition> {
         vec![
             McpToolDefinition {
@@ -219,7 +232,7 @@ impl McpAdapter {
                     None => Vec::new(),
                 };
 
-                let response = self.search(SearchRequest {
+                let response = self.search_with_auto_fallback(SearchRequest {
                     query,
                     mode,
                     space,
@@ -503,6 +516,11 @@ fn resolve_tool_no_rerank(mode: &SearchMode, no_rerank: Option<bool>) -> bool {
     }
 }
 
+fn should_fallback_to_keyword_search(req: &SearchRequest, err: &CoreError) -> bool {
+    matches!(req.mode, SearchMode::Auto)
+        && matches!(err, CoreError::Domain(KboltError::ModelNotAvailable { .. }))
+}
+
 fn parse_tool_locator(raw: &str) -> Locator {
     let trimmed = raw.trim();
     if trimmed.contains('/') {
@@ -517,7 +535,7 @@ mod tests {
     use std::collections::HashSet;
     use std::ffi::OsString;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
 
     use kbolt_core::engine::Engine;
@@ -566,7 +584,7 @@ mod tests {
     fn with_isolated_xdg_dirs<T>(run: impl FnOnce() -> T) -> T {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let lock = ENV_LOCK.get_or_init(|| Mutex::new(()));
-        let _guard = lock.lock().expect("lock env mutex");
+        let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let _restore = EnvRestore::capture();
 
         let root = tempdir().expect("create temp root");
@@ -579,7 +597,7 @@ mod tests {
         run()
     }
 
-    fn new_collection_dir(root: &PathBuf, name: &str) -> PathBuf {
+    fn new_collection_dir(root: &Path, name: &str) -> PathBuf {
         let path = root.join(name);
         fs::create_dir_all(&path).expect("create collection directory");
         path
@@ -593,7 +611,7 @@ mod tests {
             engine.add_space("work", None).expect("add work");
             engine.add_space("notes", None).expect("add notes");
 
-            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let work_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: work_path,
@@ -633,7 +651,7 @@ mod tests {
             engine.add_space("work", None).expect("add work");
             engine.add_space("notes", None).expect("add notes");
 
-            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let work_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: work_path.clone(),
@@ -645,7 +663,7 @@ mod tests {
                 })
                 .expect("add work collection");
 
-            let notes_path = new_collection_dir(&root.path().to_path_buf(), "notes-wiki");
+            let notes_path = new_collection_dir(root.path(), "notes-wiki");
             engine
                 .add_collection(AddCollectionRequest {
                     path: notes_path.clone(),
@@ -693,7 +711,7 @@ mod tests {
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
 
-            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let work_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: work_path.clone(),
@@ -740,7 +758,7 @@ mod tests {
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
 
-            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let work_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: work_path.clone(),
@@ -792,7 +810,7 @@ mod tests {
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
 
-            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let work_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: work_path.clone(),
@@ -865,7 +883,7 @@ mod tests {
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
 
-            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let work_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: work_path.clone(),
@@ -915,7 +933,7 @@ mod tests {
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
 
-            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let work_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: work_path.clone(),
@@ -969,7 +987,7 @@ mod tests {
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
 
-            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let work_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: work_path.clone(),
@@ -1055,7 +1073,7 @@ mod tests {
             let engine = Engine::new(None).expect("create engine");
             engine.add_space("work", None).expect("add work");
 
-            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let work_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: work_path.clone(),
@@ -1135,7 +1153,10 @@ mod tests {
 
     #[test]
     fn resolve_tool_no_rerank_honors_explicit_override() {
-        assert!(!super::resolve_tool_no_rerank(&SearchMode::Auto, Some(false)));
+        assert!(!super::resolve_tool_no_rerank(
+            &SearchMode::Auto,
+            Some(false)
+        ));
         assert!(super::resolve_tool_no_rerank(&SearchMode::Deep, Some(true)));
     }
 
@@ -1180,7 +1201,7 @@ mod tests {
                 .add_space("work", Some("work documents"))
                 .expect("add work");
 
-            let work_path = new_collection_dir(&root.path().to_path_buf(), "work-api");
+            let work_path = new_collection_dir(root.path(), "work-api");
             engine
                 .add_collection(AddCollectionRequest {
                     path: work_path,
