@@ -3,8 +3,8 @@ use kbolt_cli::args::{
     Cli, CollectionCommand, Command, IgnoreCommand, ModelsCommand, SearchArgs, SpaceCommand,
 };
 use kbolt_cli::CliAdapter;
-use kbolt_core::error::CoreError;
 use kbolt_core::engine::Engine;
+use kbolt_core::error::CoreError;
 use kbolt_core::Result;
 use kbolt_mcp::stdio;
 use kbolt_mcp::McpAdapter;
@@ -77,15 +77,38 @@ fn run() -> Result<()> {
                 extensions,
                 no_index,
             } => {
-                let line = adapter.collection_add(
-                    cli.space.as_deref(),
-                    &path,
-                    name.as_deref(),
-                    description.as_deref(),
-                    extensions.as_deref(),
-                    no_index,
-                )?;
-                println!("{line}");
+                let run_collection_add = || {
+                    adapter.collection_add(
+                        cli.space.as_deref(),
+                        &path,
+                        name.as_deref(),
+                        description.as_deref(),
+                        extensions.as_deref(),
+                        no_index,
+                    )
+                };
+                match run_collection_add() {
+                    Ok(line) => {
+                        println!("{line}");
+                    }
+                    Err(err)
+                        if should_offer_model_pull_for_collection_add(
+                            no_index,
+                            stdin_stdout_are_tty(),
+                            &err,
+                        ) =>
+                    {
+                        if prompt_pull_models()? {
+                            let pull_report = adapter.models_pull()?;
+                            println!("{pull_report}");
+                            let retried = run_collection_add()?;
+                            println!("{retried}");
+                        } else {
+                            return Err(with_collection_add_model_missing_guidance(err));
+                        }
+                    }
+                    Err(err) => return Err(with_collection_add_model_missing_guidance(err)),
+                }
             }
             CollectionCommand::List => {
                 let line = adapter.collection_list(cli.space.as_deref())?;
@@ -234,12 +257,7 @@ fn run() -> Result<()> {
             println!("{line}");
         }
         Command::Get(get) => {
-            let line = adapter.get(
-                cli.space.as_deref(),
-                &get.identifier,
-                get.offset,
-                get.limit,
-            )?;
+            let line = adapter.get(cli.space.as_deref(), &get.identifier, get.offset, get.limit)?;
             println!("{line}");
         }
         Command::MultiGet(get) => {
@@ -305,6 +323,14 @@ fn should_offer_model_pull_for_update(no_embed: bool, is_tty: bool, err: &CoreEr
     !no_embed && is_tty && is_model_not_available_error(err)
 }
 
+fn should_offer_model_pull_for_collection_add(
+    no_index: bool,
+    is_tty: bool,
+    err: &CoreError,
+) -> bool {
+    !no_index && is_tty && is_model_not_available_error(err)
+}
+
 fn with_update_model_missing_guidance(err: CoreError) -> CoreError {
     if is_model_not_available_error(&err) {
         return CoreError::Domain(KboltError::InvalidInput(format!(
@@ -314,11 +340,21 @@ fn with_update_model_missing_guidance(err: CoreError) -> CoreError {
     err
 }
 
+fn with_collection_add_model_missing_guidance(err: CoreError) -> CoreError {
+    if is_model_not_available_error(&err) {
+        return CoreError::Domain(KboltError::InvalidInput(format!(
+            "{err}. for collection add, run `kbolt models pull` or re-run with `--no-index`"
+        )));
+    }
+    err
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         is_model_not_available_error, parse_pull_confirmation, requested_search_mode,
-        should_offer_model_pull_for_update, with_update_model_missing_guidance,
+        should_offer_model_pull_for_collection_add, should_offer_model_pull_for_update,
+        with_collection_add_model_missing_guidance, with_update_model_missing_guidance,
         RequestedSearchMode,
     };
     use kbolt_cli::args::SearchArgs;
@@ -411,9 +447,45 @@ mod tests {
         assert!(message.contains("kbolt models pull"));
         assert!(message.contains("--no-embed"));
 
-        let unchanged =
-            CoreError::Domain(KboltError::InvalidInput("bad input".to_string()));
+        let unchanged = CoreError::Domain(KboltError::InvalidInput("bad input".to_string()));
         let rewritten_other = with_update_model_missing_guidance(unchanged);
+        assert_eq!(rewritten_other.to_string(), "invalid input: bad input");
+    }
+
+    #[test]
+    fn collection_add_model_pull_prompt_offer_requires_index_and_tty_and_model_error() {
+        let missing = CoreError::Domain(KboltError::ModelNotAvailable {
+            name: "test-model".to_string(),
+        });
+        assert!(should_offer_model_pull_for_collection_add(
+            false, true, &missing
+        ));
+
+        assert!(!should_offer_model_pull_for_collection_add(
+            true, true, &missing
+        ));
+        assert!(!should_offer_model_pull_for_collection_add(
+            false, false, &missing
+        ));
+
+        let other = CoreError::Domain(KboltError::InvalidInput("bad input".to_string()));
+        assert!(!should_offer_model_pull_for_collection_add(
+            false, true, &other
+        ));
+    }
+
+    #[test]
+    fn collection_add_model_missing_guidance_adds_no_index_hint() {
+        let missing = CoreError::Domain(KboltError::ModelNotAvailable {
+            name: "test-model".to_string(),
+        });
+        let rewritten = with_collection_add_model_missing_guidance(missing);
+        let message = rewritten.to_string();
+        assert!(message.contains("kbolt models pull"));
+        assert!(message.contains("--no-index"));
+
+        let unchanged = CoreError::Domain(KboltError::InvalidInput("bad input".to_string()));
+        let rewritten_other = with_collection_add_model_missing_guidance(unchanged);
         assert_eq!(rewritten_other.to_string(), "invalid input: bad input");
     }
 }
