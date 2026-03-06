@@ -12,6 +12,9 @@ const CONFIG_FILENAME: &str = "index.toml";
 const DEFAULT_EMBED_MODEL: &str = "ggml-org/embeddinggemma-300M-GGUF";
 const DEFAULT_RERANKER_MODEL: &str = "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF";
 const DEFAULT_EXPANDER_MODEL: &str = "tobil/qmd-query-expansion-1.7B-gguf";
+const DEFAULT_LOCAL_GGUF_EMBED_MODEL_FILE: &str = "embeddinggemma-300M-Q8_0.gguf";
+const DEFAULT_LOCAL_RERANKER_MODEL_FILE: &str = "qwen3-reranker-0.6b-q8_0.gguf";
+const DEFAULT_LOCAL_EXPANDER_MODEL_FILE: &str = "qmd-query-expansion-1.7B-q4_k_m.gguf";
 const DEFAULT_REAP_DAYS: u32 = 7;
 const DEFAULT_CHUNK_TARGET_TOKENS: usize = 450;
 const DEFAULT_CHUNK_SOFT_MAX_TOKENS: usize = 550;
@@ -307,8 +310,8 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
             cache_dir: cache_dir.to_path_buf(),
             default_space: None,
             models: ModelConfig::default(),
-            embeddings: None,
-            inference: InferenceConfig::default(),
+            embeddings: Some(default_local_gguf_embedding_config()),
+            inference: default_local_inference_config(),
             reaping: ReapingConfig {
                 days: DEFAULT_REAP_DAYS,
             },
@@ -734,6 +737,37 @@ fn default_local_embedding_max_length() -> usize {
 
 fn default_local_gguf_embedding_batch_size() -> usize {
     DEFAULT_LOCAL_GGUF_EMBEDDING_BATCH_SIZE
+}
+
+fn default_local_gguf_embedding_config() -> EmbeddingConfig {
+    EmbeddingConfig::LocalGguf {
+        model_file: Some(DEFAULT_LOCAL_GGUF_EMBED_MODEL_FILE.to_string()),
+        batch_size: default_local_gguf_embedding_batch_size(),
+        n_threads: None,
+        n_threads_batch: None,
+    }
+}
+
+fn default_local_inference_config() -> InferenceConfig {
+    InferenceConfig {
+        reranker: Some(default_local_text_inference_config(
+            DEFAULT_LOCAL_RERANKER_MODEL_FILE,
+        )),
+        expander: Some(default_local_text_inference_config(
+            DEFAULT_LOCAL_EXPANDER_MODEL_FILE,
+        )),
+    }
+}
+
+fn default_local_text_inference_config(model_file: &str) -> TextInferenceConfig {
+    TextInferenceConfig {
+        provider: TextInferenceProvider::LocalLlama {
+            model_file: Some(model_file.to_string()),
+            max_tokens: default_local_inference_max_tokens(),
+            n_ctx: default_local_inference_n_ctx(),
+            n_gpu_layers: default_local_inference_n_gpu_layers(),
+        },
+    }
 }
 
 fn default_inference_timeout_ms() -> u64 {
