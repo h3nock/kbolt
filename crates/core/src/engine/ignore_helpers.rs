@@ -48,7 +48,11 @@ pub(super) fn load_collection_ignore_matcher(
     Ok(Some(matcher))
 }
 
-pub(super) fn collection_ignore_file_path(config_dir: &Path, space: &str, collection: &str) -> std::path::PathBuf {
+pub(super) fn collection_ignore_file_path(
+    config_dir: &Path,
+    space: &str,
+    collection: &str,
+) -> std::path::PathBuf {
     config_dir
         .join("ignores")
         .join(space)

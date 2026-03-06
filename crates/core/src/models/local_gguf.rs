@@ -79,7 +79,11 @@ fn embed_with_local_gguf(embedder: &LocalGgufEmbedder, texts: &[String]) -> Resu
         ))
         .into());
     }
-    if let Some((index, _)) = vectors.iter().enumerate().find(|(_, vector)| vector.is_empty()) {
+    if let Some((index, _)) = vectors
+        .iter()
+        .enumerate()
+        .find(|(_, vector)| vector.is_empty())
+    {
         return Err(KboltError::Inference(format!(
             "local gguf embedder returned an empty vector at index {index}"
         ))

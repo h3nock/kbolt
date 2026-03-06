@@ -1,7 +1,7 @@
 use tempfile::tempdir;
 
-use crate::ingest::chunk::FinalChunkKind;
 use super::Storage;
+use crate::ingest::chunk::FinalChunkKind;
 use kbolt_types::KboltError;
 use rusqlite::Connection;
 
@@ -116,7 +116,9 @@ fn create_space_provisions_index_paths() {
     let cache_dir = tmp.path().join("cache");
     let storage = Storage::new(&cache_dir).expect("create storage");
 
-    storage.create_space("work", None).expect("create work space");
+    storage
+        .create_space("work", None)
+        .expect("create work space");
     assert!(cache_dir.join("spaces/work/tantivy").is_dir());
     assert!(cache_dir.join("spaces/work/tantivy/meta.json").is_file());
     assert!(cache_dir.join("spaces/work/vectors.usearch").is_file());
@@ -221,7 +223,10 @@ fn delete_tantivy_removes_chunk_after_commit() {
     let alpha_hits = storage
         .query_bm25("work", "alphaunique", &[("body", 1.0)], 10)
         .expect("query alpha");
-    assert!(alpha_hits.is_empty(), "deleted chunk should not be returned");
+    assert!(
+        alpha_hits.is_empty(),
+        "deleted chunk should not be returned"
+    );
 
     let beta_hits = storage
         .query_bm25("work", "betaunique", &[("body", 1.0)], 10)
@@ -336,12 +341,18 @@ fn delete_usearch_removes_keys() {
     storage
         .batch_insert_usearch("work", &[(11, &[1.0, 0.0]), (22, &[0.0, 1.0])])
         .expect("insert vectors");
-    assert_eq!(storage.count_usearch("work").expect("count before delete"), 2);
+    assert_eq!(
+        storage.count_usearch("work").expect("count before delete"),
+        2
+    );
 
     storage
         .delete_usearch("work", &[11])
         .expect("delete key 11 from usearch");
-    assert_eq!(storage.count_usearch("work").expect("count after delete"), 1);
+    assert_eq!(
+        storage.count_usearch("work").expect("count after delete"),
+        1
+    );
 
     let hits = storage
         .query_dense("work", &[0.0, 1.0], 2)
@@ -375,12 +386,18 @@ fn usearch_persists_across_close_and_open_space() {
     storage
         .insert_usearch("work", 11, &[1.0, 0.0])
         .expect("insert vector");
-    assert_eq!(storage.count_usearch("work").expect("count before close"), 1);
+    assert_eq!(
+        storage.count_usearch("work").expect("count before close"),
+        1
+    );
 
     storage.close_space("work").expect("close work");
     storage.open_space("work").expect("reopen work");
 
-    assert_eq!(storage.count_usearch("work").expect("count after reopen"), 1);
+    assert_eq!(
+        storage.count_usearch("work").expect("count after reopen"),
+        1
+    );
     let hits = storage
         .query_dense("work", &[1.0, 0.0], 1)
         .expect("query after reopen");
@@ -506,9 +523,7 @@ fn get_space_by_id_returns_row_or_not_found() {
         .create_space("work", Some("work docs"))
         .expect("create work space");
 
-    let work = storage
-        .get_space_by_id(work_id)
-        .expect("fetch work by id");
+    let work = storage.get_space_by_id(work_id).expect("fetch work by id");
     assert_eq!(work.id, work_id);
     assert_eq!(work.name, "work");
     assert_eq!(work.description.as_deref(), Some("work docs"));
@@ -1288,7 +1303,10 @@ fn update_document_metadata_updates_title_modified_and_reactivates_without_dirty
     assert_eq!(stored.modified, "2026-03-01T12:00:00Z");
     assert!(stored.active);
     assert_eq!(stored.deactivated_at, None);
-    assert!(!stored.fts_dirty, "metadata-only update should not mark dirty");
+    assert!(
+        !stored.fts_dirty,
+        "metadata-only update should not mark dirty"
+    );
 }
 
 #[test]
@@ -1368,7 +1386,9 @@ fn get_document_by_id_returns_row_or_not_found() {
         )
         .expect("insert document");
 
-    let doc = storage.get_document_by_id(doc_id).expect("get document by id");
+    let doc = storage
+        .get_document_by_id(doc_id)
+        .expect("get document by id");
     assert_eq!(doc.id, doc_id);
     assert_eq!(doc.collection_id, collection_id);
     assert_eq!(doc.path, "src/lib.rs");
@@ -2849,22 +2869,10 @@ fn per_collection_count_methods_return_expected_values() {
         )
         .expect("create collection");
     let doc_a = storage
-        .upsert_document(
-            collection_id,
-            "a.rs",
-            "a",
-            "hash-a",
-            "2026-03-01T10:00:00Z",
-        )
+        .upsert_document(collection_id, "a.rs", "a", "hash-a", "2026-03-01T10:00:00Z")
         .expect("insert doc a");
     let doc_b = storage
-        .upsert_document(
-            collection_id,
-            "b.rs",
-            "b",
-            "hash-b",
-            "2026-03-01T10:01:00Z",
-        )
+        .upsert_document(collection_id, "b.rs", "b", "hash-b", "2026-03-01T10:01:00Z")
         .expect("insert doc b");
 
     let chunk_ids = storage
@@ -2975,8 +2983,11 @@ fn disk_usage_sums_sqlite_indexes_and_models() {
     std::fs::create_dir_all(cache_dir.join("spaces/notes")).expect("create notes dir");
     std::fs::create_dir_all(cache_dir.join("models")).expect("create models dir");
 
-    std::fs::write(cache_dir.join("spaces/work/tantivy/seg1.bin"), vec![b'x'; 10])
-        .expect("write tantivy segment 1");
+    std::fs::write(
+        cache_dir.join("spaces/work/tantivy/seg1.bin"),
+        vec![b'x'; 10],
+    )
+    .expect("write tantivy segment 1");
     std::fs::write(
         cache_dir.join("spaces/work/tantivy/segments/seg2.bin"),
         vec![b'y'; 4],
@@ -2984,8 +2995,11 @@ fn disk_usage_sums_sqlite_indexes_and_models() {
     .expect("write tantivy segment 2");
     std::fs::write(cache_dir.join("spaces/work/vectors.usearch"), vec![b'v'; 7])
         .expect("write work vectors");
-    std::fs::write(cache_dir.join("spaces/notes/vectors.usearch"), vec![b'w'; 3])
-        .expect("write notes vectors");
+    std::fs::write(
+        cache_dir.join("spaces/notes/vectors.usearch"),
+        vec![b'w'; 3],
+    )
+    .expect("write notes vectors");
     std::fs::write(cache_dir.join("models/embed.onnx"), vec![b'm'; 11]).expect("write model file");
     std::fs::write(cache_dir.join("spaces/work/ignored.bin"), vec![b'i'; 9])
         .expect("write ignored file");

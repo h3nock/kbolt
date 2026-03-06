@@ -42,7 +42,11 @@ mod tests {
     fn tokenize_terms_splits_and_normalizes() {
         assert_eq!(
             tokenize_terms("Rust_trait-object!"),
-            vec!["rust".to_string(), "trait".to_string(), "object".to_string()]
+            vec![
+                "rust".to_string(),
+                "trait".to_string(),
+                "object".to_string()
+            ]
         );
     }
 

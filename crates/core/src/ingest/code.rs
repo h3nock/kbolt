@@ -9,8 +9,8 @@ pub struct CodeExtractor;
 impl Extractor for CodeExtractor {
     fn supports(&self) -> &[&str] {
         &[
-            "rs", "py", "js", "ts", "tsx", "jsx", "go", "java", "kt", "c", "cpp", "cc", "h",
-            "hpp", "cs", "rb", "php", "swift",
+            "rs", "py", "js", "ts", "tsx", "jsx", "go", "java", "kt", "c", "cpp", "cc", "h", "hpp",
+            "cs", "rb", "php", "swift",
         ]
     }
 
@@ -20,9 +20,10 @@ impl Extractor for CodeExtractor {
 
     fn extract(&self, path: &Path, bytes: &[u8]) -> Result<ExtractedDocument> {
         if let Err(err) = std::str::from_utf8(bytes) {
-            return Err(
-                kbolt_types::KboltError::InvalidInput(format!("non-utf8 code input: {err}")).into(),
-            );
+            return Err(kbolt_types::KboltError::InvalidInput(format!(
+                "non-utf8 code input: {err}"
+            ))
+            .into());
         }
 
         let language = path
@@ -73,7 +74,10 @@ mod tests {
         assert_eq!(doc.blocks[0].kind, BlockKind::CodeFence);
         assert_eq!(doc.blocks[0].offset, 0);
         assert_eq!(doc.blocks[0].length, source.len());
-        assert_eq!(doc.blocks[0].attrs.get("language").map(String::as_str), Some("rs"));
+        assert_eq!(
+            doc.blocks[0].attrs.get("language").map(String::as_str),
+            Some("rs")
+        );
     }
 
     #[test]

@@ -135,9 +135,13 @@ pub enum SpaceCommand {
         name: String,
     },
     Current,
-    Default { name: Option<String> },
+    Default {
+        name: Option<String>,
+    },
     List,
-    Info { name: String },
+    Info {
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -154,10 +158,20 @@ pub enum CollectionCommand {
         no_index: bool,
     },
     List,
-    Info { name: String },
-    Describe { name: String, text: String },
-    Rename { old: String, new: String },
-    Remove { name: String },
+    Info {
+        name: String,
+    },
+    Describe {
+        name: String,
+        text: String,
+    },
+    Rename {
+        old: String,
+        new: String,
+    },
+    Remove {
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -183,8 +197,7 @@ mod tests {
 
     use super::{
         Cli, CollectionCommand, Command, GetArgs, IgnoreCommand, LsArgs, ModelsCommand,
-        MultiGetArgs, SearchArgs,
-        SpaceCommand, UpdateArgs,
+        MultiGetArgs, SearchArgs, SpaceCommand, UpdateArgs,
     };
 
     #[test]
@@ -209,9 +222,15 @@ mod tests {
 
     #[test]
     fn parses_space_add_with_description() {
-        let parsed =
-            Cli::try_parse_from(["kbolt", "space", "add", "work", "--description", "work docs"])
-                .expect("parse cli");
+        let parsed = Cli::try_parse_from([
+            "kbolt",
+            "space",
+            "add",
+            "work",
+            "--description",
+            "work docs",
+        ])
+        .expect("parse cli");
         assert_eq!(parsed.space, None);
 
         match parsed.command {
@@ -278,8 +297,9 @@ mod tests {
 
     #[test]
     fn parses_space_add_with_strict() {
-        let parsed = Cli::try_parse_from(["kbolt", "space", "add", "work", "--strict", "/tmp/work-api"])
-            .expect("parse cli");
+        let parsed =
+            Cli::try_parse_from(["kbolt", "space", "add", "work", "--strict", "/tmp/work-api"])
+                .expect("parse cli");
         assert_eq!(parsed.space, None);
 
         match parsed.command {
@@ -311,7 +331,9 @@ mod tests {
         assert_eq!(parsed.space, None);
 
         match parsed.command {
-            Command::Space(space) => assert_eq!(space.command, SpaceCommand::Default { name: None }),
+            Command::Space(space) => {
+                assert_eq!(space.command, SpaceCommand::Default { name: None })
+            }
             Command::Collection(_) => panic!("unexpected collection command"),
             Command::Update(_) => panic!("unexpected update command"),
             Command::Status => panic!("unexpected status command"),
@@ -354,8 +376,7 @@ mod tests {
 
     #[test]
     fn parses_space_default_with_name() {
-        let parsed =
-            Cli::try_parse_from(["kbolt", "space", "default", "work"]).expect("parse cli");
+        let parsed = Cli::try_parse_from(["kbolt", "space", "default", "work"]).expect("parse cli");
         assert_eq!(parsed.space, None);
 
         match parsed.command {
@@ -380,8 +401,8 @@ mod tests {
 
     #[test]
     fn parses_space_rename() {
-        let parsed = Cli::try_parse_from(["kbolt", "space", "rename", "work", "team"])
-            .expect("parse cli");
+        let parsed =
+            Cli::try_parse_from(["kbolt", "space", "rename", "work", "team"]).expect("parse cli");
         assert_eq!(parsed.space, None);
 
         match parsed.command {
@@ -876,8 +897,8 @@ mod tests {
             Command::Search(_) => panic!("unexpected search command"),
         }
 
-        let parsed = Cli::try_parse_from(["kbolt", "--space", "work", "status"])
-            .expect("parse cli");
+        let parsed =
+            Cli::try_parse_from(["kbolt", "--space", "work", "status"]).expect("parse cli");
         assert_eq!(parsed.space.as_deref(), Some("work"));
         match parsed.command {
             Command::Status => {}
@@ -970,15 +991,7 @@ mod tests {
         }
 
         let parsed = Cli::try_parse_from([
-            "kbolt",
-            "--space",
-            "work",
-            "get",
-            "#abc123",
-            "--offset",
-            "10",
-            "--limit",
-            "25",
+            "kbolt", "--space", "work", "get", "#abc123", "--offset", "10", "--limit", "25",
         ])
         .expect("parse cli");
         assert_eq!(parsed.space.as_deref(), Some("work"));
@@ -1006,8 +1019,8 @@ mod tests {
 
     #[test]
     fn parses_multi_get_with_defaults_and_options() {
-        let parsed = Cli::try_parse_from(["kbolt", "multi-get", "api/a.md,#abc123"])
-            .expect("parse cli");
+        let parsed =
+            Cli::try_parse_from(["kbolt", "multi-get", "api/a.md,#abc123"]).expect("parse cli");
         assert_eq!(parsed.space, None);
         match parsed.command {
             Command::MultiGet(args) => assert_eq!(
@@ -1208,8 +1221,8 @@ mod tests {
 
     #[test]
     fn parses_search_rerank_opt_in_flag() {
-        let parsed = Cli::try_parse_from(["kbolt", "search", "alpha", "--rerank"])
-            .expect("parse cli");
+        let parsed =
+            Cli::try_parse_from(["kbolt", "search", "alpha", "--rerank"]).expect("parse cli");
 
         match parsed.command {
             Command::Search(search) => {

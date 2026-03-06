@@ -59,7 +59,12 @@ impl Engine {
             let hits = self.storage.query_bm25(
                 &target.space,
                 query,
-                &[("title", 2.0), ("heading", 1.5), ("body", 1.0), ("filepath", 0.5)],
+                &[
+                    ("title", 2.0),
+                    ("heading", 1.5),
+                    ("body", 1.0),
+                    ("filepath", 0.5),
+                ],
                 limit,
             )?;
             for hit in hits {
@@ -133,7 +138,9 @@ impl Engine {
 
         let mut candidates = Vec::new();
         for target in targets {
-            let hits = self.storage.query_dense(&target.space, query_vector, limit)?;
+            let hits = self
+                .storage
+                .query_dense(&target.space, query_vector, limit)?;
             for hit in hits {
                 candidates.push(hit);
             }
@@ -272,14 +279,16 @@ impl Engine {
             let ranked = self.rank_auto_chunks(targets, &variant, limit, 0.0)?;
             for (index, item) in ranked.into_iter().enumerate() {
                 let variant_rrf = 1.0 / (40.0 + (index + 1) as f32);
-                let entry = aggregates.entry(item.chunk_id).or_insert_with(|| RankedChunk {
-                    chunk_id: item.chunk_id,
-                    score: 0.0,
-                    rrf: 0.0,
-                    reranker: None,
-                    bm25: None,
-                    dense: None,
-                });
+                let entry = aggregates
+                    .entry(item.chunk_id)
+                    .or_insert_with(|| RankedChunk {
+                        chunk_id: item.chunk_id,
+                        score: 0.0,
+                        rrf: 0.0,
+                        reranker: None,
+                        bm25: None,
+                        dense: None,
+                    });
                 entry.score += variant_rrf;
                 entry.bm25 = max_option(entry.bm25, item.bm25);
                 entry.dense = max_option(entry.dense, item.dense);
@@ -353,7 +362,10 @@ impl Engine {
                 Err(_) => continue,
             };
             if neighbor_window > 0 && !chunks_by_doc.contains_key(&chunk.doc_id) {
-                chunks_by_doc.insert(chunk.doc_id, self.storage.get_chunks_for_document(chunk.doc_id)?);
+                chunks_by_doc.insert(
+                    chunk.doc_id,
+                    self.storage.get_chunks_for_document(chunk.doc_id)?,
+                );
             }
             let text = search_text_with_neighbors(
                 &bytes,

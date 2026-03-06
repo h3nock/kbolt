@@ -287,14 +287,16 @@ CREATE TABLE IF NOT EXISTS llm_cache (
             .spaces
             .write()
             .map_err(|_| CoreError::poisoned("spaces"))?;
-        spaces.entry(name.to_string()).or_insert(Arc::new(SpaceIndexes {
-            _tantivy_dir: tantivy_dir,
-            usearch_path,
-            tantivy_index,
-            tantivy_writer: Mutex::new(tantivy_writer),
-            usearch_index: RwLock::new(usearch_index),
-            fields,
-        }));
+        spaces
+            .entry(name.to_string())
+            .or_insert(Arc::new(SpaceIndexes {
+                _tantivy_dir: tantivy_dir,
+                usearch_path,
+                tantivy_index,
+                tantivy_writer: Mutex::new(tantivy_writer),
+                usearch_index: RwLock::new(usearch_index),
+                fields,
+            }));
 
         Ok(())
     }

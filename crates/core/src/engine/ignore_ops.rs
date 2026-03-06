@@ -16,7 +16,8 @@ impl Engine {
         let resolved_space = self.resolve_space_row(space, Some(collection))?;
         self.storage.get_collection(resolved_space.id, collection)?;
 
-        let path = collection_ignore_file_path(&self.config.config_dir, &resolved_space.name, collection);
+        let path =
+            collection_ignore_file_path(&self.config.config_dir, &resolved_space.name, collection);
         let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -44,7 +45,8 @@ impl Engine {
         self.storage.get_collection(resolved_space.id, collection)?;
 
         let normalized_pattern = validate_ignore_pattern(pattern)?;
-        let path = collection_ignore_file_path(&self.config.config_dir, &resolved_space.name, collection);
+        let path =
+            collection_ignore_file_path(&self.config.config_dir, &resolved_space.name, collection);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -70,7 +72,8 @@ impl Engine {
         self.storage.get_collection(resolved_space.id, collection)?;
 
         let normalized_pattern = validate_ignore_pattern(pattern)?;
-        let path = collection_ignore_file_path(&self.config.config_dir, &resolved_space.name, collection);
+        let path =
+            collection_ignore_file_path(&self.config.config_dir, &resolved_space.name, collection);
         let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -132,7 +135,8 @@ impl Engine {
                     ))
                 })?
                 .clone();
-            let path = collection_ignore_file_path(&self.config.config_dir, &space_name, &collection.name);
+            let path =
+                collection_ignore_file_path(&self.config.config_dir, &space_name, &collection.name);
             if !path.is_file() {
                 continue;
             }
@@ -161,7 +165,8 @@ impl Engine {
         let resolved_space = self.resolve_space_row(space, Some(collection))?;
         self.storage.get_collection(resolved_space.id, collection)?;
 
-        let path = collection_ignore_file_path(&self.config.config_dir, &resolved_space.name, collection);
+        let path =
+            collection_ignore_file_path(&self.config.config_dir, &resolved_space.name, collection);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }

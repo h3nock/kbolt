@@ -103,8 +103,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        normalize_extension_key, BlockKind, ExtractedBlock, ExtractedDocument, Extractor,
-        default_registry, ExtractorRegistry,
+        default_registry, normalize_extension_key, BlockKind, ExtractedBlock, ExtractedDocument,
+        Extractor, ExtractorRegistry,
     };
     use crate::Result;
 
@@ -215,14 +215,12 @@ mod tests {
         let unknown = registry.resolve_for_path(Path::new("notes/readme.rst"));
 
         assert!(txt.is_some());
-        assert!(
-            md.as_ref()
-                .is_some_and(|extractor| extractor.supports().contains(&"md"))
-        );
-        assert!(
-            code.as_ref()
-                .is_some_and(|extractor| extractor.profile_key() == "code")
-        );
+        assert!(md
+            .as_ref()
+            .is_some_and(|extractor| extractor.supports().contains(&"md")));
+        assert!(code
+            .as_ref()
+            .is_some_and(|extractor| extractor.profile_key() == "code"));
         assert!(unknown.is_some());
     }
 }

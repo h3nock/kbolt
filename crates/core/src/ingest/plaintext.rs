@@ -21,10 +21,10 @@ impl Extractor for PlaintextExtractor {
 
     fn extract(&self, _path: &Path, bytes: &[u8]) -> Result<ExtractedDocument> {
         if let Err(err) = std::str::from_utf8(bytes) {
-            return Err(
-                kbolt_types::KboltError::InvalidInput(format!("non-utf8 plaintext input: {err}"))
-                    .into(),
-            );
+            return Err(kbolt_types::KboltError::InvalidInput(format!(
+                "non-utf8 plaintext input: {err}"
+            ))
+            .into());
         }
 
         let mut blocks = Vec::new();

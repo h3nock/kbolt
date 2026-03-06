@@ -31,12 +31,16 @@ impl Extractor for MarkdownExtractor {
         for (event, range) in parser.into_offset_iter() {
             match event {
                 Event::Start(tag) => {
-                    if let Some(open) = open_block_for_tag(&tag, range.start, &heading_stack, &open_blocks) {
+                    if let Some(open) =
+                        open_block_for_tag(&tag, range.start, &heading_stack, &open_blocks)
+                    {
                         open_blocks.push(open);
                     }
                 }
                 Event::End(tag_end) => {
-                    let Some(index) = open_blocks.iter().rposition(|open| open.matches_end(&tag_end))
+                    let Some(index) = open_blocks
+                        .iter()
+                        .rposition(|open| open.matches_end(&tag_end))
                     else {
                         continue;
                     };
@@ -94,7 +98,9 @@ struct OpenBlock {
 impl OpenBlock {
     fn matches_end(&self, end: &TagEnd) -> bool {
         match (&self.kind, end) {
-            (OpenKind::Heading(level), TagEnd::Heading(end_level)) => *level == heading_level(end_level),
+            (OpenKind::Heading(level), TagEnd::Heading(end_level)) => {
+                *level == heading_level(end_level)
+            }
             (OpenKind::Paragraph, TagEnd::Paragraph) => true,
             (OpenKind::ListItem, TagEnd::Item) => true,
             (OpenKind::BlockQuote, TagEnd::BlockQuote(_)) => true,
@@ -126,7 +132,11 @@ fn open_block_for_tag(
     open_blocks: &[OpenBlock],
 ) -> Option<OpenBlock> {
     let (kind, block_kind, attrs) = match tag {
-        Tag::Heading { level, .. } => (OpenKind::Heading(heading_level(level)), BlockKind::Heading, HashMap::new()),
+        Tag::Heading { level, .. } => (
+            OpenKind::Heading(heading_level(level)),
+            BlockKind::Heading,
+            HashMap::new(),
+        ),
         Tag::Paragraph if inside_list_or_quote(open_blocks) => return None,
         Tag::Paragraph => (OpenKind::Paragraph, BlockKind::Paragraph, HashMap::new()),
         Tag::Item => (OpenKind::ListItem, BlockKind::ListItem, HashMap::new()),
@@ -142,7 +152,11 @@ fn open_block_for_tag(
             }
             (OpenKind::CodeFence, BlockKind::CodeFence, attrs)
         }
-        Tag::TableHead => (OpenKind::TableHeader, BlockKind::TableHeader, HashMap::new()),
+        Tag::TableHead => (
+            OpenKind::TableHeader,
+            BlockKind::TableHeader,
+            HashMap::new(),
+        ),
         Tag::TableRow => (OpenKind::TableRow, BlockKind::TableRow, HashMap::new()),
         Tag::HtmlBlock => (OpenKind::HtmlBlock, BlockKind::HtmlBlock, HashMap::new()),
         _ => return None,
@@ -229,7 +243,9 @@ More text.
 
         assert_eq!(doc.title.as_deref(), Some("Title"));
         assert!(
-            doc.blocks.iter().any(|block| block.kind == BlockKind::Heading),
+            doc.blocks
+                .iter()
+                .any(|block| block.kind == BlockKind::Heading),
             "expected heading blocks"
         );
         assert!(
@@ -258,8 +274,14 @@ fn main() {}
             .extract(Path::new("docs/guide.md"), markdown)
             .expect("extract markdown");
 
-        assert!(doc.blocks.iter().any(|block| block.kind == BlockKind::ListItem));
-        assert!(doc.blocks.iter().any(|block| block.kind == BlockKind::BlockQuote));
+        assert!(doc
+            .blocks
+            .iter()
+            .any(|block| block.kind == BlockKind::ListItem));
+        assert!(doc
+            .blocks
+            .iter()
+            .any(|block| block.kind == BlockKind::BlockQuote));
         let code = doc
             .blocks
             .iter()

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use crate::Result;
 use crate::models::text::tokenize_terms;
+use crate::Result;
 
 pub(crate) trait Expander: Send + Sync {
     fn expand(&self, query: &str) -> Result<Vec<String>>;

@@ -66,7 +66,11 @@ pub(super) fn resolve_file_with_extension(
     }
 }
 
-fn resolve_configured_file(artifact_dir: &Path, configured: &str, config_field: &str) -> Result<PathBuf> {
+fn resolve_configured_file(
+    artifact_dir: &Path,
+    configured: &str,
+    config_field: &str,
+) -> Result<PathBuf> {
     let configured_path = Path::new(configured);
     let path = if configured_path.is_absolute() {
         configured_path.to_path_buf()
@@ -130,8 +134,9 @@ mod tests {
         let model = root.path().join("model.onnx");
         write_file(&model);
 
-        let resolved = resolve_file_with_extension(root.path(), None, "onnx", "embeddings.onnx_file")
-            .expect("resolve .onnx file");
+        let resolved =
+            resolve_file_with_extension(root.path(), None, "onnx", "embeddings.onnx_file")
+                .expect("resolve .onnx file");
         assert_eq!(resolved, model);
     }
 

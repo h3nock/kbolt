@@ -81,7 +81,11 @@ impl Engine {
         Ok(report)
     }
 
-    fn reconcile_dense_integrity(&self, targets: &[UpdateTarget], options: &UpdateOptions) -> Result<()> {
+    fn reconcile_dense_integrity(
+        &self,
+        targets: &[UpdateTarget],
+        options: &UpdateOptions,
+    ) -> Result<()> {
         if options.no_embed || options.dry_run {
             return Ok(());
         }
@@ -120,7 +124,11 @@ impl Engine {
         Ok(())
     }
 
-    fn embed_pending_chunks(&self, options: &UpdateOptions, report: &mut UpdateReport) -> Result<()> {
+    fn embed_pending_chunks(
+        &self,
+        options: &UpdateOptions,
+        report: &mut UpdateReport,
+    ) -> Result<()> {
         if options.no_embed || options.dry_run {
             return Ok(());
         }
@@ -179,10 +187,8 @@ impl Engine {
 
             let mut grouped_vectors: HashMap<String, Vec<(i64, Vec<f32>)>> = HashMap::new();
             let mut embedding_rows = Vec::with_capacity(chunk_ids.len());
-            for ((chunk_id, space), vector) in chunk_ids
-                .iter()
-                .zip(spaces.iter())
-                .zip(vectors.into_iter())
+            for ((chunk_id, space), vector) in
+                chunk_ids.iter().zip(spaces.iter()).zip(vectors.into_iter())
             {
                 if vector.is_empty() {
                     return Err(KboltError::Inference(format!(
@@ -310,9 +316,10 @@ impl Engine {
         for raw_collection_name in scope.collections {
             let collection_name = raw_collection_name.trim();
             if collection_name.is_empty() {
-                return Err(
-                    KboltError::InvalidInput("collection names cannot be empty".to_string()).into(),
-                );
+                return Err(KboltError::InvalidInput(
+                    "collection names cannot be empty".to_string(),
+                )
+                .into());
             }
 
             let resolved_space = self.resolve_space_row(scope.space, Some(collection_name))?;
@@ -423,16 +430,23 @@ impl Engine {
                 continue;
             }
 
-            let relative_path = match collection_relative_path(&target.collection.path, entry.path()) {
-                Ok(path) => path,
-                Err(err) => {
-                    report.errors.push(file_error(Some(entry.path().to_path_buf()), err.to_string()));
-                    continue;
-                }
-            };
+            let relative_path =
+                match collection_relative_path(&target.collection.path, entry.path()) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        report.errors.push(file_error(
+                            Some(entry.path().to_path_buf()),
+                            err.to_string(),
+                        ));
+                        continue;
+                    }
+                };
 
             if let Some(matcher) = ignore_matcher.as_ref() {
-                if matcher.matched(Path::new(&relative_path), false).is_ignore() {
+                if matcher
+                    .matched(Path::new(&relative_path), false)
+                    .is_ignore()
+                {
                     continue;
                 }
             }
@@ -447,9 +461,10 @@ impl Engine {
             let metadata = match entry.metadata() {
                 Ok(data) => data,
                 Err(err) => {
-                    report
-                        .errors
-                        .push(file_error(Some(entry.path().to_path_buf()), err.to_string()));
+                    report.errors.push(file_error(
+                        Some(entry.path().to_path_buf()),
+                        err.to_string(),
+                    ));
                     continue;
                 }
             };
@@ -475,9 +490,10 @@ impl Engine {
             let bytes = match std::fs::read(entry.path()) {
                 Ok(data) => data,
                 Err(err) => {
-                    report
-                        .errors
-                        .push(file_error(Some(entry.path().to_path_buf()), err.to_string()));
+                    report.errors.push(file_error(
+                        Some(entry.path().to_path_buf()),
+                        err.to_string(),
+                    ));
                     continue;
                 }
             };
@@ -494,7 +510,8 @@ impl Engine {
                     }
 
                     if !options.dry_run {
-                        self.storage.update_document_metadata(doc.id, &title, &modified)?;
+                        self.storage
+                            .update_document_metadata(doc.id, &title, &modified)?;
                     }
                     continue;
                 }
@@ -541,11 +558,7 @@ impl Engine {
                 }
             }
 
-            let policy = resolve_policy(
-                &self.config.chunking,
-                Some(extractor.profile_key()),
-                None,
-            );
+            let policy = resolve_policy(&self.config.chunking, Some(extractor.profile_key()), None);
             let final_chunks = chunk_document(&extracted, &policy);
 
             let chunk_inserts = final_chunks
@@ -584,10 +597,7 @@ impl Engine {
                         ),
                     })
                     .collect::<Vec<_>>();
-                self.storage.index_tantivy(
-                    &target.space,
-                    &entries,
-                )?;
+                self.storage.index_tantivy(&target.space, &entries)?;
                 fts_dirty_by_space
                     .entry(target.space.clone())
                     .or_default()
@@ -619,7 +629,8 @@ impl Engine {
         }
 
         if touched_collection && !options.dry_run {
-            self.storage.update_collection_timestamp(target.collection.id)?;
+            self.storage
+                .update_collection_timestamp(target.collection.id)?;
         }
 
         Ok(())

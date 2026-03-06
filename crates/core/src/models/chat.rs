@@ -102,7 +102,10 @@ impl ChatCompletionResponse {
         };
 
         extract_text(choice.message.content).ok_or_else(|| {
-            KboltError::Inference("chat completion response did not contain text content".to_string()).into()
+            KboltError::Inference(
+                "chat completion response did not contain text content".to_string(),
+            )
+            .into()
         })
     }
 }
@@ -134,7 +137,11 @@ fn extract_text(value: Value) -> Option<String> {
                 }
             }
 
-            if text.is_empty() { None } else { Some(text) }
+            if text.is_empty() {
+                None
+            } else {
+                Some(text)
+            }
         }
         Value::Object(map) => map
             .get("text")

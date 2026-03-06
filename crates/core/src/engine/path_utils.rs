@@ -43,10 +43,10 @@ pub(super) fn normalize_list_prefix(prefix: Option<&str>) -> Result<Option<Strin
             Component::Normal(item) => parts.push(item.to_string_lossy().into_owned()),
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(
-                    KboltError::InvalidInput("prefix must not traverse directories".to_string())
-                        .into(),
+                return Err(KboltError::InvalidInput(
+                    "prefix must not traverse directories".to_string(),
                 )
+                .into())
             }
         }
     }
@@ -61,10 +61,10 @@ pub(super) fn normalize_list_prefix(prefix: Option<&str>) -> Result<Option<Strin
 pub(super) fn split_collection_path(locator: &str) -> Result<(String, String)> {
     let trimmed = locator.trim();
     if trimmed.is_empty() {
-        return Err(
-            KboltError::InvalidInput("path locator must be '<collection>/<path>'".to_string())
-                .into(),
-        );
+        return Err(KboltError::InvalidInput(
+            "path locator must be '<collection>/<path>'".to_string(),
+        )
+        .into());
     }
 
     let parsed = Path::new(trimmed);
@@ -78,21 +78,19 @@ pub(super) fn split_collection_path(locator: &str) -> Result<(String, String)> {
             Component::Normal(item) => parts.push(item.to_string_lossy().into_owned()),
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(
-                    KboltError::InvalidInput(
-                        "path locator must not traverse directories".to_string(),
-                    )
-                    .into(),
+                return Err(KboltError::InvalidInput(
+                    "path locator must not traverse directories".to_string(),
                 )
+                .into())
             }
         }
     }
 
     if parts.len() < 2 {
-        return Err(
-            KboltError::InvalidInput("path locator must be '<collection>/<path>'".to_string())
-                .into(),
-        );
+        return Err(KboltError::InvalidInput(
+            "path locator must be '<collection>/<path>'".to_string(),
+        )
+        .into());
     }
 
     Ok((parts[0].clone(), parts[1..].join("/")))
@@ -107,7 +105,10 @@ pub(super) fn normalize_docid(raw: &str) -> Result<String> {
 }
 
 pub(super) fn path_matches_prefix(path: &str, prefix: &str) -> bool {
-    path == prefix || path.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 pub(super) fn short_docid(hash: &str) -> String {
@@ -126,7 +127,10 @@ pub(super) fn extension_allowed(path: &Path, filter: Option<&HashSet<String>>) -
     }
 }
 
-pub(super) fn collection_relative_path(root: &Path, full_path: &Path) -> std::result::Result<String, KboltError> {
+pub(super) fn collection_relative_path(
+    root: &Path,
+    full_path: &Path,
+) -> std::result::Result<String, KboltError> {
     let relative = full_path
         .strip_prefix(root)
         .map_err(|_| KboltError::InvalidPath(full_path.to_path_buf()))?;

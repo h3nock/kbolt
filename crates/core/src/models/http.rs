@@ -95,7 +95,8 @@ impl HttpJsonClient {
                     return Ok(decoded);
                 }
                 Err(ureq::Error::Status(status, response)) => {
-                    let retry_after_secs = parse_retry_after_seconds(response.header("retry-after"));
+                    let retry_after_secs =
+                        parse_retry_after_seconds(response.header("retry-after"));
                     let body = response
                         .into_string()
                         .unwrap_or_else(|_| "<unreadable body>".to_string());
