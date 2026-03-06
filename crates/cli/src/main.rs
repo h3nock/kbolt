@@ -3,6 +3,7 @@ use kbolt_cli::args::{
     Cli, CollectionCommand, Command, IgnoreCommand, ModelsCommand, SearchArgs, SpaceCommand,
 };
 use kbolt_cli::CliAdapter;
+use kbolt_core::config;
 use kbolt_core::engine::Engine;
 use kbolt_core::error::CoreError;
 use kbolt_core::Result;
@@ -19,6 +20,7 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    maybe_print_first_run_models_hint(&cli.command);
 
     if matches!(cli.command, Command::Mcp) {
         let engine = Engine::new(None)?;
@@ -298,6 +300,22 @@ fn is_model_not_available_error(err: &CoreError) -> bool {
     matches!(err, CoreError::Domain(KboltError::ModelNotAvailable { .. }))
 }
 
+fn maybe_print_first_run_models_hint(command: &Command) {
+    let config_file = match config::default_config_file_path() {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+    if should_show_first_run_models_hint(command, stdin_stdout_are_tty(), config_file.exists()) {
+        eprintln!(
+            "hint: run `kbolt models pull` to download semantic/rerank models. keyword search works without models."
+        );
+    }
+}
+
+fn should_show_first_run_models_hint(command: &Command, is_tty: bool, config_exists: bool) -> bool {
+    !matches!(command, Command::Mcp) && is_tty && !config_exists
+}
+
 fn stdin_stdout_are_tty() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
@@ -354,10 +372,11 @@ mod tests {
     use super::{
         is_model_not_available_error, parse_pull_confirmation, requested_search_mode,
         should_offer_model_pull_for_collection_add, should_offer_model_pull_for_update,
+        should_show_first_run_models_hint,
         with_collection_add_model_missing_guidance, with_update_model_missing_guidance,
         RequestedSearchMode,
     };
-    use kbolt_cli::args::SearchArgs;
+    use kbolt_cli::args::{Command, SearchArgs};
     use kbolt_core::error::CoreError;
     use kbolt_types::KboltError;
 
@@ -487,5 +506,25 @@ mod tests {
         let unchanged = CoreError::Domain(KboltError::InvalidInput("bad input".to_string()));
         let rewritten_other = with_collection_add_model_missing_guidance(unchanged);
         assert_eq!(rewritten_other.to_string(), "invalid input: bad input");
+    }
+
+    #[test]
+    fn first_run_models_hint_visibility_respects_context() {
+        assert!(should_show_first_run_models_hint(
+            &Command::Status,
+            true,
+            false
+        ));
+        assert!(!should_show_first_run_models_hint(
+            &Command::Status,
+            true,
+            true
+        ));
+        assert!(!should_show_first_run_models_hint(
+            &Command::Status,
+            false,
+            false
+        ));
+        assert!(!should_show_first_run_models_hint(&Command::Mcp, true, false));
     }
 }

@@ -244,6 +244,10 @@ pub fn load(config_path: Option<&Path>) -> Result<Config> {
     load_from_file(&config_file, &config_dir, &cache_dir)
 }
 
+pub fn default_config_file_path() -> Result<PathBuf> {
+    Ok(default_config_dir()?.join(CONFIG_FILENAME))
+}
+
 pub fn save(config: &Config) -> Result<()> {
     fs::create_dir_all(&config.config_dir)?;
     fs::create_dir_all(&config.cache_dir)?;

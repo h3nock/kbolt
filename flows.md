@@ -35,7 +35,8 @@ cargo install kbolt
 
 After install, `kbolt` command is available. No configuration needed yet — the system creates `~/.config/kbolt/` and `~/.cache/kbolt/` on first use.
 
-> **TODO (implementation)**: The install script / Homebrew post-install message should print a getting-started reminder after confirming kbolt is installed, e.g. "Run `kbolt models pull` to download ML models for semantic search and reranking. Keyword search works without models." This is a one-time message at install time, not on every command.
+On first interactive CLI use (before `~/.config/kbolt/index.toml` exists), kbolt prints a one-time reminder:
+`Run kbolt models pull to download semantic/rerank models. Keyword search works without models.`
 
 ---
 
