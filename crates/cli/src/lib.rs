@@ -5,7 +5,8 @@ use kbolt_core::ModelPullEvent;
 use kbolt_core::Result;
 use kbolt_types::{
     ActiveSpaceSource, AddCollectionRequest, GetRequest, KboltError, Locator, MultiGetRequest,
-    OmitReason, SearchMode, SearchRequest, UpdateOptions,
+    OmitReason, SearchMode, SearchRequest, UpdateDecision, UpdateDecisionKind, UpdateOptions,
+    UpdateReport,
 };
 
 pub struct CliAdapter {
@@ -583,24 +584,7 @@ impl CliAdapter {
             verbose,
         })?;
 
-        let mut lines = Vec::new();
-        lines.push(format!("scanned: {}", report.scanned));
-        lines.push(format!("skipped_mtime: {}", report.skipped_mtime));
-        lines.push(format!("skipped_hash: {}", report.skipped_hash));
-        lines.push(format!("added: {}", report.added));
-        lines.push(format!("updated: {}", report.updated));
-        lines.push(format!("deactivated: {}", report.deactivated));
-        lines.push(format!("reactivated: {}", report.reactivated));
-        lines.push(format!("reaped: {}", report.reaped));
-        lines.push(format!("embedded: {}", report.embedded));
-        lines.push(format!("errors: {}", report.errors.len()));
-        if verbose {
-            for error in report.errors {
-                lines.push(format!("- {}: {}", error.path, error.error));
-            }
-        }
-        lines.push(format!("elapsed_ms: {}", report.elapsed_ms));
-        Ok(lines.join("\n"))
+        Ok(format_update_report(&report, verbose))
     }
 
     pub fn status(&self, space: Option<&str>) -> Result<String> {
@@ -815,6 +799,77 @@ fn format_search_mode(mode: &SearchMode) -> &'static str {
         SearchMode::Keyword => "keyword",
         SearchMode::Semantic => "semantic",
     }
+}
+
+fn format_update_report(report: &UpdateReport, verbose: bool) -> String {
+    let mut lines = Vec::new();
+    if verbose {
+        for decision in &report.decisions {
+            lines.push(format_update_decision(decision));
+        }
+
+        for error in unreported_update_errors(report) {
+            lines.push(format!("error: {}: {}", error.path, error.error));
+        }
+    }
+
+    lines.push(format!("scanned: {}", report.scanned));
+    lines.push(format!("skipped_mtime: {}", report.skipped_mtime));
+    lines.push(format!("skipped_hash: {}", report.skipped_hash));
+    lines.push(format!("added: {}", report.added));
+    lines.push(format!("updated: {}", report.updated));
+    lines.push(format!("deactivated: {}", report.deactivated));
+    lines.push(format!("reactivated: {}", report.reactivated));
+    lines.push(format!("reaped: {}", report.reaped));
+    lines.push(format!("embedded: {}", report.embedded));
+    lines.push(format!("errors: {}", report.errors.len()));
+    lines.push(format!("elapsed_ms: {}", report.elapsed_ms));
+    lines.join("\n")
+}
+
+fn format_update_decision(decision: &UpdateDecision) -> String {
+    let locator = format!(
+        "{}/{}/{}",
+        decision.space, decision.collection, decision.path
+    );
+    match decision.detail.as_deref() {
+        Some(detail) => format!(
+            "{locator}: {} ({detail})",
+            format_update_decision_kind(&decision.kind)
+        ),
+        None => format!("{locator}: {}", format_update_decision_kind(&decision.kind)),
+    }
+}
+
+fn format_update_decision_kind(kind: &UpdateDecisionKind) -> &'static str {
+    match kind {
+        UpdateDecisionKind::New => "new",
+        UpdateDecisionKind::Changed => "changed",
+        UpdateDecisionKind::SkippedMtime => "skipped_mtime",
+        UpdateDecisionKind::SkippedHash => "skipped_hash",
+        UpdateDecisionKind::Ignored => "ignored",
+        UpdateDecisionKind::Unsupported => "unsupported",
+        UpdateDecisionKind::ReadFailed => "read_failed",
+        UpdateDecisionKind::ExtractFailed => "extract_failed",
+        UpdateDecisionKind::Reactivated => "reactivated",
+        UpdateDecisionKind::Deactivated => "deactivated",
+    }
+}
+
+fn unreported_update_errors(report: &UpdateReport) -> Vec<&kbolt_types::FileError> {
+    report
+        .errors
+        .iter()
+        .filter(|error| {
+            !report.decisions.iter().any(|decision| {
+                matches!(
+                    decision.kind,
+                    UpdateDecisionKind::ReadFailed | UpdateDecisionKind::ExtractFailed
+                ) && std::path::Path::new(&error.path)
+                    .ends_with(std::path::Path::new(&decision.path))
+            })
+        })
+        .collect()
 }
 
 pub fn resolve_no_rerank_for_mode(mode: SearchMode, rerank: bool, no_rerank: bool) -> bool {
@@ -2160,6 +2215,65 @@ mod tests {
                 second.contains("skipped_mtime: 1"),
                 "unexpected output: {second}"
             );
+        });
+    }
+
+    #[test]
+    fn update_verbose_reports_buffered_decisions_before_summary() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+
+            let collection_path = new_collection_dir(root.path(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: collection_path.clone(),
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: Some(vec!["rs".to_string()]),
+                    no_index: true,
+                })
+                .expect("add collection");
+            let adapter = CliAdapter::new(engine);
+
+            fs::create_dir_all(collection_path.join("src")).expect("create src dir");
+            fs::write(collection_path.join("src/lib.rs"), "fn alpha() {}\n")
+                .expect("write valid file");
+            fs::write(collection_path.join("src/bad.rs"), [0xff, 0xfe, 0xfd])
+                .expect("write invalid file");
+
+            let output = adapter
+                .update(Some("work"), &["api".to_string()], true, false, true)
+                .expect("run verbose update");
+
+            let first_line = output.lines().next().expect("expected output lines");
+            assert!(
+                first_line.starts_with("work/api/"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("work/api/src/lib.rs: new"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("work/api/src/bad.rs: extract_failed (extract failed:"),
+                "unexpected output: {output}"
+            );
+
+            let summary_index = output
+                .lines()
+                .position(|line| line.starts_with("scanned: "))
+                .expect("expected summary output");
+            assert!(summary_index > 0, "unexpected output: {output}");
+            assert_eq!(
+                output.match_indices("src/bad.rs").count(),
+                1,
+                "extract failure should not be duplicated: {output}"
+            );
+            assert!(output.contains("added: 2"), "unexpected output: {output}");
+            assert!(output.contains("errors: 1"), "unexpected output: {output}");
         });
     }
 

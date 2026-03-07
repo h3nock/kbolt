@@ -13,7 +13,7 @@ use kbolt_mcp::stdio;
 use kbolt_mcp::McpAdapter;
 use kbolt_types::{
     ActiveSpace, CollectionInfo, FileEntry, GetRequest, KboltError, Locator, ModelStatus,
-    MultiGetRequest, SearchMode, SearchRequest, SpaceInfo,
+    MultiGetRequest, SearchMode, SearchRequest, SpaceInfo, UpdateOptions,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -322,37 +322,52 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
             }
         }
         Command::Update(update) => {
-            let run_update = |no_embed: bool| {
-                adapter.update(
-                    cli.space.as_deref(),
-                    &update.collections,
-                    no_embed,
-                    update.dry_run,
-                    update.verbose,
-                )
+            let update_options = |no_embed: bool| UpdateOptions {
+                space: cli.space.clone(),
+                collections: update.collections.clone(),
+                no_embed,
+                dry_run: update.dry_run,
+                verbose: update.verbose,
             };
 
-            match run_update(update.no_embed) {
-                Ok(line) => {
-                    print_message(&line);
+            if wants_json {
+                match adapter.engine.update(update_options(update.no_embed)) {
+                    Ok(report) => emit_structured_output(&report)?,
+                    Err(err) => return Err(with_update_model_missing_guidance(err).into()),
                 }
-                Err(err)
-                    if should_offer_model_pull_for_update(
-                        update.no_embed,
-                        interactive_output,
-                        &err,
-                    ) =>
-                {
-                    if prompt_pull_models()? {
-                        let pull_report = adapter.models_pull()?;
-                        print_message(&pull_report);
-                        let retried = run_update(false)?;
-                        print_message(&retried);
-                    } else {
-                        return Err(with_update_model_missing_guidance(err).into());
+            } else {
+                let run_update = |no_embed: bool| {
+                    adapter.update(
+                        cli.space.as_deref(),
+                        &update.collections,
+                        no_embed,
+                        update.dry_run,
+                        update.verbose,
+                    )
+                };
+
+                match run_update(update.no_embed) {
+                    Ok(line) => {
+                        print_message(&line);
                     }
+                    Err(err)
+                        if should_offer_model_pull_for_update(
+                            update.no_embed,
+                            interactive_output,
+                            &err,
+                        ) =>
+                    {
+                        if prompt_pull_models()? {
+                            let pull_report = adapter.models_pull()?;
+                            print_message(&pull_report);
+                            let retried = run_update(false)?;
+                            print_message(&retried);
+                        } else {
+                            return Err(with_update_model_missing_guidance(err).into());
+                        }
+                    }
+                    Err(err) => return Err(with_update_model_missing_guidance(err).into()),
                 }
-                Err(err) => return Err(with_update_model_missing_guidance(err).into()),
             }
         }
         Command::Status => {
@@ -791,7 +806,7 @@ mod tests {
     };
     use kbolt_cli::args::{Cli, Command, OutputFormat, SearchArgs};
     use kbolt_core::error::CoreError;
-    use kbolt_types::KboltError;
+    use kbolt_types::{FileError, KboltError, UpdateDecision, UpdateDecisionKind, UpdateReport};
 
     fn search_args() -> SearchArgs {
         SearchArgs {
@@ -954,6 +969,66 @@ mod tests {
                 "space": "work",
                 "collection": "api",
                 "patterns": ["dist/", "# comment"],
+            })
+        );
+    }
+
+    #[test]
+    fn render_structured_output_serializes_update_reports_with_decisions() {
+        let rendered = render_structured_output(&UpdateReport {
+            scanned: 2,
+            skipped_mtime: 0,
+            skipped_hash: 0,
+            added: 1,
+            updated: 0,
+            deactivated: 0,
+            reactivated: 0,
+            reaped: 0,
+            embedded: 0,
+            decisions: vec![UpdateDecision {
+                space: "work".to_string(),
+                collection: "api".to_string(),
+                path: "src/lib.rs".to_string(),
+                kind: UpdateDecisionKind::New,
+                detail: None,
+            }],
+            errors: vec![FileError {
+                path: "/tmp/work-api/src/lib.rs".to_string(),
+                error: "read failed".to_string(),
+            }],
+            elapsed_ms: 12,
+        })
+        .expect("structured output should serialize");
+        let value: serde_json::Value =
+            serde_json::from_str(&rendered).expect("rendered output should be valid json");
+        assert_eq!(
+            value,
+            json!({
+                "scanned": 2,
+                "skipped_mtime": 0,
+                "skipped_hash": 0,
+                "added": 1,
+                "updated": 0,
+                "deactivated": 0,
+                "reactivated": 0,
+                "reaped": 0,
+                "embedded": 0,
+                "decisions": [
+                    {
+                        "space": "work",
+                        "collection": "api",
+                        "path": "src/lib.rs",
+                        "kind": "New",
+                        "detail": null
+                    }
+                ],
+                "errors": [
+                    {
+                        "path": "/tmp/work-api/src/lib.rs",
+                        "error": "read failed"
+                    }
+                ],
+                "elapsed_ms": 12
             })
         );
     }
