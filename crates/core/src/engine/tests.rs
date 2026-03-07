@@ -4433,3 +4433,33 @@ fn schedule_status_reports_orphaned_backend_artifacts() {
     assert_eq!(status.orphans[0].id, "s9");
     assert_eq!(status.orphans[0].backend, expected_schedule_backend());
 }
+
+#[test]
+fn remove_schedule_all_cleans_orphaned_backend_artifacts_when_catalog_is_empty() {
+    let engine = test_engine();
+    let orphan_paths = schedule_backend_artifact_paths(&engine, "s9");
+    for path in &orphan_paths {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create backend dir");
+        }
+        std::fs::write(path, "orphan backend artifact").expect("write orphan artifact");
+    }
+
+    let removed = engine
+        .remove_schedule(RemoveScheduleRequest {
+            selector: RemoveScheduleSelector::All,
+        })
+        .expect("remove all schedules");
+    assert!(
+        removed.removed_ids.is_empty(),
+        "catalog should already be empty"
+    );
+    assert!(
+        orphan_paths.iter().all(|path| !path.exists()),
+        "expected orphaned backend artifacts to be removed: {orphan_paths:?}"
+    );
+
+    let status = engine.schedule_status().expect("load schedule status");
+    assert!(status.schedules.is_empty());
+    assert!(status.orphans.is_empty(), "orphans should be cleaned up");
+}

@@ -96,6 +96,11 @@ impl Engine {
         let removed_ids = self.resolve_removed_schedule_ids(req.selector, &catalog.schedules)?;
 
         if removed_ids.is_empty() {
+            reconcile_schedule_backend(
+                &self.config.config_dir,
+                &self.config.cache_dir,
+                &catalog.schedules,
+            )?;
             return Ok(ScheduleRemoveResponse { removed_ids });
         }
 
