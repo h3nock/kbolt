@@ -7,6 +7,7 @@ use kbolt_types::{
 };
 
 use super::{command_failure, write_if_changed, BackendInspection, CommandRunner};
+use crate::schedule_support::{parse_canonical_schedule_time, schedule_id_sort_key};
 use crate::Result;
 
 const MANAGED_UNIT_PREFIX: &str = "kbolt-schedule-";
@@ -141,7 +142,7 @@ pub(crate) fn inspect_systemd_user(
         .into_iter()
         .collect::<Vec<_>>();
     let mut orphan_ids = orphan_ids;
-    orphan_ids.sort_by_key(|id| schedule_id_number(id));
+    orphan_ids.sort_by_key(|id| schedule_id_sort_key(id));
 
     Ok(BackendInspection {
         drifted_ids,
@@ -321,14 +322,8 @@ fn schedule_id_from_systemd_path(path: &Path) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn schedule_id_number(id: &str) -> u32 {
-    id.strip_prefix('s')
-        .and_then(|raw| raw.parse::<u32>().ok())
-        .unwrap_or(u32::MAX)
-}
-
 fn systemd_calendar(weekdays: Option<&[ScheduleWeekday]>, time: &str) -> Result<String> {
-    let (hour, minute) = parse_canonical_time(time)?;
+    let (hour, minute) = parse_canonical_schedule_time(time)?;
     let hhmmss = format!("{hour:02}:{minute:02}:00");
     match weekdays {
         Some(days) => Ok(format!(
@@ -340,19 +335,6 @@ fn systemd_calendar(weekdays: Option<&[ScheduleWeekday]>, time: &str) -> Result<
         )),
         None => Ok(format!("*-*-* {hhmmss}")),
     }
-}
-
-fn parse_canonical_time(time: &str) -> Result<(u32, u32)> {
-    let (hour, minute) = time.split_once(':').ok_or_else(|| {
-        kbolt_types::KboltError::InvalidInput(format!("invalid schedule time: {time}"))
-    })?;
-    let hour = hour.parse::<u32>().map_err(|_| {
-        kbolt_types::KboltError::InvalidInput(format!("invalid schedule time: {time}"))
-    })?;
-    let minute = minute.parse::<u32>().map_err(|_| {
-        kbolt_types::KboltError::InvalidInput(format!("invalid schedule time: {time}"))
-    })?;
-    Ok((hour, minute))
 }
 
 fn systemd_weekday(weekday: &ScheduleWeekday) -> &'static str {

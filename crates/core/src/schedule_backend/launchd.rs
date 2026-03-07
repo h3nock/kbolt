@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use kbolt_types::{KboltError, ScheduleDefinition, ScheduleIntervalUnit, ScheduleTrigger};
 
 use super::{command_failure, write_if_changed, BackendInspection, CommandRunner};
+use crate::schedule_support::{parse_canonical_schedule_time, schedule_id_sort_key};
 use crate::Result;
 
 const MANAGED_LABEL_PREFIX: &str = "com.kbolt.schedule.";
@@ -104,7 +105,9 @@ pub(crate) fn inspect_launchd(
         .stale_paths
         .iter()
         .filter_map(|path| schedule_id_from_launchd_path(path))
-        .collect();
+        .collect::<Vec<_>>();
+    let mut orphan_ids = orphan_ids;
+    orphan_ids.sort_by_key(|id| schedule_id_sort_key(id));
 
     Ok(BackendInspection {
         drifted_ids,
@@ -173,13 +176,13 @@ pub(crate) fn render_launchd_plist(
             format!("    <key>StartInterval</key>\n    <integer>{seconds}</integer>\n")
         }
         ScheduleTrigger::Daily { time } => {
-            let (hour, minute) = parse_canonical_time(time)?;
+            let (hour, minute) = parse_canonical_schedule_time(time)?;
             format!(
                 "    <key>StartCalendarInterval</key>\n    <dict>\n      <key>Hour</key>\n      <integer>{hour}</integer>\n      <key>Minute</key>\n      <integer>{minute}</integer>\n    </dict>\n"
             )
         }
         ScheduleTrigger::Weekly { weekdays, time } => {
-            let (hour, minute) = parse_canonical_time(time)?;
+            let (hour, minute) = parse_canonical_schedule_time(time)?;
             let entries = weekdays
                 .iter()
                 .map(|weekday| {
@@ -323,19 +326,6 @@ fn schedule_id_from_launchd_path(path: &Path) -> Option<String> {
             .strip_prefix(MANAGED_LABEL_PREFIX)
             .map(ToString::to_string)
     })
-}
-
-fn parse_canonical_time(time: &str) -> Result<(u32, u32)> {
-    let (hour, minute) = time
-        .split_once(':')
-        .ok_or_else(|| KboltError::InvalidInput(format!("invalid schedule time: {time}")))?;
-    let hour = hour
-        .parse::<u32>()
-        .map_err(|_| KboltError::InvalidInput(format!("invalid schedule time: {time}")))?;
-    let minute = minute
-        .parse::<u32>()
-        .map_err(|_| KboltError::InvalidInput(format!("invalid schedule time: {time}")))?;
-    Ok((hour, minute))
 }
 
 fn launchd_weekday(weekday: kbolt_types::ScheduleWeekday) -> u32 {

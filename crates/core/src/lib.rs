@@ -7,6 +7,7 @@ mod models;
 mod schedule_backend;
 mod schedule_state_store;
 mod schedule_store;
+mod schedule_support;
 pub mod storage;
 
 pub use error::{CoreError, Result};

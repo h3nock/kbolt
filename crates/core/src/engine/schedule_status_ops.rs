@@ -3,6 +3,7 @@ use crate::lock::LockMode;
 use crate::schedule_backend::{current_schedule_backend, inspect_schedule_backend};
 use crate::schedule_state_store::ScheduleRunStateStore;
 use crate::schedule_store::ScheduleCatalog;
+use crate::schedule_support::schedule_id_sort_key;
 use crate::Result;
 use kbolt_types::{
     KboltError, ScheduleOrphan, ScheduleScope, ScheduleState, ScheduleStatusEntry,
@@ -16,7 +17,7 @@ impl Engine {
         let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let backend = current_schedule_backend()?;
         let mut schedules = ScheduleCatalog::load(&self.config.config_dir)?.schedules;
-        schedules.sort_by_key(|schedule| schedule_id_number(&schedule.id));
+        schedules.sort_by_key(|schedule| schedule_id_sort_key(&schedule.id));
 
         let inspection =
             inspect_schedule_backend(&self.config.config_dir, &self.config.cache_dir, &schedules)?;
@@ -81,10 +82,4 @@ impl Engine {
             }
         }
     }
-}
-
-fn schedule_id_number(id: &str) -> u32 {
-    id.strip_prefix('s')
-        .and_then(|raw| raw.parse::<u32>().ok())
-        .unwrap_or(u32::MAX)
 }

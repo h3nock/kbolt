@@ -10,6 +10,7 @@ use crate::lock::LockMode;
 use crate::schedule_backend::{current_schedule_backend, reconcile_schedule_backend};
 use crate::schedule_state_store::ScheduleRunStateStore;
 use crate::schedule_store::ScheduleCatalog;
+use crate::schedule_support::{schedule_id_number, schedule_id_sort_key};
 use crate::Result;
 
 use super::Engine;
@@ -77,7 +78,7 @@ impl Engine {
     pub fn list_schedules(&self) -> Result<Vec<ScheduleDefinition>> {
         let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let mut schedules = ScheduleCatalog::load(&self.config.config_dir)?.schedules;
-        schedules.sort_by_key(|schedule| schedule_id_number(&schedule.id));
+        schedules.sort_by_key(|schedule| schedule_id_sort_key(&schedule.id));
         Ok(schedules)
     }
 
@@ -198,7 +199,7 @@ impl Engine {
                     .filter(|schedule| schedule.scope == normalized_scope)
                     .map(|schedule| schedule.id.clone())
                     .collect::<Vec<_>>();
-                matches.sort_by_key(|id| schedule_id_number(id));
+                matches.sort_by_key(|id| schedule_id_sort_key(id));
 
                 match matches.len() {
                     0 => Err(KboltError::InvalidInput(
@@ -401,17 +402,11 @@ fn normalize_schedule_id(id: &str) -> Result<String> {
         return Err(KboltError::InvalidInput("schedule id must not be empty".to_string()).into());
     }
 
-    if schedule_id_number(&normalized) == 0 {
+    if schedule_id_number(&normalized).is_none() {
         return Err(KboltError::InvalidInput(format!("invalid schedule id: {id}")).into());
     }
 
     Ok(normalized)
-}
-
-fn schedule_id_number(id: &str) -> u32 {
-    id.strip_prefix('s')
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(0)
 }
 
 fn ensure_schedule_backend_supported() -> Result<()> {
