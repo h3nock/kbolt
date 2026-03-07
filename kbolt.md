@@ -40,7 +40,7 @@ kbolt mcp                → process starts, stays alive for MCP client session,
 
 No process running between commands. Models live as long as the process — loaded on first use within a session, freed when the process exits. MCP sessions keep models warm naturally (process stays alive). CLI commands cold-start if dense/reranking is needed.
 
-Scheduled indexing via OS-level schedulers (cron/launchd), set up by `kbolt schedule` helper command.
+Scheduled indexing uses OS-managed jobs: launchd on macOS and systemd user timers on Linux. `kbolt schedule` manages those artifacts from persisted schedule definitions.
 
 V2 extension path: `kbolt serve` daemon (HTTP + MCP). CLI would check "is daemon running?" and send requests to it instead of creating a local Engine. Core modules don't change — only the CLI adapter adds a daemon-check wrapper, plus a new HTTP crate.
 
@@ -1113,6 +1113,7 @@ Key type:       u64 (chunk_id from SQLite)
 ```
 ~/.config/kbolt/
     index.toml              # system config (models, reaping, default space)
+    schedules.toml          # persisted schedule definitions (machine-managed)
     ignores/                # ignore patterns (internal, not in user directories)
         {space}/
             {collection}.ignore   # .gitignore syntax, per-collection
@@ -1127,6 +1128,8 @@ Key type:       u64 (chunk_id from SQLite)
         embedder/           # embedder role artifacts
         reranker/           # reranker role artifacts
         expander/           # query-expander role artifacts
+    schedules/              # per-schedule run state
+        s1.json             # last_started / last_finished / last_result / last_error
 ```
 
 SQLite is shared globally (one database for all spaces). Tantivy and USearch are per-space — each space has its own index directory under `~/.cache/kbolt/spaces/{space_name}/`. This gives each space independent BM25 IDF statistics, preventing one space's content from skewing another's keyword search quality.
@@ -1450,7 +1453,7 @@ This two-level check (mtime first, hash second) means a "nothing changed" scan i
 **Freshness mechanisms**:
 
 - **Manual**: `kbolt update` (or scoped: `--space`, `--collection`)
-- **Scheduled**: `kbolt schedule --every {interval}` creates a cron job / launchd plist
+- **Scheduled**: `kbolt schedule add ...` persists a schedule and reconciles launchd/systemd user timer artifacts
 - **On collection add**: `kbolt collection add` triggers indexing immediately (unless `--no-index`)
 
 ### Staleness Transparency
@@ -1655,7 +1658,9 @@ USAGE: kbolt <command> [options]
 
 GLOBAL FLAGS
   -s, --space <name>               Set active space (overrides KBOLT_SPACE and default)
+                                   Does not apply to `schedule`, which has its own subcommand-level scope flags
   -f, --format <fmt>               Output: cli|json (default: cli)
+                                   Applies to all standard commands except `kbolt mcp`
 
 SEARCH (one command, mode flags)
   kbolt search <query>              Smart hybrid search (routes by query type)
@@ -1719,17 +1724,23 @@ MODELS
   kbolt models list                 Show model status
 
 SCHEDULING
-  kbolt schedule --every <interval> Set up recurring re-index (e.g. 6h, 30m)
-    --no-embed                     FTS-only re-index (faster)
-    --at <time>                    Daily at specific time (e.g. 03:00)
-  kbolt schedule --off              Remove the schedule
-  kbolt schedule --status           Show current schedule
+  kbolt schedule add --every <interval>
+                                   Set up recurring re-index (minutes/hours only, minimum 5m)
+  kbolt schedule add --at <time>
+                                   Run daily at a local time (`HH:MM`, `3pm`, `3:00pm`)
+  kbolt schedule add --on <day,...> --at <time>
+                                   Run weekly on selected weekdays
+    --space <name>                 Scope to a space
+    --collection <name>            Scope to one collection; repeat for more than one
+  kbolt schedule status            Show saved schedules, backend state, run state, and orphans
+  kbolt schedule remove <id>       Remove one schedule by short id (`s1`, `s2`, ...)
+  kbolt schedule remove --all      Remove all schedules
 
 ADMIN
   kbolt status                      Index health, space/collection stats, disk usage
 ```
 
-Scheduling uses OS-level mechanisms: launchd plist on macOS, cron/systemd timer on Linux. `kbolt schedule` creates the appropriate config for the platform.
+Scheduling uses OS-level mechanisms: launchd jobs on macOS and systemd user timers on Linux. `kbolt schedule add/remove` reconciles those managed artifacts from `~/.config/kbolt/schedules.toml`, and `kbolt schedule status` reports drift or orphaned backend artifacts.
 
 Space resolution for commands that need a space context (collection add/remove/rename, search with `--collection`, ignore, ls): `--space` flag > `KBOLT_SPACE` env var > configured default > unique lookup > error. Commands that operate on all data by default (update without `--collection`, search without `--collection`, status) scan all spaces unless `--space` is provided.
 
