@@ -18,6 +18,7 @@ impl Engine {
             reactivated: 0,
             reaped: 0,
             embedded: 0,
+            decisions: Vec::new(),
             errors: Vec::new(),
             elapsed_ms: 0,
         };
