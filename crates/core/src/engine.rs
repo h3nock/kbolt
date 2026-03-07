@@ -28,6 +28,7 @@ mod file_utils;
 mod ignore_helpers;
 mod ignore_ops;
 mod path_utils;
+mod schedule_ops;
 mod scoring;
 mod search_ops;
 mod text_helpers;

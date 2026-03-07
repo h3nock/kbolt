@@ -13,8 +13,10 @@ use crate::ingest::chunk::FinalChunkKind;
 use crate::storage::Storage;
 use crate::ModelPullEvent;
 use kbolt_types::{
-    ActiveSpaceSource, AddCollectionRequest, GetRequest, KboltError, Locator, MultiGetRequest,
-    OmitReason, SearchMode, SearchRequest, UpdateDecisionKind, UpdateOptions,
+    ActiveSpaceSource, AddCollectionRequest, AddScheduleRequest, GetRequest, KboltError, Locator,
+    MultiGetRequest, OmitReason, RemoveScheduleRequest, RemoveScheduleSelector, ScheduleBackend,
+    ScheduleInterval, ScheduleIntervalUnit, ScheduleScope, ScheduleTrigger, ScheduleWeekday,
+    SearchMode, SearchRequest, UpdateDecisionKind, UpdateOptions,
 };
 
 #[derive(Default)]
@@ -276,6 +278,23 @@ fn write_text_file(path: &std::path::Path, text: &str) {
         std::fs::create_dir_all(parent).expect("create parent directories");
     }
     std::fs::write(path, text).expect("write file");
+}
+
+fn expected_schedule_backend() -> ScheduleBackend {
+    #[cfg(target_os = "macos")]
+    {
+        ScheduleBackend::Launchd
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        ScheduleBackend::SystemdUser
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        panic!("schedule backend is unsupported on this platform")
+    }
 }
 
 #[test]
@@ -3759,4 +3778,297 @@ fn pull_models_with_progress_emits_already_present_events() {
             },
         ]
     );
+}
+
+#[test]
+fn add_schedule_normalizes_trigger_scope_and_assigns_short_ids() {
+    let engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+
+    let root = tempdir().expect("create temp root");
+    let api_path = root.path().join("api");
+    let docs_path = root.path().join("docs");
+    std::fs::create_dir_all(&api_path).expect("create api dir");
+    std::fs::create_dir_all(&docs_path).expect("create docs dir");
+    add_collection_fixture(&engine, "work", "api", api_path);
+    add_collection_fixture(&engine, "work", "docs", docs_path);
+
+    let first = engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Weekly {
+                weekdays: vec![
+                    ScheduleWeekday::Fri,
+                    ScheduleWeekday::Mon,
+                    ScheduleWeekday::Mon,
+                ],
+                time: "3:00 pm".to_string(),
+            },
+            scope: ScheduleScope::Collections {
+                space: " work ".to_string(),
+                collections: vec!["docs".to_string(), "api".to_string(), "docs".to_string()],
+            },
+        })
+        .expect("add weekly schedule");
+    assert_eq!(first.backend, expected_schedule_backend());
+    assert_eq!(first.schedule.id, "s1");
+    assert_eq!(
+        first.schedule.trigger,
+        ScheduleTrigger::Weekly {
+            weekdays: vec![ScheduleWeekday::Mon, ScheduleWeekday::Fri],
+            time: "15:00".to_string(),
+        }
+    );
+    assert_eq!(
+        first.schedule.scope,
+        ScheduleScope::Collections {
+            space: "work".to_string(),
+            collections: vec!["api".to_string(), "docs".to_string()],
+        }
+    );
+
+    let second = engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Every {
+                interval: ScheduleInterval {
+                    value: 2,
+                    unit: ScheduleIntervalUnit::Hours,
+                },
+            },
+            scope: ScheduleScope::All,
+        })
+        .expect("add interval schedule");
+    assert_eq!(second.schedule.id, "s2");
+
+    let schedules = engine.list_schedules().expect("list schedules");
+    assert_eq!(schedules.len(), 2);
+    assert_eq!(schedules[0], first.schedule);
+    assert_eq!(schedules[1], second.schedule);
+}
+
+#[test]
+fn add_schedule_rejects_duplicate_after_normalization() {
+    let engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+
+    let first = engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Daily {
+                time: "3pm".to_string(),
+            },
+            scope: ScheduleScope::Space {
+                space: "work".to_string(),
+            },
+        })
+        .expect("add first schedule");
+    assert_eq!(first.schedule.id, "s1");
+
+    let err = engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Daily {
+                time: "15:00".to_string(),
+            },
+            scope: ScheduleScope::Space {
+                space: " work ".to_string(),
+            },
+        })
+        .expect_err("duplicate schedule should fail");
+    match KboltError::from(err) {
+        KboltError::InvalidInput(message) => {
+            assert!(
+                message.contains("schedule already exists: s1"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn add_schedule_rejects_short_intervals_and_missing_targets() {
+    let engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+
+    let short_interval = engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Every {
+                interval: ScheduleInterval {
+                    value: 4,
+                    unit: ScheduleIntervalUnit::Minutes,
+                },
+            },
+            scope: ScheduleScope::All,
+        })
+        .expect_err("interval shorter than 5m should fail");
+    match KboltError::from(short_interval) {
+        KboltError::InvalidInput(message) => {
+            assert!(
+                message.contains("at least 5 minutes"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+
+    let missing_collection = engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Daily {
+                time: "09:00".to_string(),
+            },
+            scope: ScheduleScope::Collections {
+                space: "work".to_string(),
+                collections: vec!["missing".to_string()],
+            },
+        })
+        .expect_err("missing collection should fail");
+    match KboltError::from(missing_collection) {
+        KboltError::CollectionNotFound { name } => assert_eq!(name, "missing"),
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn remove_schedule_by_id_and_unique_scope_updates_catalog() {
+    let engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+
+    let root = tempdir().expect("create temp root");
+    let api_path = root.path().join("api");
+    std::fs::create_dir_all(&api_path).expect("create api dir");
+    add_collection_fixture(&engine, "work", "api", api_path);
+
+    engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Daily {
+                time: "08:00".to_string(),
+            },
+            scope: ScheduleScope::Space {
+                space: "work".to_string(),
+            },
+        })
+        .expect("add space schedule");
+    engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Every {
+                interval: ScheduleInterval {
+                    value: 30,
+                    unit: ScheduleIntervalUnit::Minutes,
+                },
+            },
+            scope: ScheduleScope::Collections {
+                space: "work".to_string(),
+                collections: vec!["api".to_string()],
+            },
+        })
+        .expect("add collection schedule");
+
+    let removed_by_id = engine
+        .remove_schedule(RemoveScheduleRequest {
+            selector: RemoveScheduleSelector::Id {
+                id: "s1".to_string(),
+            },
+        })
+        .expect("remove schedule by id");
+    assert_eq!(removed_by_id.removed_ids, vec!["s1".to_string()]);
+
+    let removed_by_scope = engine
+        .remove_schedule(RemoveScheduleRequest {
+            selector: RemoveScheduleSelector::Scope {
+                scope: ScheduleScope::Collections {
+                    space: " work ".to_string(),
+                    collections: vec!["api".to_string(), "api".to_string()],
+                },
+            },
+        })
+        .expect("remove schedule by scope");
+    assert_eq!(removed_by_scope.removed_ids, vec!["s2".to_string()]);
+
+    let schedules = engine.list_schedules().expect("list schedules");
+    assert!(schedules.is_empty(), "all schedules should be removed");
+}
+
+#[test]
+fn remove_schedule_by_scope_errors_when_multiple_schedules_match() {
+    let engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+
+    engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Daily {
+                time: "08:00".to_string(),
+            },
+            scope: ScheduleScope::Space {
+                space: "work".to_string(),
+            },
+        })
+        .expect("add first schedule");
+    engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Daily {
+                time: "17:00".to_string(),
+            },
+            scope: ScheduleScope::Space {
+                space: "work".to_string(),
+            },
+        })
+        .expect("add second schedule");
+
+    let err = engine
+        .remove_schedule(RemoveScheduleRequest {
+            selector: RemoveScheduleSelector::Scope {
+                scope: ScheduleScope::Space {
+                    space: "work".to_string(),
+                },
+            },
+        })
+        .expect_err("ambiguous scope removal should fail");
+    match KboltError::from(err) {
+        KboltError::InvalidInput(message) => {
+            assert!(
+                message.contains("multiple schedules"),
+                "unexpected message: {message}"
+            );
+            assert!(message.contains("s1, s2"), "unexpected message: {message}");
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn remove_schedule_by_scope_does_not_require_targets_to_still_exist() {
+    let engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+
+    let root = tempdir().expect("create temp root");
+    let api_path = root.path().join("api");
+    std::fs::create_dir_all(&api_path).expect("create api dir");
+    add_collection_fixture(&engine, "work", "api", api_path);
+
+    engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Daily {
+                time: "09:00".to_string(),
+            },
+            scope: ScheduleScope::Collections {
+                space: "work".to_string(),
+                collections: vec!["api".to_string()],
+            },
+        })
+        .expect("add collection schedule");
+
+    engine
+        .remove_collection(Some("work"), "api")
+        .expect("remove collection target");
+
+    let removed = engine
+        .remove_schedule(RemoveScheduleRequest {
+            selector: RemoveScheduleSelector::Scope {
+                scope: ScheduleScope::Collections {
+                    space: "work".to_string(),
+                    collections: vec!["api".to_string()],
+                },
+            },
+        })
+        .expect("remove schedule after target deletion");
+    assert_eq!(removed.removed_ids, vec!["s1".to_string()]);
+    assert!(engine.list_schedules().expect("list schedules").is_empty());
 }
