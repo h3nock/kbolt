@@ -4,9 +4,11 @@ use kbolt_core::engine::Engine;
 use kbolt_core::ModelPullEvent;
 use kbolt_core::Result;
 use kbolt_types::{
-    ActiveSpaceSource, AddCollectionRequest, GetRequest, KboltError, Locator, MultiGetRequest,
-    OmitReason, SearchMode, SearchRequest, UpdateDecision, UpdateDecisionKind, UpdateOptions,
-    UpdateReport,
+    ActiveSpaceSource, AddCollectionRequest, AddScheduleRequest, GetRequest, KboltError, Locator,
+    MultiGetRequest, OmitReason, RemoveScheduleRequest, ScheduleAddResponse, ScheduleBackend,
+    ScheduleInterval, ScheduleIntervalUnit, ScheduleRunResult, ScheduleScope, ScheduleState,
+    ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode, SearchRequest,
+    UpdateDecision, UpdateDecisionKind, UpdateOptions, UpdateReport,
 };
 
 pub struct CliAdapter {
@@ -587,6 +589,21 @@ impl CliAdapter {
         Ok(format_update_report(&report, verbose))
     }
 
+    pub fn schedule_add(&self, req: AddScheduleRequest) -> Result<String> {
+        let response = self.engine.add_schedule(req)?;
+        Ok(format_schedule_add_response(&response))
+    }
+
+    pub fn schedule_status(&self) -> Result<String> {
+        let response = self.engine.schedule_status()?;
+        Ok(format_schedule_status_response(&response))
+    }
+
+    pub fn schedule_remove(&self, req: RemoveScheduleRequest) -> Result<String> {
+        let response = self.engine.remove_schedule(req)?;
+        Ok(format_schedule_remove_response(&response))
+    }
+
     pub fn status(&self, space: Option<&str>) -> Result<String> {
         let status = self.engine.status(space)?;
         let mut lines = Vec::new();
@@ -904,6 +921,166 @@ fn parse_editor_command(raw: &str) -> Result<Vec<String>> {
     Ok(args)
 }
 
+fn format_schedule_add_response(response: &ScheduleAddResponse) -> String {
+    format!(
+        "schedule added: {}\ntrigger: {}\nscope: {}\nbackend: {}",
+        response.schedule.id,
+        format_schedule_trigger(&response.schedule.trigger),
+        format_schedule_scope(&response.schedule.scope),
+        format_schedule_backend(response.backend),
+    )
+}
+
+fn format_schedule_status_response(response: &ScheduleStatusResponse) -> String {
+    let mut lines = Vec::new();
+    lines.push("schedules:".to_string());
+    if response.schedules.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for entry in &response.schedules {
+            lines.push(format!(
+                "- {} | {} | {} | {} | {}",
+                entry.schedule.id,
+                format_schedule_trigger(&entry.schedule.trigger),
+                format_schedule_scope(&entry.schedule.scope),
+                format_schedule_backend(entry.backend),
+                format_schedule_state(entry.state),
+            ));
+            lines.push(format!(
+                "  last_started: {}",
+                entry.run_state.last_started.as_deref().unwrap_or("never")
+            ));
+            lines.push(format!(
+                "  last_finished: {}",
+                entry.run_state.last_finished.as_deref().unwrap_or("never")
+            ));
+            lines.push(format!(
+                "  last_result: {}",
+                format_schedule_run_result(entry.run_state.last_result)
+            ));
+            if let Some(error) = entry.run_state.last_error.as_deref() {
+                lines.push(format!("  last_error: {error}"));
+            }
+        }
+    }
+
+    lines.push("orphans:".to_string());
+    if response.orphans.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for orphan in &response.orphans {
+            lines.push(format!(
+                "- {} ({})",
+                orphan.id,
+                format_schedule_backend(orphan.backend)
+            ));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn format_schedule_remove_response(response: &kbolt_types::ScheduleRemoveResponse) -> String {
+    if response.removed_ids.is_empty() {
+        return "removed schedules: none".to_string();
+    }
+
+    format!("removed schedules: {}", response.removed_ids.join(", "))
+}
+
+fn format_schedule_trigger(trigger: &ScheduleTrigger) -> String {
+    match trigger {
+        ScheduleTrigger::Every { interval } => format_schedule_interval(interval),
+        ScheduleTrigger::Daily { time } => format!("daily at {}", format_schedule_time(time)),
+        ScheduleTrigger::Weekly { weekdays, time } => format!(
+            "{} at {}",
+            format_schedule_weekdays(weekdays),
+            format_schedule_time(time)
+        ),
+    }
+}
+
+fn format_schedule_interval(interval: &ScheduleInterval) -> String {
+    let suffix = match interval.unit {
+        ScheduleIntervalUnit::Minutes => "m",
+        ScheduleIntervalUnit::Hours => "h",
+    };
+    format!("every {}{suffix}", interval.value)
+}
+
+fn format_schedule_scope(scope: &ScheduleScope) -> String {
+    match scope {
+        ScheduleScope::All => "all spaces".to_string(),
+        ScheduleScope::Space { space } => format!("space {space}"),
+        ScheduleScope::Collections { space, collections } => collections
+            .iter()
+            .map(|collection| format!("{space}/{collection}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+fn format_schedule_backend(backend: ScheduleBackend) -> &'static str {
+    match backend {
+        ScheduleBackend::Launchd => "launchd",
+        ScheduleBackend::SystemdUser => "systemd-user",
+    }
+}
+
+fn format_schedule_state(state: ScheduleState) -> &'static str {
+    match state {
+        ScheduleState::Installed => "installed",
+        ScheduleState::Drifted => "drifted",
+        ScheduleState::TargetMissing => "target_missing",
+    }
+}
+
+fn format_schedule_run_result(result: Option<ScheduleRunResult>) -> &'static str {
+    match result {
+        Some(ScheduleRunResult::Success) => "success",
+        Some(ScheduleRunResult::SkippedLock) => "skipped_lock",
+        Some(ScheduleRunResult::Failed) => "failed",
+        None => "never",
+    }
+}
+
+fn format_schedule_weekdays(weekdays: &[ScheduleWeekday]) -> String {
+    weekdays
+        .iter()
+        .map(|weekday| match weekday {
+            ScheduleWeekday::Mon => "mon",
+            ScheduleWeekday::Tue => "tue",
+            ScheduleWeekday::Wed => "wed",
+            ScheduleWeekday::Thu => "thu",
+            ScheduleWeekday::Fri => "fri",
+            ScheduleWeekday::Sat => "sat",
+            ScheduleWeekday::Sun => "sun",
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_schedule_time(time: &str) -> String {
+    let Some((hour, minute)) = time.split_once(':') else {
+        return time.to_string();
+    };
+    let Ok(mut hour) = hour.parse::<u32>() else {
+        return time.to_string();
+    };
+    let Ok(minute) = minute.parse::<u32>() else {
+        return time.to_string();
+    };
+
+    let meridiem = if hour >= 12 { "PM" } else { "AM" };
+    if hour == 0 {
+        hour = 12;
+    } else if hour > 12 {
+        hour -= 12;
+    }
+
+    format!("{hour}:{minute:02} {meridiem}")
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
@@ -916,11 +1093,16 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        parse_editor_command, resolve_editor_command, resolve_no_rerank_for_mode, CliAdapter,
-        CliSearchOptions,
+        format_schedule_add_response, format_schedule_status_response, parse_editor_command,
+        resolve_editor_command, resolve_no_rerank_for_mode, CliAdapter, CliSearchOptions,
     };
     use kbolt_core::engine::Engine;
-    use kbolt_types::{AddCollectionRequest, SearchMode};
+    use kbolt_types::{
+        AddCollectionRequest, ScheduleAddResponse, ScheduleBackend, ScheduleDefinition,
+        ScheduleInterval, ScheduleIntervalUnit, ScheduleOrphan, ScheduleRunResult,
+        ScheduleRunState, ScheduleScope, ScheduleState, ScheduleStatusEntry,
+        ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode,
+    };
 
     const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";
 
@@ -2859,5 +3041,64 @@ mod tests {
                 "unexpected output: {output}"
             );
         });
+    }
+
+    #[test]
+    fn format_schedule_add_response_renders_trigger_scope_and_backend() {
+        let output = format_schedule_add_response(&ScheduleAddResponse {
+            schedule: ScheduleDefinition {
+                id: "s1".to_string(),
+                trigger: ScheduleTrigger::Every {
+                    interval: ScheduleInterval {
+                        value: 30,
+                        unit: ScheduleIntervalUnit::Minutes,
+                    },
+                },
+                scope: ScheduleScope::All,
+            },
+            backend: ScheduleBackend::Launchd,
+        });
+
+        assert_eq!(
+            output,
+            "schedule added: s1\ntrigger: every 30m\nscope: all spaces\nbackend: launchd"
+        );
+    }
+
+    #[test]
+    fn format_schedule_status_response_renders_entries_and_orphans() {
+        let output = format_schedule_status_response(&ScheduleStatusResponse {
+            schedules: vec![ScheduleStatusEntry {
+                schedule: ScheduleDefinition {
+                    id: "s2".to_string(),
+                    trigger: ScheduleTrigger::Weekly {
+                        weekdays: vec![ScheduleWeekday::Mon, ScheduleWeekday::Fri],
+                        time: "15:00".to_string(),
+                    },
+                    scope: ScheduleScope::Collections {
+                        space: "work".to_string(),
+                        collections: vec!["api".to_string(), "docs".to_string()],
+                    },
+                },
+                backend: ScheduleBackend::Launchd,
+                state: ScheduleState::Drifted,
+                run_state: ScheduleRunState {
+                    last_started: Some("2026-03-07T20:00:00Z".to_string()),
+                    last_finished: Some("2026-03-07T20:00:05Z".to_string()),
+                    last_result: Some(ScheduleRunResult::SkippedLock),
+                    last_error: None,
+                },
+            }],
+            orphans: vec![ScheduleOrphan {
+                id: "s9".to_string(),
+                backend: ScheduleBackend::Launchd,
+            }],
+        });
+
+        assert!(output.contains(
+            "schedules:\n- s2 | mon,fri at 3:00 PM | work/api, work/docs | launchd | drifted"
+        ));
+        assert!(output.contains("last_result: skipped_lock"));
+        assert!(output.contains("orphans:\n- s9 (launchd)"));
     }
 }

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
@@ -32,6 +32,7 @@ pub enum Command {
     Collection(CollectionArgs),
     Ignore(IgnoreArgs),
     Models(ModelsArgs),
+    Schedule(ScheduleArgs),
     Mcp,
     Search(SearchArgs),
     Update(UpdateArgs),
@@ -63,6 +64,12 @@ pub struct IgnoreArgs {
 pub struct ModelsArgs {
     #[command(subcommand)]
     pub command: ModelsCommand,
+}
+
+#[derive(Debug, Args)]
+pub struct ScheduleArgs {
+    #[command(subcommand)]
+    pub command: ScheduleCommand,
 }
 
 #[derive(Debug, Args, PartialEq, Eq)]
@@ -203,6 +210,59 @@ pub enum ModelsCommand {
     Pull,
 }
 
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum ScheduleCommand {
+    Add(ScheduleAddArgs),
+    Status,
+    Remove(ScheduleRemoveArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ScheduleDayArg {
+    Mon,
+    Tue,
+    Wed,
+    Thu,
+    Fri,
+    Sat,
+    Sun,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+#[command(group(
+    ArgGroup::new("trigger")
+        .required(true)
+        .args(["every", "at"])
+))]
+pub struct ScheduleAddArgs {
+    #[arg(long, conflicts_with = "at")]
+    pub every: Option<String>,
+    #[arg(long, conflicts_with = "every")]
+    pub at: Option<String>,
+    #[arg(long = "on", value_delimiter = ',', requires = "at", value_enum)]
+    pub on: Vec<ScheduleDayArg>,
+    #[arg(long)]
+    pub space: Option<String>,
+    #[arg(long = "collection", requires = "space")]
+    pub collections: Vec<String>,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+#[command(group(
+    ArgGroup::new("selector")
+        .required(true)
+        .args(["id", "all", "space"])
+))]
+pub struct ScheduleRemoveArgs {
+    pub id: Option<String>,
+    #[arg(long, conflicts_with_all = ["id", "space", "collections"])]
+    pub all: bool,
+    #[arg(long, conflicts_with = "id")]
+    pub space: Option<String>,
+    #[arg(long = "collection", requires = "space", conflicts_with = "id")]
+    pub collections: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -211,7 +271,8 @@ mod tests {
 
     use super::{
         Cli, CollectionCommand, Command, GetArgs, IgnoreCommand, LsArgs, ModelsCommand,
-        MultiGetArgs, OutputFormat, SearchArgs, SpaceCommand, UpdateArgs,
+        MultiGetArgs, OutputFormat, ScheduleAddArgs, ScheduleCommand, ScheduleDayArg,
+        ScheduleRemoveArgs, SearchArgs, SpaceCommand, UpdateArgs,
     };
 
     #[test]
@@ -243,6 +304,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -279,6 +341,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -318,6 +381,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -348,6 +412,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -370,6 +435,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -397,6 +463,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -422,6 +489,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -449,6 +517,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -474,6 +543,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -494,6 +564,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -519,6 +590,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -540,6 +612,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -562,6 +635,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -604,6 +678,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -630,6 +705,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -658,6 +734,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -685,6 +762,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -711,6 +789,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -736,6 +815,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -763,6 +843,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -790,6 +871,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -810,6 +892,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -835,6 +918,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -863,6 +947,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -902,6 +987,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -921,6 +1007,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
 
@@ -938,6 +1025,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -964,6 +1052,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
 
@@ -988,6 +1077,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -1014,6 +1104,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
 
@@ -1040,6 +1131,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -1067,6 +1159,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
 
@@ -1101,6 +1194,7 @@ mod tests {
             Command::Models(_) => panic!("unexpected models command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -1121,6 +1215,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -1141,6 +1236,7 @@ mod tests {
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Mcp => panic!("unexpected mcp command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -1176,6 +1272,7 @@ mod tests {
             Command::Ls(_) => panic!("unexpected ls command"),
             Command::Get(_) => panic!("unexpected get command"),
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
         }
 
         let parsed = Cli::try_parse_from([
@@ -1223,6 +1320,7 @@ mod tests {
             Command::Ls(_) => panic!("unexpected ls command"),
             Command::Get(_) => panic!("unexpected get command"),
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
         }
     }
 
@@ -1242,6 +1340,7 @@ mod tests {
             Command::Get(_) => panic!("unexpected get command"),
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
             Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
             Command::Search(_) => panic!("unexpected search command"),
         }
     }
@@ -1266,6 +1365,141 @@ mod tests {
             Command::Ls(_) => panic!("unexpected ls command"),
             Command::Get(_) => panic!("unexpected get command"),
             Command::MultiGet(_) => panic!("unexpected multi-get command"),
+            Command::Schedule(_) => panic!("unexpected schedule command"),
+        }
+    }
+
+    #[test]
+    fn parses_schedule_add_interval_and_weekly_variants() {
+        let parsed = Cli::try_parse_from(["kbolt", "schedule", "add", "--every", "30m"])
+            .expect("parse interval schedule add");
+
+        match parsed.command {
+            Command::Schedule(schedule) => assert_eq!(
+                schedule.command,
+                ScheduleCommand::Add(ScheduleAddArgs {
+                    every: Some("30m".to_string()),
+                    at: None,
+                    on: vec![],
+                    space: None,
+                    collections: vec![],
+                })
+            ),
+            Command::Space(_) => panic!("unexpected space command"),
+            Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Models(_) => panic!("unexpected models command"),
+            Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
+            Command::Get(_) => panic!("unexpected get command"),
+            Command::MultiGet(_) => panic!("unexpected multi-get command"),
+            Command::Search(_) => panic!("unexpected search command"),
+        }
+
+        let parsed = Cli::try_parse_from([
+            "kbolt",
+            "schedule",
+            "add",
+            "--at",
+            "3pm",
+            "--on",
+            "mon,fri",
+            "--space",
+            "work",
+            "--collection",
+            "api",
+            "--collection",
+            "docs",
+        ])
+        .expect("parse weekly schedule add");
+
+        match parsed.command {
+            Command::Schedule(schedule) => assert_eq!(
+                schedule.command,
+                ScheduleCommand::Add(ScheduleAddArgs {
+                    every: None,
+                    at: Some("3pm".to_string()),
+                    on: vec![ScheduleDayArg::Mon, ScheduleDayArg::Fri],
+                    space: Some("work".to_string()),
+                    collections: vec!["api".to_string(), "docs".to_string()],
+                })
+            ),
+            Command::Space(_) => panic!("unexpected space command"),
+            Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Models(_) => panic!("unexpected models command"),
+            Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
+            Command::Get(_) => panic!("unexpected get command"),
+            Command::MultiGet(_) => panic!("unexpected multi-get command"),
+            Command::Search(_) => panic!("unexpected search command"),
+        }
+    }
+
+    #[test]
+    fn parses_schedule_remove_selectors() {
+        let parsed = Cli::try_parse_from(["kbolt", "schedule", "remove", "s2"])
+            .expect("parse id schedule removal");
+
+        match parsed.command {
+            Command::Schedule(schedule) => assert_eq!(
+                schedule.command,
+                ScheduleCommand::Remove(ScheduleRemoveArgs {
+                    id: Some("s2".to_string()),
+                    all: false,
+                    space: None,
+                    collections: vec![],
+                })
+            ),
+            Command::Space(_) => panic!("unexpected space command"),
+            Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Models(_) => panic!("unexpected models command"),
+            Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
+            Command::Get(_) => panic!("unexpected get command"),
+            Command::MultiGet(_) => panic!("unexpected multi-get command"),
+            Command::Search(_) => panic!("unexpected search command"),
+        }
+
+        let parsed = Cli::try_parse_from([
+            "kbolt",
+            "schedule",
+            "remove",
+            "--space",
+            "work",
+            "--collection",
+            "api",
+        ])
+        .expect("parse scoped schedule removal");
+
+        match parsed.command {
+            Command::Schedule(schedule) => assert_eq!(
+                schedule.command,
+                ScheduleCommand::Remove(ScheduleRemoveArgs {
+                    id: None,
+                    all: false,
+                    space: Some("work".to_string()),
+                    collections: vec!["api".to_string()],
+                })
+            ),
+            Command::Space(_) => panic!("unexpected space command"),
+            Command::Collection(_) => panic!("unexpected collection command"),
+            Command::Models(_) => panic!("unexpected models command"),
+            Command::Mcp => panic!("unexpected mcp command"),
+            Command::Ignore(_) => panic!("unexpected ignore command"),
+            Command::Update(_) => panic!("unexpected update command"),
+            Command::Status => panic!("unexpected status command"),
+            Command::Ls(_) => panic!("unexpected ls command"),
+            Command::Get(_) => panic!("unexpected get command"),
+            Command::MultiGet(_) => panic!("unexpected multi-get command"),
+            Command::Search(_) => panic!("unexpected search command"),
         }
     }
 }

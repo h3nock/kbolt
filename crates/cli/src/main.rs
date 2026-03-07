@@ -2,8 +2,8 @@ use std::ffi::OsString;
 
 use clap::Parser;
 use kbolt_cli::args::{
-    Cli, CollectionCommand, Command, IgnoreCommand, ModelsCommand, OutputFormat, SearchArgs,
-    SpaceCommand,
+    Cli, CollectionCommand, Command, IgnoreCommand, ModelsCommand, OutputFormat, ScheduleAddArgs,
+    ScheduleCommand, ScheduleDayArg, ScheduleRemoveArgs, SearchArgs, SpaceCommand,
 };
 use kbolt_cli::{resolve_no_rerank_for_mode, CliAdapter, CliSearchOptions};
 use kbolt_core::config;
@@ -12,8 +12,10 @@ use kbolt_core::error::CoreError;
 use kbolt_mcp::stdio;
 use kbolt_mcp::McpAdapter;
 use kbolt_types::{
-    ActiveSpace, CollectionInfo, FileEntry, GetRequest, KboltError, Locator, ModelStatus,
-    MultiGetRequest, SearchMode, SearchRequest, SpaceInfo, UpdateOptions,
+    ActiveSpace, AddScheduleRequest, CollectionInfo, FileEntry, GetRequest, KboltError, Locator,
+    ModelStatus, MultiGetRequest, RemoveScheduleRequest, RemoveScheduleSelector, ScheduleInterval,
+    ScheduleIntervalUnit, ScheduleScope, ScheduleTrigger, ScheduleWeekday, SearchMode,
+    SearchRequest, SpaceInfo, UpdateOptions,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -261,6 +263,40 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
                 print_message(&line);
             }
         },
+        Command::Schedule(schedule) => {
+            ensure_schedule_uses_local_scope(cli.space.as_deref())?;
+            match schedule.command {
+                ScheduleCommand::Add(add) => {
+                    let request = schedule_add_request(add)?;
+                    if wants_json {
+                        let response = adapter.engine.add_schedule(request)?;
+                        emit_structured_output(&response)?;
+                    } else {
+                        let line = adapter.schedule_add(request)?;
+                        print_message(&line);
+                    }
+                }
+                ScheduleCommand::Status => {
+                    if wants_json {
+                        let response = adapter.engine.schedule_status()?;
+                        emit_structured_output(&response)?;
+                    } else {
+                        let line = adapter.schedule_status()?;
+                        print_text(&line);
+                    }
+                }
+                ScheduleCommand::Remove(remove) => {
+                    let request = schedule_remove_request(remove)?;
+                    if wants_json {
+                        let response = adapter.engine.remove_schedule(request)?;
+                        emit_structured_output(&response)?;
+                    } else {
+                        let line = adapter.schedule_remove(request)?;
+                        print_message(&line);
+                    }
+                }
+            }
+        }
         Command::Mcp => unreachable!("mcp command handled before adapter setup"),
         Command::Search(search) => {
             let requested_mode = requested_search_mode(&search);
@@ -558,6 +594,111 @@ fn requested_search_mode(search: &SearchArgs) -> RequestedSearchMode {
     }
 }
 
+fn ensure_schedule_uses_local_scope(space: Option<&str>) -> std::result::Result<(), RunError> {
+    if space.is_none() {
+        return Ok(());
+    }
+
+    Err(CoreError::Domain(KboltError::InvalidInput(
+        "schedule commands do not use the top-level --space flag; use schedule --space instead"
+            .to_string(),
+    ))
+    .into())
+}
+
+fn schedule_add_request(
+    args: ScheduleAddArgs,
+) -> std::result::Result<AddScheduleRequest, RunError> {
+    Ok(AddScheduleRequest {
+        trigger: schedule_trigger(&args)?,
+        scope: schedule_scope(args.space, args.collections),
+    })
+}
+
+fn schedule_remove_request(
+    args: ScheduleRemoveArgs,
+) -> std::result::Result<RemoveScheduleRequest, RunError> {
+    let selector = if args.all {
+        RemoveScheduleSelector::All
+    } else if let Some(id) = args.id {
+        RemoveScheduleSelector::Id { id }
+    } else {
+        RemoveScheduleSelector::Scope {
+            scope: schedule_scope(args.space, args.collections),
+        }
+    };
+
+    Ok(RemoveScheduleRequest { selector })
+}
+
+fn schedule_trigger(args: &ScheduleAddArgs) -> std::result::Result<ScheduleTrigger, RunError> {
+    if let Some(interval) = args.every.as_deref() {
+        return Ok(ScheduleTrigger::Every {
+            interval: parse_schedule_interval(interval)?,
+        });
+    }
+
+    let time = args.at.clone().ok_or_else(|| {
+        RunError::from(CoreError::Domain(KboltError::InvalidInput(
+            "schedule trigger requires --every or --at".to_string(),
+        )))
+    })?;
+    if args.on.is_empty() {
+        return Ok(ScheduleTrigger::Daily { time });
+    }
+
+    Ok(ScheduleTrigger::Weekly {
+        weekdays: args.on.iter().copied().map(schedule_weekday).collect(),
+        time,
+    })
+}
+
+fn schedule_scope(space: Option<String>, collections: Vec<String>) -> ScheduleScope {
+    match space {
+        Some(space) if collections.is_empty() => ScheduleScope::Space { space },
+        Some(space) => ScheduleScope::Collections { space, collections },
+        None => ScheduleScope::All,
+    }
+}
+
+fn parse_schedule_interval(raw: &str) -> std::result::Result<ScheduleInterval, RunError> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.len() < 2 {
+        return Err(invalid_schedule_interval(raw));
+    }
+
+    let (value, unit) = normalized.split_at(normalized.len() - 1);
+    let value = value
+        .parse::<u32>()
+        .map_err(|_| invalid_schedule_interval(raw))?;
+    let unit = match unit {
+        "m" => ScheduleIntervalUnit::Minutes,
+        "h" => ScheduleIntervalUnit::Hours,
+        _ => return Err(invalid_schedule_interval(raw)),
+    };
+
+    Ok(ScheduleInterval { value, unit })
+}
+
+fn invalid_schedule_interval(raw: &str) -> RunError {
+    CoreError::Domain(KboltError::InvalidInput(format!(
+        "invalid schedule interval '{raw}': use <minutes>m or <hours>h"
+    )))
+    .into()
+}
+
+fn schedule_weekday(day: ScheduleDayArg) -> ScheduleWeekday {
+    match day {
+        ScheduleDayArg::Mon => ScheduleWeekday::Mon,
+        ScheduleDayArg::Tue => ScheduleWeekday::Tue,
+        ScheduleDayArg::Wed => ScheduleWeekday::Wed,
+        ScheduleDayArg::Thu => ScheduleWeekday::Thu,
+        ScheduleDayArg::Fri => ScheduleWeekday::Fri,
+        ScheduleDayArg::Sat => ScheduleWeekday::Sat,
+        ScheduleDayArg::Sun => ScheduleWeekday::Sun,
+    }
+}
+
 fn is_model_not_available_error(err: &CoreError) -> bool {
     matches!(err, CoreError::Domain(KboltError::ModelNotAvailable { .. }))
 }
@@ -838,18 +979,25 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ensure_supported_output_format, is_model_not_available_error, parse_internal_schedule_run,
-        parse_pull_confirmation, render_error_output, render_message_output,
+        ensure_schedule_uses_local_scope, ensure_supported_output_format,
+        is_model_not_available_error, parse_internal_schedule_run, parse_pull_confirmation,
+        parse_schedule_interval, render_error_output, render_message_output,
         render_structured_output, requested_output_format_from_args, requested_search_mode,
-        should_offer_model_pull_for_collection_add, should_offer_model_pull_for_update,
-        should_show_first_run_models_hint, supports_interactive_output,
-        with_collection_add_model_missing_guidance, with_update_model_missing_guidance,
-        DefaultSpaceJsonResponse, IgnoreShowJsonResponse, RequestedSearchMode, RunError,
-        INTERNAL_SCHEDULE_RUN_COMMAND,
+        schedule_add_request, schedule_remove_request, should_offer_model_pull_for_collection_add,
+        should_offer_model_pull_for_update, should_show_first_run_models_hint,
+        supports_interactive_output, with_collection_add_model_missing_guidance,
+        with_update_model_missing_guidance, DefaultSpaceJsonResponse, IgnoreShowJsonResponse,
+        RequestedSearchMode, RunError, INTERNAL_SCHEDULE_RUN_COMMAND,
     };
-    use kbolt_cli::args::{Cli, Command, OutputFormat, SearchArgs};
+    use kbolt_cli::args::{
+        Cli, Command, OutputFormat, ScheduleAddArgs, ScheduleDayArg, ScheduleRemoveArgs, SearchArgs,
+    };
     use kbolt_core::error::CoreError;
-    use kbolt_types::{FileError, KboltError, UpdateDecision, UpdateDecisionKind, UpdateReport};
+    use kbolt_types::{
+        FileError, KboltError, RemoveScheduleSelector, ScheduleInterval, ScheduleIntervalUnit,
+        ScheduleScope, ScheduleTrigger, ScheduleWeekday, UpdateDecision, UpdateDecisionKind,
+        UpdateReport,
+    };
 
     fn search_args() -> SearchArgs {
         SearchArgs {
@@ -941,6 +1089,104 @@ mod tests {
         ])
         .expect_err("empty id should fail");
         assert!(empty.to_string().contains("schedule id must not be empty"));
+    }
+
+    #[test]
+    fn schedule_add_request_builds_weekly_collection_scope() {
+        let request = schedule_add_request(ScheduleAddArgs {
+            every: None,
+            at: Some("3pm".to_string()),
+            on: vec![ScheduleDayArg::Mon, ScheduleDayArg::Fri],
+            space: Some("work".to_string()),
+            collections: vec!["api".to_string(), "docs".to_string()],
+        })
+        .expect("build schedule request");
+
+        assert_eq!(
+            request.trigger,
+            ScheduleTrigger::Weekly {
+                weekdays: vec![ScheduleWeekday::Mon, ScheduleWeekday::Fri],
+                time: "3pm".to_string(),
+            }
+        );
+        assert_eq!(
+            request.scope,
+            ScheduleScope::Collections {
+                space: "work".to_string(),
+                collections: vec!["api".to_string(), "docs".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn schedule_remove_request_prefers_explicit_selectors() {
+        let by_id = schedule_remove_request(ScheduleRemoveArgs {
+            id: Some("s2".to_string()),
+            all: false,
+            space: None,
+            collections: vec![],
+        })
+        .expect("build id removal");
+        assert_eq!(
+            by_id.selector,
+            RemoveScheduleSelector::Id {
+                id: "s2".to_string()
+            }
+        );
+
+        let by_scope = schedule_remove_request(ScheduleRemoveArgs {
+            id: None,
+            all: false,
+            space: Some("work".to_string()),
+            collections: vec!["api".to_string()],
+        })
+        .expect("build scoped removal");
+        assert_eq!(
+            by_scope.selector,
+            RemoveScheduleSelector::Scope {
+                scope: ScheduleScope::Collections {
+                    space: "work".to_string(),
+                    collections: vec!["api".to_string()],
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parse_schedule_interval_accepts_minutes_and_hours() {
+        assert_eq!(
+            parse_schedule_interval("30m").expect("parse minutes"),
+            ScheduleInterval {
+                value: 30,
+                unit: ScheduleIntervalUnit::Minutes,
+            }
+        );
+        assert_eq!(
+            parse_schedule_interval("2h").expect("parse hours"),
+            ScheduleInterval {
+                value: 2,
+                unit: ScheduleIntervalUnit::Hours,
+            }
+        );
+
+        let err = parse_schedule_interval("7d").expect_err("reject invalid interval unit");
+        assert!(
+            err.to_string().contains("invalid schedule interval"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_schedule_uses_local_scope_rejects_top_level_space() {
+        let err = ensure_schedule_uses_local_scope(Some("work"))
+            .expect_err("top-level space should fail");
+        assert!(
+            err.to_string()
+                .contains("schedule commands do not use the top-level --space flag"),
+            "unexpected error: {err}"
+        );
+
+        ensure_schedule_uses_local_scope(None).expect("no top-level scope");
     }
 
     #[test]
