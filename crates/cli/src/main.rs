@@ -1,3 +1,5 @@
+use std::ffi::OsString;
+
 use clap::Parser;
 use kbolt_cli::args::{
     Cli, CollectionCommand, Command, IgnoreCommand, ModelsCommand, OutputFormat, SearchArgs,
@@ -7,33 +9,39 @@ use kbolt_cli::{CliAdapter, CliSearchOptions};
 use kbolt_core::config;
 use kbolt_core::engine::Engine;
 use kbolt_core::error::CoreError;
-use kbolt_core::Result;
 use kbolt_mcp::stdio;
 use kbolt_mcp::McpAdapter;
 use kbolt_types::KboltError;
+use serde_json::json;
 
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("{err}");
-        std::process::exit(1);
+    let argv = std::env::args_os().collect::<Vec<_>>();
+    let output_format = requested_output_format_from_args(&argv);
+
+    if let Err(err) = run(argv) {
+        emit_error(output_format, &err);
+        std::process::exit(err.exit_code());
     }
 }
 
-fn run() -> Result<()> {
-    let cli = Cli::parse();
+fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
+    let cli = Cli::try_parse_from(argv)?;
     ensure_supported_output_format(cli.format, &cli.command)?;
     maybe_print_first_run_models_hint(&cli.command, cli.format);
 
     if matches!(cli.command, Command::Mcp) {
         let engine = Engine::new(None)?;
         let adapter = McpAdapter::new(engine);
-        return stdio::run_stdio(&adapter);
+        stdio::run_stdio(&adapter)?;
+        return Ok(());
     }
 
     let output_format = cli.format;
+    let interactive_output = supports_interactive_output(output_format, stdin_stdout_are_tty());
     let engine = Engine::new(None)?;
     let mut adapter = CliAdapter::new(engine);
-    let print_line = |line: &str| emit_output(output_format, line);
+    let print_text = |line: &str| emit_text_output(output_format, line);
+    let print_message = |line: &str| emit_message_output(output_format, line);
 
     match cli.command {
         Command::Space(space) => match space.command {
@@ -44,35 +52,39 @@ fn run() -> Result<()> {
                 dirs,
             } => {
                 let line = adapter.space_add(&name, description.as_deref(), strict, &dirs)?;
-                print_line(&line);
+                print_message(&line);
             }
             SpaceCommand::Describe { name, text } => {
                 let line = adapter.space_describe(&name, &text)?;
-                print_line(&line);
+                print_message(&line);
             }
             SpaceCommand::Rename { old, new } => {
                 let line = adapter.space_rename(&old, &new)?;
-                print_line(&line);
+                print_message(&line);
             }
             SpaceCommand::Remove { name } => {
                 let line = adapter.space_remove(&name)?;
-                print_line(&line);
+                print_message(&line);
             }
             SpaceCommand::Current => {
                 let line = adapter.space_current(cli.space.as_deref())?;
-                print_line(&line);
+                print_text(&line);
             }
             SpaceCommand::Default { name } => {
                 let line = adapter.space_default(name.as_deref())?;
-                print_line(&line);
+                if name.is_some() {
+                    print_message(&line);
+                } else {
+                    print_text(&line);
+                }
             }
             SpaceCommand::List => {
                 let line = adapter.space_list()?;
-                print_line(&line);
+                print_text(&line);
             }
             SpaceCommand::Info { name } => {
                 let line = adapter.space_info(&name)?;
-                print_line(&line);
+                print_text(&line);
             }
         },
         Command::Collection(collection) => match collection.command {
@@ -95,84 +107,84 @@ fn run() -> Result<()> {
                 };
                 match run_collection_add() {
                     Ok(line) => {
-                        print_line(&line);
+                        print_message(&line);
                     }
                     Err(err)
                         if should_offer_model_pull_for_collection_add(
                             no_index,
-                            stdin_stdout_are_tty(),
+                            interactive_output,
                             &err,
                         ) =>
                     {
                         if prompt_pull_models()? {
                             let pull_report = adapter.models_pull()?;
-                            print_line(&pull_report);
+                            print_message(&pull_report);
                             let retried = run_collection_add()?;
-                            print_line(&retried);
+                            print_message(&retried);
                         } else {
-                            return Err(with_collection_add_model_missing_guidance(err));
+                            return Err(with_collection_add_model_missing_guidance(err).into());
                         }
                     }
-                    Err(err) => return Err(with_collection_add_model_missing_guidance(err)),
+                    Err(err) => return Err(with_collection_add_model_missing_guidance(err).into()),
                 }
             }
             CollectionCommand::List => {
                 let line = adapter.collection_list(cli.space.as_deref())?;
-                print_line(&line);
+                print_text(&line);
             }
             CollectionCommand::Info { name } => {
                 let line = adapter.collection_info(cli.space.as_deref(), &name)?;
-                print_line(&line);
+                print_text(&line);
             }
             CollectionCommand::Describe { name, text } => {
                 let line = adapter.collection_describe(cli.space.as_deref(), &name, &text)?;
-                print_line(&line);
+                print_message(&line);
             }
             CollectionCommand::Rename { old, new } => {
                 let line = adapter.collection_rename(cli.space.as_deref(), &old, &new)?;
-                print_line(&line);
+                print_message(&line);
             }
             CollectionCommand::Remove { name } => {
                 let line = adapter.collection_remove(cli.space.as_deref(), &name)?;
-                print_line(&line);
+                print_message(&line);
             }
         },
         Command::Ignore(ignore) => match ignore.command {
             IgnoreCommand::Show { collection } => {
                 let line = adapter.ignore_show(cli.space.as_deref(), &collection)?;
-                print_line(&line);
+                print_text(&line);
             }
             IgnoreCommand::Add {
                 collection,
                 pattern,
             } => {
                 let line = adapter.ignore_add(cli.space.as_deref(), &collection, &pattern)?;
-                print_line(&line);
+                print_message(&line);
             }
             IgnoreCommand::Remove {
                 collection,
                 pattern,
             } => {
                 let line = adapter.ignore_remove(cli.space.as_deref(), &collection, &pattern)?;
-                print_line(&line);
+                print_message(&line);
             }
             IgnoreCommand::List => {
                 let line = adapter.ignore_list(cli.space.as_deref())?;
-                print_line(&line);
+                print_text(&line);
             }
             IgnoreCommand::Edit { collection } => {
                 let line = adapter.ignore_edit(cli.space.as_deref(), &collection)?;
-                print_line(&line);
+                print_message(&line);
             }
         },
         Command::Models(models) => match models.command {
             ModelsCommand::List => {
                 let line = adapter.models_list()?;
-                print_line(&line);
+                print_text(&line);
             }
             ModelsCommand::Pull => {
                 let line = adapter.models_pull()?;
-                print_line(&line);
+                print_message(&line);
             }
         },
         Command::Mcp => unreachable!("mcp command handled before adapter setup"),
@@ -196,23 +208,23 @@ fn run() -> Result<()> {
 
             match run_search(search.deep, search.keyword, search.semantic) {
                 Ok(line) => {
-                    print_line(&line);
+                    print_text(&line);
                 }
-                Err(err) if is_model_not_available_error(&err) && stdin_stdout_are_tty() => {
+                Err(err) if is_model_not_available_error(&err) && interactive_output => {
                     if prompt_pull_models()? {
                         let pull_report = adapter.models_pull()?;
-                        print_line(&pull_report);
+                        print_message(&pull_report);
                         let retried = run_search(search.deep, search.keyword, search.semantic)?;
-                        print_line(&retried);
+                        print_text(&retried);
                     } else if requested_mode == RequestedSearchMode::Auto {
-                        print_line("models unavailable; falling back to keyword mode");
+                        print_text("models unavailable; falling back to keyword mode");
                         let fallback = run_search(false, true, false)?;
-                        print_line(&fallback);
+                        print_text(&fallback);
                     } else {
-                        return Err(err);
+                        return Err(err.into());
                     }
                 }
-                Err(err) => return Err(err),
+                Err(err) => return Err(err.into()),
             }
         }
         Command::Update(update) => {
@@ -228,30 +240,30 @@ fn run() -> Result<()> {
 
             match run_update(update.no_embed) {
                 Ok(line) => {
-                    print_line(&line);
+                    print_message(&line);
                 }
                 Err(err)
                     if should_offer_model_pull_for_update(
                         update.no_embed,
-                        stdin_stdout_are_tty(),
+                        interactive_output,
                         &err,
                     ) =>
                 {
                     if prompt_pull_models()? {
                         let pull_report = adapter.models_pull()?;
-                        print_line(&pull_report);
+                        print_message(&pull_report);
                         let retried = run_update(false)?;
-                        print_line(&retried);
+                        print_message(&retried);
                     } else {
-                        return Err(with_update_model_missing_guidance(err));
+                        return Err(with_update_model_missing_guidance(err).into());
                     }
                 }
-                Err(err) => return Err(with_update_model_missing_guidance(err)),
+                Err(err) => return Err(with_update_model_missing_guidance(err).into()),
             }
         }
         Command::Status => {
             let line = adapter.status(cli.space.as_deref())?;
-            print_line(&line);
+            print_text(&line);
         }
         Command::Ls(ls) => {
             let line = adapter.ls(
@@ -260,11 +272,11 @@ fn run() -> Result<()> {
                 ls.prefix.as_deref(),
                 ls.all,
             )?;
-            print_line(&line);
+            print_text(&line);
         }
         Command::Get(get) => {
             let line = adapter.get(cli.space.as_deref(), &get.identifier, get.offset, get.limit)?;
-            print_line(&line);
+            print_text(&line);
         }
         Command::MultiGet(get) => {
             let line = adapter.multi_get(
@@ -273,11 +285,47 @@ fn run() -> Result<()> {
                 get.max_files,
                 get.max_bytes,
             )?;
-            print_line(&line);
+            print_text(&line);
         }
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+enum RunError {
+    Clap(clap::Error),
+    Core(CoreError),
+}
+
+impl From<clap::Error> for RunError {
+    fn from(value: clap::Error) -> Self {
+        Self::Clap(value)
+    }
+}
+
+impl From<CoreError> for RunError {
+    fn from(value: CoreError) -> Self {
+        Self::Core(value)
+    }
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Clap(err) => write!(f, "{err}"),
+            Self::Core(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl RunError {
+    fn exit_code(&self) -> i32 {
+        match self {
+            Self::Clap(err) => err.exit_code(),
+            Self::Core(_) => 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,19 +352,142 @@ fn is_model_not_available_error(err: &CoreError) -> bool {
     matches!(err, CoreError::Domain(KboltError::ModelNotAvailable { .. }))
 }
 
-fn ensure_supported_output_format(format: OutputFormat, command: &Command) -> Result<()> {
+fn requested_output_format_from_args(args: &[OsString]) -> OutputFormat {
+    let mut args_iter = args.iter().skip(1);
+    while let Some(arg) = args_iter.next() {
+        let Some(raw) = arg.to_str() else {
+            continue;
+        };
+
+        if let Some(value) = raw.strip_prefix("--format=") {
+            if value.eq_ignore_ascii_case("json") {
+                return OutputFormat::Json;
+            }
+        }
+
+        if raw == "--format" || raw == "-f" {
+            if args_iter
+                .next()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("json"))
+            {
+                return OutputFormat::Json;
+            }
+        }
+    }
+
+    OutputFormat::Cli
+}
+
+fn ensure_supported_output_format(
+    format: OutputFormat,
+    command: &Command,
+) -> std::result::Result<(), RunError> {
     if format == OutputFormat::Json && matches!(command, Command::Mcp) {
         return Err(CoreError::Domain(KboltError::InvalidInput(
             "--format json is not supported for the mcp command".to_string(),
-        )));
+        ))
+        .into());
     }
 
     Ok(())
 }
 
-fn emit_output(format: OutputFormat, line: &str) {
+fn supports_interactive_output(format: OutputFormat, is_tty: bool) -> bool {
+    format == OutputFormat::Cli && is_tty
+}
+
+fn emit_text_output(format: OutputFormat, line: &str) {
+    println!("{}", render_text_output(format, line));
+}
+
+fn emit_message_output(format: OutputFormat, line: &str) {
+    println!("{}", render_message_output(format, line));
+}
+
+fn emit_error(format: OutputFormat, err: &RunError) {
+    let rendered = render_error_output(format, err);
+    if err.exit_code() == 0 {
+        println!("{rendered}");
+    } else {
+        eprintln!("{rendered}");
+    }
+}
+
+fn render_text_output(format: OutputFormat, line: &str) -> String {
     match format {
-        OutputFormat::Cli | OutputFormat::Json => println!("{line}"),
+        OutputFormat::Cli | OutputFormat::Json => line.to_string(),
+    }
+}
+
+fn render_message_output(format: OutputFormat, line: &str) -> String {
+    match format {
+        OutputFormat::Cli => line.to_string(),
+        OutputFormat::Json => json!({
+            "ok": true,
+            "message": line,
+        })
+        .to_string(),
+    }
+}
+
+fn render_error_output(format: OutputFormat, err: &RunError) -> String {
+    if let RunError::Clap(clap_err) = err {
+        if matches!(
+            clap_err.kind(),
+            clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+        ) {
+            return clap_err.to_string();
+        }
+    }
+
+    match format {
+        OutputFormat::Cli => err.to_string(),
+        OutputFormat::Json => json!({
+            "ok": false,
+            "error": {
+                "kind": json_error_kind(err),
+                "message": err.to_string(),
+            }
+        })
+        .to_string(),
+    }
+}
+
+fn json_error_kind(err: &RunError) -> &'static str {
+    match err {
+        RunError::Clap(_) => "invalid_input",
+        RunError::Core(CoreError::Domain(KboltError::SpaceNotFound { .. }))
+        | RunError::Core(CoreError::Domain(KboltError::CollectionNotFound { .. }))
+        | RunError::Core(CoreError::Domain(KboltError::DocumentNotFound { .. }))
+        | RunError::Core(CoreError::Domain(KboltError::FileNotFound(_))) => "not_found",
+        RunError::Core(CoreError::Domain(KboltError::SpaceAlreadyExists { .. }))
+        | RunError::Core(CoreError::Domain(KboltError::CollectionAlreadyExists { .. })) => {
+            "already_exists"
+        }
+        RunError::Core(CoreError::Domain(KboltError::AmbiguousSpace { .. })) => "ambiguous_space",
+        RunError::Core(CoreError::Domain(KboltError::NoActiveSpace))
+        | RunError::Core(CoreError::Domain(KboltError::InvalidInput(_)))
+        | RunError::Core(CoreError::Domain(KboltError::InvalidPath(_))) => "invalid_input",
+        RunError::Core(CoreError::Domain(KboltError::ModelNotAvailable { .. })) => {
+            "model_not_available"
+        }
+        RunError::Core(CoreError::Domain(KboltError::ModelDownload(_))) => "model_download",
+        RunError::Core(CoreError::Domain(KboltError::Inference(_))) => "inference",
+        RunError::Core(CoreError::Domain(KboltError::Config(_))) => "config",
+        RunError::Core(CoreError::Domain(KboltError::Database(_)))
+        | RunError::Core(CoreError::Domain(KboltError::Tantivy(_)))
+        | RunError::Core(CoreError::Domain(KboltError::USearch(_)))
+        | RunError::Core(CoreError::Domain(KboltError::FileDeleted(_)))
+        | RunError::Core(CoreError::Domain(KboltError::Internal(_)))
+        | RunError::Core(CoreError::Domain(KboltError::Io(_)))
+        | RunError::Core(CoreError::Sqlite(_))
+        | RunError::Core(CoreError::TomlDe(_))
+        | RunError::Core(CoreError::TomlSer(_))
+        | RunError::Core(CoreError::Json(_))
+        | RunError::Core(CoreError::Tantivy(_))
+        | RunError::Core(CoreError::Io(_))
+        | RunError::Core(CoreError::Internal(_)) => "internal",
     }
 }
 
@@ -351,7 +522,7 @@ fn stdin_stdout_are_tty() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
-fn prompt_pull_models() -> Result<bool> {
+fn prompt_pull_models() -> std::result::Result<bool, CoreError> {
     use std::io::Write;
 
     print!("Models not downloaded. Download now and continue? (Y/n) ");
@@ -399,14 +570,20 @@ fn with_collection_add_model_missing_guidance(err: CoreError) -> CoreError {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
+    use clap::CommandFactory;
+    use serde_json::json;
+
     use super::{
         ensure_supported_output_format, is_model_not_available_error, parse_pull_confirmation,
+        render_error_output, render_message_output, requested_output_format_from_args,
         requested_search_mode, should_offer_model_pull_for_collection_add,
         should_offer_model_pull_for_update, should_show_first_run_models_hint,
-        with_collection_add_model_missing_guidance, with_update_model_missing_guidance,
-        RequestedSearchMode,
+        supports_interactive_output, with_collection_add_model_missing_guidance,
+        with_update_model_missing_guidance, RequestedSearchMode, RunError,
     };
-    use kbolt_cli::args::{Command, OutputFormat, SearchArgs};
+    use kbolt_cli::args::{Cli, Command, OutputFormat, SearchArgs};
     use kbolt_core::error::CoreError;
     use kbolt_types::KboltError;
 
@@ -459,6 +636,84 @@ mod tests {
         assert!(!parse_pull_confirmation("n"));
         assert!(!parse_pull_confirmation("no"));
         assert!(!parse_pull_confirmation("anything else"));
+    }
+
+    #[test]
+    fn requested_output_format_parses_json_flags() {
+        let separate = requested_output_format_from_args(&[
+            OsString::from("kbolt"),
+            OsString::from("--format"),
+            OsString::from("json"),
+            OsString::from("status"),
+        ]);
+        assert_eq!(separate, OutputFormat::Json);
+
+        let inline = requested_output_format_from_args(&[
+            OsString::from("kbolt"),
+            OsString::from("--format=json"),
+            OsString::from("status"),
+        ]);
+        assert_eq!(inline, OutputFormat::Json);
+
+        let cli =
+            requested_output_format_from_args(&[OsString::from("kbolt"), OsString::from("status")]);
+        assert_eq!(cli, OutputFormat::Cli);
+    }
+
+    #[test]
+    fn interactive_output_requires_cli_format_and_tty() {
+        assert!(supports_interactive_output(OutputFormat::Cli, true));
+        assert!(!supports_interactive_output(OutputFormat::Cli, false));
+        assert!(!supports_interactive_output(OutputFormat::Json, true));
+    }
+
+    #[test]
+    fn render_message_output_wraps_json_success_envelope() {
+        let rendered = render_message_output(OutputFormat::Json, "space added: work");
+        let value: serde_json::Value =
+            serde_json::from_str(&rendered).expect("rendered output should be valid json");
+        assert_eq!(
+            value,
+            json!({
+                "ok": true,
+                "message": "space added: work",
+            })
+        );
+    }
+
+    #[test]
+    fn render_error_output_wraps_json_error_envelope() {
+        let err = RunError::Core(CoreError::Domain(KboltError::InvalidInput(
+            "bad input".to_string(),
+        )));
+        let rendered = render_error_output(OutputFormat::Json, &err);
+        let value: serde_json::Value =
+            serde_json::from_str(&rendered).expect("rendered output should be valid json");
+        assert_eq!(
+            value,
+            json!({
+                "ok": false,
+                "error": {
+                    "kind": "invalid_input",
+                    "message": "invalid input: bad input",
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn render_error_output_preserves_clap_help_text() {
+        let err =
+            RunError::Clap(Cli::command().error(clap::error::ErrorKind::DisplayHelp, "help text"));
+        let rendered = render_error_output(OutputFormat::Json, &err);
+        assert!(
+            rendered.contains("help text"),
+            "unexpected output: {rendered}"
+        );
+        assert!(
+            !rendered.trim_start().starts_with('{'),
+            "help output should not be wrapped as json: {rendered}"
+        );
     }
 
     #[test]
