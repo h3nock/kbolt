@@ -716,6 +716,38 @@ fn add_collection_and_collection_info_with_explicit_space() {
 }
 
 #[test]
+fn add_collection_implicitly_creates_explicit_space_when_missing() {
+    let engine = test_engine();
+    let root = tempdir().expect("create temp root");
+    let collection_path = root.path().join("api");
+    std::fs::create_dir_all(&collection_path).expect("create collection dir");
+
+    let added = engine
+        .add_collection(AddCollectionRequest {
+            path: collection_path.clone(),
+            space: Some("work".to_string()),
+            name: Some("api".to_string()),
+            description: None,
+            extensions: None,
+            no_index: true,
+        })
+        .expect("add collection with implicit space");
+
+    assert_eq!(added.space, "work");
+    assert_eq!(added.name, "api");
+    assert_eq!(added.path, collection_path);
+
+    let space = engine.space_info("work").expect("fetch implicit space");
+    assert_eq!(space.name, "work");
+
+    let info = engine
+        .collection_info(Some("work"), "api")
+        .expect("fetch collection info");
+    assert_eq!(info.name, "api");
+    assert_eq!(info.space, "work");
+}
+
+#[test]
 fn add_collection_without_no_index_triggers_initial_index_update() {
     let engine = test_engine();
     engine.add_space("work", None).expect("add work");

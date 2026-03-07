@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::config;
 use crate::config::Config;
+use crate::error::CoreError;
 use crate::ingest::chunk::{chunk_document, resolve_policy};
 use crate::ingest::extract::default_registry;
 use crate::lock::{LockMode, OperationLock};
@@ -227,7 +228,17 @@ impl Engine {
 
     pub fn add_collection(&self, req: AddCollectionRequest) -> Result<CollectionInfo> {
         let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
-        let space = self.resolve_space_row(req.space.as_deref(), None)?;
+        let space = match req.space.as_deref() {
+            Some(space_name) => match self.storage.get_space(space_name) {
+                Ok(space) => space,
+                Err(CoreError::Domain(KboltError::SpaceNotFound { .. })) => {
+                    self.storage.create_space(space_name, None)?;
+                    self.storage.get_space(space_name)?
+                }
+                Err(err) => return Err(err),
+            },
+            None => self.resolve_space_row(None, None)?,
+        };
         if !req.path.is_absolute() || !req.path.is_dir() {
             return Err(KboltError::InvalidPath(req.path).into());
         }
