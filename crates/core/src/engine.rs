@@ -30,6 +30,7 @@ mod ignore_ops;
 mod path_utils;
 mod schedule_ops;
 mod schedule_run_ops;
+mod schedule_status_ops;
 mod scoring;
 mod search_ops;
 mod text_helpers;

@@ -2,11 +2,12 @@ use std::collections::{BTreeSet, HashSet};
 
 use kbolt_types::{
     AddScheduleRequest, KboltError, RemoveScheduleRequest, RemoveScheduleSelector,
-    ScheduleAddResponse, ScheduleBackend, ScheduleDefinition, ScheduleInterval,
-    ScheduleIntervalUnit, ScheduleRemoveResponse, ScheduleScope, ScheduleTrigger, ScheduleWeekday,
+    ScheduleAddResponse, ScheduleDefinition, ScheduleInterval, ScheduleIntervalUnit,
+    ScheduleRemoveResponse, ScheduleScope, ScheduleTrigger, ScheduleWeekday,
 };
 
 use crate::lock::LockMode;
+use crate::schedule_backend::reconcile_schedule_backend;
 use crate::schedule_state_store::ScheduleRunStateStore;
 use crate::schedule_store::ScheduleCatalog;
 use crate::Result;
@@ -18,7 +19,6 @@ const MIN_SCHEDULE_INTERVAL_MINUTES: u32 = 5;
 impl Engine {
     pub fn add_schedule(&self, req: AddScheduleRequest) -> Result<ScheduleAddResponse> {
         let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
-        let backend = supported_schedule_backend()?;
         let trigger = normalize_schedule_trigger(req.trigger)?;
         let scope = self.normalize_schedule_scope(req.scope, true)?;
         let mut catalog = ScheduleCatalog::load(&self.config.config_dir)?;
@@ -47,6 +47,20 @@ impl Engine {
         };
         catalog.schedules.push(schedule.clone());
         catalog.save(&self.config.config_dir)?;
+        let backend = match reconcile_schedule_backend(
+            &self.config.config_dir,
+            &self.config.cache_dir,
+            &catalog.schedules,
+        ) {
+            Ok(backend) => backend,
+            Err(err) => {
+                return Err(KboltError::Internal(format!(
+                    "schedule {} was saved, but backend reconcile failed: {err}",
+                    schedule.id
+                ))
+                .into())
+            }
+        };
 
         Ok(ScheduleAddResponse { schedule, backend })
     }
@@ -74,6 +88,17 @@ impl Engine {
         catalog.save(&self.config.config_dir)?;
         for schedule_id in &removed_ids {
             ScheduleRunStateStore::remove(&self.config.cache_dir, schedule_id)?;
+        }
+        if let Err(err) = reconcile_schedule_backend(
+            &self.config.config_dir,
+            &self.config.cache_dir,
+            &catalog.schedules,
+        ) {
+            return Err(KboltError::Internal(format!(
+                "removed schedules {}, but backend reconcile failed: {err}",
+                removed_ids.join(", ")
+            ))
+            .into());
         }
 
         Ok(ScheduleRemoveResponse { removed_ids })
@@ -166,26 +191,6 @@ impl Engine {
                 }
             }
         }
-    }
-}
-
-fn supported_schedule_backend() -> Result<ScheduleBackend> {
-    #[cfg(target_os = "macos")]
-    {
-        Ok(ScheduleBackend::Launchd)
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        Ok(ScheduleBackend::SystemdUser)
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        Err(
-            KboltError::InvalidInput("schedule is not supported on this platform".to_string())
-                .into(),
-        )
     }
 }
 

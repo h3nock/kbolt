@@ -15,8 +15,8 @@ use crate::ModelPullEvent;
 use kbolt_types::{
     ActiveSpaceSource, AddCollectionRequest, AddScheduleRequest, GetRequest, KboltError, Locator,
     MultiGetRequest, OmitReason, RemoveScheduleRequest, RemoveScheduleSelector, ScheduleBackend,
-    ScheduleInterval, ScheduleIntervalUnit, ScheduleScope, ScheduleTrigger, ScheduleWeekday,
-    SearchMode, SearchRequest, UpdateDecisionKind, UpdateOptions,
+    ScheduleInterval, ScheduleIntervalUnit, ScheduleRunResult, ScheduleScope, ScheduleState,
+    ScheduleTrigger, ScheduleWeekday, SearchMode, SearchRequest, UpdateDecisionKind, UpdateOptions,
 };
 
 #[derive(Default)]
@@ -294,6 +294,39 @@ fn expected_schedule_backend() -> ScheduleBackend {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         panic!("schedule backend is unsupported on this platform")
+    }
+}
+
+fn schedule_backend_artifact_paths(engine: &Engine, schedule_id: &str) -> Vec<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        return vec![engine
+            .config()
+            .config_dir
+            .join("launchd/LaunchAgents")
+            .join(format!("com.kbolt.schedule.{schedule_id}.plist"))];
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return vec![
+            engine
+                .config()
+                .config_dir
+                .join("systemd/user")
+                .join(format!("kbolt-schedule-{schedule_id}.service")),
+            engine
+                .config()
+                .config_dir
+                .join("systemd/user")
+                .join(format!("kbolt-schedule-{schedule_id}.timer")),
+        ];
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (engine, schedule_id);
+        panic!("schedule backend is unsupported on this platform");
     }
 }
 
@@ -4102,10 +4135,7 @@ fn run_schedule_indexes_target_scope_and_records_success_state() {
         .expect("add api schedule");
 
     let state = engine.run_schedule("s1").expect("run schedule");
-    assert_eq!(
-        state.last_result,
-        Some(kbolt_types::ScheduleRunResult::Success)
-    );
+    assert_eq!(state.last_result, Some(ScheduleRunResult::Success));
     assert!(state.last_started.is_some());
     assert!(state.last_finished.is_some());
     assert_eq!(state.last_error, None);
@@ -4163,10 +4193,7 @@ fn run_schedule_records_skipped_lock_when_global_lock_is_held() {
     let state = engine
         .run_schedule("s1")
         .expect("run schedule with held lock");
-    assert_eq!(
-        state.last_result,
-        Some(kbolt_types::ScheduleRunResult::SkippedLock)
-    );
+    assert_eq!(state.last_result, Some(ScheduleRunResult::SkippedLock));
     assert!(state.last_started.is_some());
     assert!(state.last_finished.is_some());
     assert_eq!(state.last_error, None);
@@ -4209,10 +4236,7 @@ fn run_schedule_records_failed_state_when_target_is_missing() {
     let state = engine
         .schedule_run_state("s1")
         .expect("load failed run state");
-    assert_eq!(
-        state.last_result,
-        Some(kbolt_types::ScheduleRunResult::Failed)
-    );
+    assert_eq!(state.last_result, Some(ScheduleRunResult::Failed));
     assert!(state.last_started.is_some());
     assert!(state.last_finished.is_some());
     assert!(
@@ -4274,4 +4298,138 @@ fn remove_schedule_deletes_saved_run_state() {
         }
         other => panic!("unexpected error: {other}"),
     }
+}
+
+#[test]
+fn add_and_remove_schedule_reconcile_backend_artifacts() {
+    let engine = test_engine();
+
+    engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Every {
+                interval: ScheduleInterval {
+                    value: 30,
+                    unit: ScheduleIntervalUnit::Minutes,
+                },
+            },
+            scope: ScheduleScope::All,
+        })
+        .expect("add schedule");
+
+    let artifact_paths = schedule_backend_artifact_paths(&engine, "s1");
+    assert!(
+        artifact_paths.iter().all(|path| path.exists()),
+        "expected backend artifacts to exist: {artifact_paths:?}"
+    );
+
+    engine
+        .remove_schedule(RemoveScheduleRequest {
+            selector: RemoveScheduleSelector::Id {
+                id: "s1".to_string(),
+            },
+        })
+        .expect("remove schedule");
+
+    assert!(
+        artifact_paths.iter().all(|path| !path.exists()),
+        "expected backend artifacts to be removed: {artifact_paths:?}"
+    );
+}
+
+#[test]
+fn schedule_status_reports_installed_state_for_reconciled_schedule() {
+    let engine = test_engine();
+
+    engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Daily {
+                time: "3pm".to_string(),
+            },
+            scope: ScheduleScope::All,
+        })
+        .expect("add schedule");
+
+    let status = engine.schedule_status().expect("load schedule status");
+    assert_eq!(status.orphans, Vec::new());
+    assert_eq!(status.schedules.len(), 1);
+    assert_eq!(status.schedules[0].schedule.id, "s1");
+    assert_eq!(status.schedules[0].backend, expected_schedule_backend());
+    assert_eq!(status.schedules[0].state, ScheduleState::Installed);
+    assert_eq!(status.schedules[0].run_state, Default::default());
+}
+
+#[test]
+fn schedule_status_reports_drifted_when_backend_artifact_is_missing() {
+    let engine = test_engine();
+
+    engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Every {
+                interval: ScheduleInterval {
+                    value: 2,
+                    unit: ScheduleIntervalUnit::Hours,
+                },
+            },
+            scope: ScheduleScope::All,
+        })
+        .expect("add schedule");
+
+    let artifact_path = schedule_backend_artifact_paths(&engine, "s1")
+        .into_iter()
+        .next()
+        .expect("artifact path");
+    std::fs::remove_file(&artifact_path).expect("remove backend artifact");
+
+    let status = engine.schedule_status().expect("load schedule status");
+    assert_eq!(status.schedules.len(), 1);
+    assert_eq!(status.schedules[0].state, ScheduleState::Drifted);
+}
+
+#[test]
+fn schedule_status_reports_target_missing_when_collection_is_removed() {
+    let engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+
+    let root = tempdir().expect("create temp root");
+    let api_path = root.path().join("api");
+    std::fs::create_dir_all(&api_path).expect("create api dir");
+    add_collection_fixture(&engine, "work", "api", api_path);
+
+    engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Daily {
+                time: "09:00".to_string(),
+            },
+            scope: ScheduleScope::Collections {
+                space: "work".to_string(),
+                collections: vec!["api".to_string()],
+            },
+        })
+        .expect("add schedule");
+
+    engine
+        .remove_collection(Some("work"), "api")
+        .expect("remove collection");
+
+    let status = engine.schedule_status().expect("load schedule status");
+    assert_eq!(status.schedules.len(), 1);
+    assert_eq!(status.schedules[0].state, ScheduleState::TargetMissing);
+}
+
+#[test]
+fn schedule_status_reports_orphaned_backend_artifacts() {
+    let engine = test_engine();
+    let orphan_paths = schedule_backend_artifact_paths(&engine, "s9");
+    for path in &orphan_paths {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create backend dir");
+        }
+        std::fs::write(path, "orphan backend artifact").expect("write orphan artifact");
+    }
+
+    let status = engine.schedule_status().expect("load schedule status");
+    assert!(status.schedules.is_empty());
+    assert_eq!(status.orphans.len(), 1);
+    assert_eq!(status.orphans[0].id, "s9");
+    assert_eq!(status.orphans[0].backend, expected_schedule_backend());
 }

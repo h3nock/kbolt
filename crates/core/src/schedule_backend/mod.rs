@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(not(test))]
 use std::process::Command;
 
 use kbolt_types::{KboltError, ScheduleBackend, ScheduleDefinition};
@@ -27,8 +28,10 @@ pub(crate) trait CommandRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput>;
 }
 
+#[cfg(not(test))]
 struct ProcessCommandRunner;
 
+#[cfg(not(test))]
 impl CommandRunner for ProcessCommandRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput> {
         let output = Command::new(program).args(args).output()?;
