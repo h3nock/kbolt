@@ -7,6 +7,7 @@ use kbolt_types::{
 };
 
 use crate::lock::LockMode;
+use crate::schedule_state_store::ScheduleRunStateStore;
 use crate::schedule_store::ScheduleCatalog;
 use crate::Result;
 
@@ -71,6 +72,9 @@ impl Engine {
             .schedules
             .retain(|schedule| !removed.contains(&schedule.id));
         catalog.save(&self.config.config_dir)?;
+        for schedule_id in &removed_ids {
+            ScheduleRunStateStore::remove(&self.config.cache_dir, schedule_id)?;
+        }
 
         Ok(ScheduleRemoveResponse { removed_ids })
     }
@@ -183,6 +187,21 @@ fn supported_schedule_backend() -> Result<ScheduleBackend> {
                 .into(),
         )
     }
+}
+
+pub(super) fn load_schedule_definition(
+    config_dir: &std::path::Path,
+    id: &str,
+) -> Result<ScheduleDefinition> {
+    let normalized_id = normalize_schedule_id(id)?;
+    let catalog = ScheduleCatalog::load(config_dir)?;
+    catalog
+        .schedules
+        .into_iter()
+        .find(|schedule| schedule.id == normalized_id)
+        .ok_or_else(|| {
+            KboltError::InvalidInput(format!("schedule not found: {normalized_id}")).into()
+        })
 }
 
 fn normalize_schedule_trigger(trigger: ScheduleTrigger) -> Result<ScheduleTrigger> {

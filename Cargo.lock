@@ -1559,6 +1559,7 @@ dependencies = [
  "tantivy",
  "tempfile",
  "thiserror 2.0.18",
+ "time",
  "tokenizers",
  "toml",
  "ureq 2.12.1",

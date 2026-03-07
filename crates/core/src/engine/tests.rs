@@ -4072,3 +4072,206 @@ fn remove_schedule_by_scope_does_not_require_targets_to_still_exist() {
     assert_eq!(removed.removed_ids, vec!["s1".to_string()]);
     assert!(engine.list_schedules().expect("list schedules").is_empty());
 }
+
+#[test]
+fn run_schedule_indexes_target_scope_and_records_success_state() {
+    let engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+
+    let root = tempdir().expect("create temp root");
+    let api_path = root.path().join("api");
+    let docs_path = root.path().join("docs");
+    std::fs::create_dir_all(&api_path).expect("create api dir");
+    std::fs::create_dir_all(&docs_path).expect("create docs dir");
+    add_collection_fixture(&engine, "work", "api", api_path.clone());
+    add_collection_fixture(&engine, "work", "docs", docs_path.clone());
+
+    write_text_file(&api_path.join("src/lib.rs"), "fn alpha() {}\n");
+    write_text_file(&docs_path.join("guide.md"), "guide text\n");
+
+    engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Daily {
+                time: "09:00".to_string(),
+            },
+            scope: ScheduleScope::Collections {
+                space: "work".to_string(),
+                collections: vec!["api".to_string()],
+            },
+        })
+        .expect("add api schedule");
+
+    let state = engine.run_schedule("s1").expect("run schedule");
+    assert_eq!(
+        state.last_result,
+        Some(kbolt_types::ScheduleRunResult::Success)
+    );
+    assert!(state.last_started.is_some());
+    assert!(state.last_finished.is_some());
+    assert_eq!(state.last_error, None);
+
+    let api_files = engine
+        .list_files(Some("work"), "api", None)
+        .expect("list api files");
+    assert_eq!(api_files.len(), 1);
+    assert_eq!(api_files[0].path, "src/lib.rs");
+
+    let docs_files = engine
+        .list_files(Some("work"), "docs", None)
+        .expect("list docs files");
+    assert!(
+        docs_files.is_empty(),
+        "docs should not be indexed by api schedule"
+    );
+
+    let loaded = engine
+        .schedule_run_state("s1")
+        .expect("load schedule state");
+    assert_eq!(loaded, state);
+}
+
+#[test]
+fn run_schedule_records_skipped_lock_when_global_lock_is_held() {
+    let engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+
+    engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Every {
+                interval: ScheduleInterval {
+                    value: 30,
+                    unit: ScheduleIntervalUnit::Minutes,
+                },
+            },
+            scope: ScheduleScope::Space {
+                space: "work".to_string(),
+            },
+        })
+        .expect("add schedule");
+
+    let lock_path = engine.config().cache_dir.join("kbolt.lock");
+    std::fs::create_dir_all(&engine.config().cache_dir).expect("create cache dir");
+    let holder = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .expect("open lock file");
+    FileExt::try_lock_exclusive(&holder).expect("acquire lock in test");
+
+    let state = engine
+        .run_schedule("s1")
+        .expect("run schedule with held lock");
+    assert_eq!(
+        state.last_result,
+        Some(kbolt_types::ScheduleRunResult::SkippedLock)
+    );
+    assert!(state.last_started.is_some());
+    assert!(state.last_finished.is_some());
+    assert_eq!(state.last_error, None);
+}
+
+#[test]
+fn run_schedule_records_failed_state_when_target_is_missing() {
+    let engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+
+    let root = tempdir().expect("create temp root");
+    let api_path = root.path().join("api");
+    std::fs::create_dir_all(&api_path).expect("create api dir");
+    add_collection_fixture(&engine, "work", "api", api_path);
+
+    engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Daily {
+                time: "09:00".to_string(),
+            },
+            scope: ScheduleScope::Collections {
+                space: "work".to_string(),
+                collections: vec!["api".to_string()],
+            },
+        })
+        .expect("add schedule");
+
+    engine
+        .remove_collection(Some("work"), "api")
+        .expect("remove collection target");
+
+    let err = engine
+        .run_schedule("s1")
+        .expect_err("missing target should fail");
+    match KboltError::from(err) {
+        KboltError::CollectionNotFound { name } => assert_eq!(name, "api"),
+        other => panic!("unexpected error: {other}"),
+    }
+
+    let state = engine
+        .schedule_run_state("s1")
+        .expect("load failed run state");
+    assert_eq!(
+        state.last_result,
+        Some(kbolt_types::ScheduleRunResult::Failed)
+    );
+    assert!(state.last_started.is_some());
+    assert!(state.last_finished.is_some());
+    assert!(
+        state
+            .last_error
+            .as_deref()
+            .is_some_and(|message| message.contains("collection not found")),
+        "unexpected error detail: {:?}",
+        state.last_error
+    );
+}
+
+#[test]
+fn remove_schedule_deletes_saved_run_state() {
+    let engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+
+    let root = tempdir().expect("create temp root");
+    let api_path = root.path().join("api");
+    std::fs::create_dir_all(&api_path).expect("create api dir");
+    add_collection_fixture(&engine, "work", "api", api_path.clone());
+    write_text_file(&api_path.join("src/lib.rs"), "fn alpha() {}\n");
+
+    engine
+        .add_schedule(AddScheduleRequest {
+            trigger: ScheduleTrigger::Daily {
+                time: "09:00".to_string(),
+            },
+            scope: ScheduleScope::Collections {
+                space: "work".to_string(),
+                collections: vec!["api".to_string()],
+            },
+        })
+        .expect("add schedule");
+    engine.run_schedule("s1").expect("run schedule");
+    assert!(
+        engine
+            .schedule_run_state("s1")
+            .expect("load saved state")
+            .last_result
+            .is_some(),
+        "state should exist before removal"
+    );
+
+    engine
+        .remove_schedule(RemoveScheduleRequest {
+            selector: RemoveScheduleSelector::Id {
+                id: "s1".to_string(),
+            },
+        })
+        .expect("remove schedule");
+
+    let err = engine
+        .schedule_run_state("s1")
+        .expect_err("removed schedule should not have addressable state");
+    match KboltError::from(err) {
+        KboltError::InvalidInput(message) => {
+            assert!(message.contains("schedule not found: s1"));
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}

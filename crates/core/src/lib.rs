@@ -4,6 +4,7 @@ pub mod error;
 pub mod ingest;
 mod lock;
 mod models;
+mod schedule_state_store;
 mod schedule_store;
 pub mod storage;
 
