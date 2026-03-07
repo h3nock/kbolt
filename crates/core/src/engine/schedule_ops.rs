@@ -7,7 +7,7 @@ use kbolt_types::{
 };
 
 use crate::lock::LockMode;
-use crate::schedule_backend::reconcile_schedule_backend;
+use crate::schedule_backend::{current_schedule_backend, reconcile_schedule_backend};
 use crate::schedule_state_store::ScheduleRunStateStore;
 use crate::schedule_store::ScheduleCatalog;
 use crate::Result;
@@ -18,7 +18,16 @@ const MIN_SCHEDULE_INTERVAL_MINUTES: u32 = 5;
 
 impl Engine {
     pub fn add_schedule(&self, req: AddScheduleRequest) -> Result<ScheduleAddResponse> {
+        self.add_schedule_with_backend_support_check(req, ensure_schedule_backend_supported)
+    }
+
+    fn add_schedule_with_backend_support_check(
+        &self,
+        req: AddScheduleRequest,
+        ensure_backend_supported: fn() -> Result<()>,
+    ) -> Result<ScheduleAddResponse> {
         let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
+        ensure_backend_supported()?;
         let trigger = normalize_schedule_trigger(req.trigger)?;
         let scope = self.normalize_schedule_scope(req.scope, true)?;
         let mut catalog = ScheduleCatalog::load(&self.config.config_dir)?;
@@ -73,7 +82,16 @@ impl Engine {
     }
 
     pub fn remove_schedule(&self, req: RemoveScheduleRequest) -> Result<ScheduleRemoveResponse> {
+        self.remove_schedule_with_backend_support_check(req, ensure_schedule_backend_supported)
+    }
+
+    fn remove_schedule_with_backend_support_check(
+        &self,
+        req: RemoveScheduleRequest,
+        ensure_backend_supported: fn() -> Result<()>,
+    ) -> Result<ScheduleRemoveResponse> {
         let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
+        ensure_backend_supported()?;
         let mut catalog = ScheduleCatalog::load(&self.config.config_dir)?;
         let removed_ids = self.resolve_removed_schedule_ids(req.selector, &catalog.schedules)?;
 
@@ -389,4 +407,152 @@ fn schedule_id_number(id: &str) -> u32 {
     id.strip_prefix('s')
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(0)
+}
+
+fn ensure_schedule_backend_supported() -> Result<()> {
+    current_schedule_backend().map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem;
+
+    use tempfile::tempdir;
+
+    use super::Engine;
+    use crate::config::{
+        ChunkingConfig, Config, EmbeddingConfig, InferenceConfig, ModelConfig, ModelProvider,
+        ModelSourceConfig, ReapingConfig,
+    };
+    use crate::schedule_state_store::ScheduleRunStateStore;
+    use crate::schedule_store::ScheduleCatalog;
+    use crate::storage::Storage;
+    use kbolt_types::{
+        AddScheduleRequest, KboltError, RemoveScheduleRequest, RemoveScheduleSelector,
+        ScheduleRunResult, ScheduleRunState, ScheduleScope, ScheduleTrigger,
+    };
+
+    #[test]
+    fn add_schedule_does_not_persist_when_backend_support_check_fails() {
+        let engine = test_engine();
+
+        let err = engine
+            .add_schedule_with_backend_support_check(
+                AddScheduleRequest {
+                    trigger: ScheduleTrigger::Daily {
+                        time: "09:00".to_string(),
+                    },
+                    scope: ScheduleScope::All,
+                },
+                unsupported_schedule_backend,
+            )
+            .expect_err("unsupported backend should fail");
+
+        match KboltError::from(err) {
+            KboltError::InvalidInput(message) => {
+                assert!(
+                    message.contains("schedule is not supported on this platform"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+
+        let catalog =
+            ScheduleCatalog::load(&engine.config.config_dir).expect("load unchanged schedule file");
+        assert_eq!(catalog, ScheduleCatalog::default());
+    }
+
+    #[test]
+    fn remove_schedule_does_not_mutate_when_backend_support_check_fails() {
+        let engine = test_engine();
+        let added = engine
+            .add_schedule(AddScheduleRequest {
+                trigger: ScheduleTrigger::Daily {
+                    time: "09:00".to_string(),
+                },
+                scope: ScheduleScope::All,
+            })
+            .expect("add schedule");
+        let saved_state = ScheduleRunState {
+            last_started: Some("2026-03-07T12:00:00Z".to_string()),
+            last_finished: Some("2026-03-07T12:00:09Z".to_string()),
+            last_result: Some(ScheduleRunResult::Success),
+            last_error: None,
+        };
+        ScheduleRunStateStore::save(&engine.config.cache_dir, &added.schedule.id, &saved_state)
+            .expect("save run state");
+
+        let err = engine
+            .remove_schedule_with_backend_support_check(
+                RemoveScheduleRequest {
+                    selector: RemoveScheduleSelector::Id {
+                        id: added.schedule.id.clone(),
+                    },
+                },
+                unsupported_schedule_backend,
+            )
+            .expect_err("unsupported backend should fail");
+
+        match KboltError::from(err) {
+            KboltError::InvalidInput(message) => {
+                assert!(
+                    message.contains("schedule is not supported on this platform"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+
+        let catalog =
+            ScheduleCatalog::load(&engine.config.config_dir).expect("load unchanged schedule file");
+        assert_eq!(catalog.schedules, vec![added.schedule.clone()]);
+        let loaded_state =
+            ScheduleRunStateStore::load(&engine.config.cache_dir, &added.schedule.id)
+                .expect("load preserved run state");
+        assert_eq!(loaded_state, saved_state);
+    }
+
+    fn unsupported_schedule_backend() -> crate::Result<()> {
+        Err(
+            KboltError::InvalidInput("schedule is not supported on this platform".to_string())
+                .into(),
+        )
+    }
+
+    fn test_engine() -> Engine {
+        let root = tempdir().expect("create temp root");
+        let root_path = root.path().to_path_buf();
+        mem::forget(root);
+        let config_dir = root_path.join("config");
+        let cache_dir = root_path.join("cache");
+        let storage = Storage::new(&cache_dir).expect("create storage");
+        let config = Config {
+            config_dir,
+            cache_dir,
+            default_space: None,
+            models: ModelConfig {
+                embedder: ModelSourceConfig {
+                    provider: ModelProvider::HuggingFace,
+                    id: "embed-model".to_string(),
+                    revision: None,
+                },
+                reranker: ModelSourceConfig {
+                    provider: ModelProvider::HuggingFace,
+                    id: "reranker-model".to_string(),
+                    revision: None,
+                },
+                expander: ModelSourceConfig {
+                    provider: ModelProvider::HuggingFace,
+                    id: "expander-model".to_string(),
+                    revision: None,
+                },
+            },
+            embeddings: None::<EmbeddingConfig>,
+            inference: InferenceConfig::default(),
+            reaping: ReapingConfig { days: 7 },
+            chunking: ChunkingConfig::default(),
+        };
+        Engine::from_parts(storage, config)
+    }
 }
