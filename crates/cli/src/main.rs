@@ -1,6 +1,7 @@
 use clap::Parser;
 use kbolt_cli::args::{
-    Cli, CollectionCommand, Command, IgnoreCommand, ModelsCommand, SearchArgs, SpaceCommand,
+    Cli, CollectionCommand, Command, IgnoreCommand, ModelsCommand, OutputFormat, SearchArgs,
+    SpaceCommand,
 };
 use kbolt_cli::{CliAdapter, CliSearchOptions};
 use kbolt_core::config;
@@ -20,7 +21,8 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    maybe_print_first_run_models_hint(&cli.command);
+    ensure_supported_output_format(cli.format, &cli.command)?;
+    maybe_print_first_run_models_hint(&cli.command, cli.format);
 
     if matches!(cli.command, Command::Mcp) {
         let engine = Engine::new(None)?;
@@ -28,8 +30,10 @@ fn run() -> Result<()> {
         return stdio::run_stdio(&adapter);
     }
 
+    let output_format = cli.format;
     let engine = Engine::new(None)?;
     let mut adapter = CliAdapter::new(engine);
+    let print_line = |line: &str| emit_output(output_format, line);
 
     match cli.command {
         Command::Space(space) => match space.command {
@@ -40,35 +44,35 @@ fn run() -> Result<()> {
                 dirs,
             } => {
                 let line = adapter.space_add(&name, description.as_deref(), strict, &dirs)?;
-                println!("{line}");
+                print_line(&line);
             }
             SpaceCommand::Describe { name, text } => {
                 let line = adapter.space_describe(&name, &text)?;
-                println!("{line}");
+                print_line(&line);
             }
             SpaceCommand::Rename { old, new } => {
                 let line = adapter.space_rename(&old, &new)?;
-                println!("{line}");
+                print_line(&line);
             }
             SpaceCommand::Remove { name } => {
                 let line = adapter.space_remove(&name)?;
-                println!("{line}");
+                print_line(&line);
             }
             SpaceCommand::Current => {
                 let line = adapter.space_current(cli.space.as_deref())?;
-                println!("{line}");
+                print_line(&line);
             }
             SpaceCommand::Default { name } => {
                 let line = adapter.space_default(name.as_deref())?;
-                println!("{line}");
+                print_line(&line);
             }
             SpaceCommand::List => {
                 let line = adapter.space_list()?;
-                println!("{line}");
+                print_line(&line);
             }
             SpaceCommand::Info { name } => {
                 let line = adapter.space_info(&name)?;
-                println!("{line}");
+                print_line(&line);
             }
         },
         Command::Collection(collection) => match collection.command {
@@ -91,7 +95,7 @@ fn run() -> Result<()> {
                 };
                 match run_collection_add() {
                     Ok(line) => {
-                        println!("{line}");
+                        print_line(&line);
                     }
                     Err(err)
                         if should_offer_model_pull_for_collection_add(
@@ -102,9 +106,9 @@ fn run() -> Result<()> {
                     {
                         if prompt_pull_models()? {
                             let pull_report = adapter.models_pull()?;
-                            println!("{pull_report}");
+                            print_line(&pull_report);
                             let retried = run_collection_add()?;
-                            println!("{retried}");
+                            print_line(&retried);
                         } else {
                             return Err(with_collection_add_model_missing_guidance(err));
                         }
@@ -114,61 +118,61 @@ fn run() -> Result<()> {
             }
             CollectionCommand::List => {
                 let line = adapter.collection_list(cli.space.as_deref())?;
-                println!("{line}");
+                print_line(&line);
             }
             CollectionCommand::Info { name } => {
                 let line = adapter.collection_info(cli.space.as_deref(), &name)?;
-                println!("{line}");
+                print_line(&line);
             }
             CollectionCommand::Describe { name, text } => {
                 let line = adapter.collection_describe(cli.space.as_deref(), &name, &text)?;
-                println!("{line}");
+                print_line(&line);
             }
             CollectionCommand::Rename { old, new } => {
                 let line = adapter.collection_rename(cli.space.as_deref(), &old, &new)?;
-                println!("{line}");
+                print_line(&line);
             }
             CollectionCommand::Remove { name } => {
                 let line = adapter.collection_remove(cli.space.as_deref(), &name)?;
-                println!("{line}");
+                print_line(&line);
             }
         },
         Command::Ignore(ignore) => match ignore.command {
             IgnoreCommand::Show { collection } => {
                 let line = adapter.ignore_show(cli.space.as_deref(), &collection)?;
-                println!("{line}");
+                print_line(&line);
             }
             IgnoreCommand::Add {
                 collection,
                 pattern,
             } => {
                 let line = adapter.ignore_add(cli.space.as_deref(), &collection, &pattern)?;
-                println!("{line}");
+                print_line(&line);
             }
             IgnoreCommand::Remove {
                 collection,
                 pattern,
             } => {
                 let line = adapter.ignore_remove(cli.space.as_deref(), &collection, &pattern)?;
-                println!("{line}");
+                print_line(&line);
             }
             IgnoreCommand::List => {
                 let line = adapter.ignore_list(cli.space.as_deref())?;
-                println!("{line}");
+                print_line(&line);
             }
             IgnoreCommand::Edit { collection } => {
                 let line = adapter.ignore_edit(cli.space.as_deref(), &collection)?;
-                println!("{line}");
+                print_line(&line);
             }
         },
         Command::Models(models) => match models.command {
             ModelsCommand::List => {
                 let line = adapter.models_list()?;
-                println!("{line}");
+                print_line(&line);
             }
             ModelsCommand::Pull => {
                 let line = adapter.models_pull()?;
-                println!("{line}");
+                print_line(&line);
             }
         },
         Command::Mcp => unreachable!("mcp command handled before adapter setup"),
@@ -192,18 +196,18 @@ fn run() -> Result<()> {
 
             match run_search(search.deep, search.keyword, search.semantic) {
                 Ok(line) => {
-                    println!("{line}");
+                    print_line(&line);
                 }
                 Err(err) if is_model_not_available_error(&err) && stdin_stdout_are_tty() => {
                     if prompt_pull_models()? {
                         let pull_report = adapter.models_pull()?;
-                        println!("{pull_report}");
+                        print_line(&pull_report);
                         let retried = run_search(search.deep, search.keyword, search.semantic)?;
-                        println!("{retried}");
+                        print_line(&retried);
                     } else if requested_mode == RequestedSearchMode::Auto {
-                        println!("models unavailable; falling back to keyword mode");
+                        print_line("models unavailable; falling back to keyword mode");
                         let fallback = run_search(false, true, false)?;
-                        println!("{fallback}");
+                        print_line(&fallback);
                     } else {
                         return Err(err);
                     }
@@ -224,7 +228,7 @@ fn run() -> Result<()> {
 
             match run_update(update.no_embed) {
                 Ok(line) => {
-                    println!("{line}");
+                    print_line(&line);
                 }
                 Err(err)
                     if should_offer_model_pull_for_update(
@@ -235,9 +239,9 @@ fn run() -> Result<()> {
                 {
                     if prompt_pull_models()? {
                         let pull_report = adapter.models_pull()?;
-                        println!("{pull_report}");
+                        print_line(&pull_report);
                         let retried = run_update(false)?;
-                        println!("{retried}");
+                        print_line(&retried);
                     } else {
                         return Err(with_update_model_missing_guidance(err));
                     }
@@ -247,7 +251,7 @@ fn run() -> Result<()> {
         }
         Command::Status => {
             let line = adapter.status(cli.space.as_deref())?;
-            println!("{line}");
+            print_line(&line);
         }
         Command::Ls(ls) => {
             let line = adapter.ls(
@@ -256,11 +260,11 @@ fn run() -> Result<()> {
                 ls.prefix.as_deref(),
                 ls.all,
             )?;
-            println!("{line}");
+            print_line(&line);
         }
         Command::Get(get) => {
             let line = adapter.get(cli.space.as_deref(), &get.identifier, get.offset, get.limit)?;
-            println!("{line}");
+            print_line(&line);
         }
         Command::MultiGet(get) => {
             let line = adapter.multi_get(
@@ -269,7 +273,7 @@ fn run() -> Result<()> {
                 get.max_files,
                 get.max_bytes,
             )?;
-            println!("{line}");
+            print_line(&line);
         }
     }
 
@@ -300,20 +304,46 @@ fn is_model_not_available_error(err: &CoreError) -> bool {
     matches!(err, CoreError::Domain(KboltError::ModelNotAvailable { .. }))
 }
 
-fn maybe_print_first_run_models_hint(command: &Command) {
+fn ensure_supported_output_format(format: OutputFormat, command: &Command) -> Result<()> {
+    if format == OutputFormat::Json && matches!(command, Command::Mcp) {
+        return Err(CoreError::Domain(KboltError::InvalidInput(
+            "--format json is not supported for the mcp command".to_string(),
+        )));
+    }
+
+    Ok(())
+}
+
+fn emit_output(format: OutputFormat, line: &str) {
+    match format {
+        OutputFormat::Cli | OutputFormat::Json => println!("{line}"),
+    }
+}
+
+fn maybe_print_first_run_models_hint(command: &Command, format: OutputFormat) {
     let config_file = match config::default_config_file_path() {
         Ok(path) => path,
         Err(_) => return,
     };
-    if should_show_first_run_models_hint(command, stdin_stdout_are_tty(), config_file.exists()) {
+    if should_show_first_run_models_hint(
+        command,
+        format,
+        stdin_stdout_are_tty(),
+        config_file.exists(),
+    ) {
         eprintln!(
             "hint: run `kbolt models pull` to download semantic/rerank models. keyword search works without models."
         );
     }
 }
 
-fn should_show_first_run_models_hint(command: &Command, is_tty: bool, config_exists: bool) -> bool {
-    !matches!(command, Command::Mcp) && is_tty && !config_exists
+fn should_show_first_run_models_hint(
+    command: &Command,
+    format: OutputFormat,
+    is_tty: bool,
+    config_exists: bool,
+) -> bool {
+    !matches!(command, Command::Mcp) && format == OutputFormat::Cli && is_tty && !config_exists
 }
 
 fn stdin_stdout_are_tty() -> bool {
@@ -370,12 +400,13 @@ fn with_collection_add_model_missing_guidance(err: CoreError) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_model_not_available_error, parse_pull_confirmation, requested_search_mode,
-        should_offer_model_pull_for_collection_add, should_offer_model_pull_for_update,
-        should_show_first_run_models_hint, with_collection_add_model_missing_guidance,
-        with_update_model_missing_guidance, RequestedSearchMode,
+        ensure_supported_output_format, is_model_not_available_error, parse_pull_confirmation,
+        requested_search_mode, should_offer_model_pull_for_collection_add,
+        should_offer_model_pull_for_update, should_show_first_run_models_hint,
+        with_collection_add_model_missing_guidance, with_update_model_missing_guidance,
+        RequestedSearchMode,
     };
-    use kbolt_cli::args::{Command, SearchArgs};
+    use kbolt_cli::args::{Command, OutputFormat, SearchArgs};
     use kbolt_core::error::CoreError;
     use kbolt_types::KboltError;
 
@@ -511,23 +542,47 @@ mod tests {
     fn first_run_models_hint_visibility_respects_context() {
         assert!(should_show_first_run_models_hint(
             &Command::Status,
+            OutputFormat::Cli,
             true,
             false
         ));
         assert!(!should_show_first_run_models_hint(
             &Command::Status,
+            OutputFormat::Cli,
             true,
             true
         ));
         assert!(!should_show_first_run_models_hint(
             &Command::Status,
+            OutputFormat::Cli,
             false,
             false
         ));
         assert!(!should_show_first_run_models_hint(
             &Command::Mcp,
+            OutputFormat::Cli,
             true,
             false
         ));
+        assert!(!should_show_first_run_models_hint(
+            &Command::Status,
+            OutputFormat::Json,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn output_format_validation_rejects_json_for_mcp() {
+        let err = ensure_supported_output_format(OutputFormat::Json, &Command::Mcp)
+            .expect_err("json output should not be supported for mcp");
+        assert!(
+            err.to_string()
+                .contains("--format json is not supported for the mcp command"),
+            "unexpected error: {err}"
+        );
+
+        ensure_supported_output_format(OutputFormat::Cli, &Command::Mcp)
+            .expect("cli output should remain valid for mcp");
     }
 }

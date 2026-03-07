@@ -1,12 +1,26 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    Cli,
+    Json,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "kbolt", version, about = "local-first retrieval engine")]
 pub struct Cli {
     #[arg(short = 's', long = "space", value_name = "name")]
     pub space: Option<String>,
+
+    #[arg(
+        short = 'f',
+        long = "format",
+        value_enum,
+        default_value_t = OutputFormat::Cli
+    )]
+    pub format: OutputFormat,
 
     #[command(subcommand)]
     pub command: Command,
@@ -197,8 +211,21 @@ mod tests {
 
     use super::{
         Cli, CollectionCommand, Command, GetArgs, IgnoreCommand, LsArgs, ModelsCommand,
-        MultiGetArgs, SearchArgs, SpaceCommand, UpdateArgs,
+        MultiGetArgs, OutputFormat, SearchArgs, SpaceCommand, UpdateArgs,
     };
+
+    #[test]
+    fn parses_default_output_format() {
+        let parsed = Cli::try_parse_from(["kbolt", "status"]).expect("parse cli");
+        assert_eq!(parsed.format, OutputFormat::Cli);
+    }
+
+    #[test]
+    fn parses_json_output_format() {
+        let parsed =
+            Cli::try_parse_from(["kbolt", "--format", "json", "status"]).expect("parse cli");
+        assert_eq!(parsed.format, OutputFormat::Json);
+    }
 
     #[test]
     fn parses_space_current_command() {
