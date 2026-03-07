@@ -2,6 +2,7 @@ pub mod document;
 pub mod error;
 pub mod indexing;
 pub mod model;
+pub mod schedule;
 pub mod search;
 pub mod space;
 pub mod status;
@@ -13,6 +14,12 @@ pub use document::{
 pub use error::{KboltError, Result};
 pub use indexing::{FileError, UpdateDecision, UpdateDecisionKind, UpdateOptions, UpdateReport};
 pub use model::PullReport;
+pub use schedule::{
+    AddScheduleRequest, RemoveScheduleRequest, RemoveScheduleSelector, ScheduleAddResponse,
+    ScheduleBackend, ScheduleDefinition, ScheduleInterval, ScheduleIntervalUnit, ScheduleOrphan,
+    ScheduleRemoveResponse, ScheduleRunResult, ScheduleRunState, ScheduleScope, ScheduleState,
+    ScheduleStatusEntry, ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday,
+};
 pub use search::{SearchMode, SearchRequest, SearchResponse, SearchResult, SearchSignals};
 pub use space::{ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, SpaceInfo};
 pub use status::{
