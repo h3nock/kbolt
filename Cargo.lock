@@ -1533,6 +1533,7 @@ dependencies = [
  "kbolt-core",
  "kbolt-mcp",
  "kbolt-types",
+ "serde",
  "serde_json",
  "shell-words",
  "tempfile",

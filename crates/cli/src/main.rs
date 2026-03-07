@@ -5,13 +5,17 @@ use kbolt_cli::args::{
     Cli, CollectionCommand, Command, IgnoreCommand, ModelsCommand, OutputFormat, SearchArgs,
     SpaceCommand,
 };
-use kbolt_cli::{CliAdapter, CliSearchOptions};
+use kbolt_cli::{resolve_no_rerank_for_mode, CliAdapter, CliSearchOptions};
 use kbolt_core::config;
 use kbolt_core::engine::Engine;
 use kbolt_core::error::CoreError;
 use kbolt_mcp::stdio;
 use kbolt_mcp::McpAdapter;
-use kbolt_types::KboltError;
+use kbolt_types::{
+    ActiveSpace, CollectionInfo, FileEntry, GetRequest, KboltError, Locator, ModelStatus,
+    MultiGetRequest, SearchMode, SearchRequest, SpaceInfo,
+};
+use serde::Serialize;
 use serde_json::json;
 
 fn main() {
@@ -37,6 +41,7 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
     }
 
     let output_format = cli.format;
+    let wants_json = output_format == OutputFormat::Json;
     let interactive_output = supports_interactive_output(output_format, stdin_stdout_are_tty());
     let engine = Engine::new(None)?;
     let mut adapter = CliAdapter::new(engine);
@@ -67,24 +72,44 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
                 print_message(&line);
             }
             SpaceCommand::Current => {
-                let line = adapter.space_current(cli.space.as_deref())?;
-                print_text(&line);
+                if wants_json {
+                    let active_space = adapter.engine.current_space(cli.space.as_deref())?;
+                    emit_structured_output(&ActiveSpaceJsonResponse { active_space })?;
+                } else {
+                    let line = adapter.space_current(cli.space.as_deref())?;
+                    print_text(&line);
+                }
             }
             SpaceCommand::Default { name } => {
-                let line = adapter.space_default(name.as_deref())?;
-                if name.is_some() {
+                if let Some(space_name) = name.as_deref() {
+                    let line = adapter.space_default(Some(space_name))?;
                     print_message(&line);
+                } else if wants_json {
+                    emit_structured_output(&DefaultSpaceJsonResponse {
+                        default_space: adapter.engine.config().default_space.clone(),
+                    })?;
                 } else {
+                    let line = adapter.space_default(None)?;
                     print_text(&line);
                 }
             }
             SpaceCommand::List => {
-                let line = adapter.space_list()?;
-                print_text(&line);
+                if wants_json {
+                    let spaces = adapter.engine.list_spaces()?;
+                    emit_structured_output(&SpacesJsonResponse { spaces })?;
+                } else {
+                    let line = adapter.space_list()?;
+                    print_text(&line);
+                }
             }
             SpaceCommand::Info { name } => {
-                let line = adapter.space_info(&name)?;
-                print_text(&line);
+                if wants_json {
+                    let space = adapter.engine.space_info(&name)?;
+                    emit_structured_output(&space)?;
+                } else {
+                    let line = adapter.space_info(&name)?;
+                    print_text(&line);
+                }
             }
         },
         Command::Collection(collection) => match collection.command {
@@ -129,12 +154,24 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
                 }
             }
             CollectionCommand::List => {
-                let line = adapter.collection_list(cli.space.as_deref())?;
-                print_text(&line);
+                if wants_json {
+                    let collections = adapter.engine.list_collections(cli.space.as_deref())?;
+                    emit_structured_output(&CollectionsJsonResponse { collections })?;
+                } else {
+                    let line = adapter.collection_list(cli.space.as_deref())?;
+                    print_text(&line);
+                }
             }
             CollectionCommand::Info { name } => {
-                let line = adapter.collection_info(cli.space.as_deref(), &name)?;
-                print_text(&line);
+                if wants_json {
+                    let collection = adapter
+                        .engine
+                        .collection_info(cli.space.as_deref(), &name)?;
+                    emit_structured_output(&collection)?;
+                } else {
+                    let line = adapter.collection_info(cli.space.as_deref(), &name)?;
+                    print_text(&line);
+                }
             }
             CollectionCommand::Describe { name, text } => {
                 let line = adapter.collection_describe(cli.space.as_deref(), &name, &text)?;
@@ -151,8 +188,19 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
         },
         Command::Ignore(ignore) => match ignore.command {
             IgnoreCommand::Show { collection } => {
-                let line = adapter.ignore_show(cli.space.as_deref(), &collection)?;
-                print_text(&line);
+                if wants_json {
+                    let (space, content) = adapter
+                        .engine
+                        .read_collection_ignore(cli.space.as_deref(), &collection)?;
+                    emit_structured_output(&IgnoreShowJsonResponse {
+                        space,
+                        collection,
+                        patterns: ignore_patterns_to_lines(content),
+                    })?;
+                } else {
+                    let line = adapter.ignore_show(cli.space.as_deref(), &collection)?;
+                    print_text(&line);
+                }
             }
             IgnoreCommand::Add {
                 collection,
@@ -169,8 +217,23 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
                 print_message(&line);
             }
             IgnoreCommand::List => {
-                let line = adapter.ignore_list(cli.space.as_deref())?;
-                print_text(&line);
+                if wants_json {
+                    let entries = adapter
+                        .engine
+                        .list_collection_ignores(cli.space.as_deref())?;
+                    let ignores = entries
+                        .into_iter()
+                        .map(|entry| IgnoreListEntryJson {
+                            space: entry.space,
+                            collection: entry.collection,
+                            pattern_count: entry.pattern_count,
+                        })
+                        .collect();
+                    emit_structured_output(&IgnoreListJsonResponse { ignores })?;
+                } else {
+                    let line = adapter.ignore_list(cli.space.as_deref())?;
+                    print_text(&line);
+                }
             }
             IgnoreCommand::Edit { collection } => {
                 let line = adapter.ignore_edit(cli.space.as_deref(), &collection)?;
@@ -179,8 +242,13 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
         },
         Command::Models(models) => match models.command {
             ModelsCommand::List => {
-                let line = adapter.models_list()?;
-                print_text(&line);
+                if wants_json {
+                    let models = adapter.engine.model_status()?;
+                    emit_structured_output(&ModelsJsonResponse { models })?;
+                } else {
+                    let line = adapter.models_list()?;
+                    print_text(&line);
+                }
             }
             ModelsCommand::Pull => {
                 let line = adapter.models_pull()?;
@@ -190,41 +258,67 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
         Command::Mcp => unreachable!("mcp command handled before adapter setup"),
         Command::Search(search) => {
             let requested_mode = requested_search_mode(&search);
-            let run_search = |deep: bool, keyword: bool, semantic: bool| {
-                adapter.search(CliSearchOptions {
-                    space: cli.space.as_deref(),
-                    query: &search.query,
-                    collections: &search.collections,
+            let mode = if search.deep {
+                SearchMode::Deep
+            } else if search.keyword {
+                SearchMode::Keyword
+            } else if search.semantic {
+                SearchMode::Semantic
+            } else {
+                SearchMode::Auto
+            };
+            let effective_no_rerank =
+                resolve_no_rerank_for_mode(mode.clone(), search.rerank, search.no_rerank);
+
+            if wants_json {
+                let response = adapter.engine.search(SearchRequest {
+                    query: search.query.clone(),
+                    mode,
+                    space: cli.space.clone(),
+                    collections: search.collections.clone(),
                     limit: search.limit,
                     min_score: search.min_score,
-                    deep,
-                    keyword,
-                    semantic,
-                    rerank: search.rerank,
-                    no_rerank: search.no_rerank,
+                    no_rerank: effective_no_rerank,
                     debug: search.debug,
-                })
-            };
+                })?;
+                emit_structured_output(&response)?;
+            } else {
+                let run_search = |deep: bool, keyword: bool, semantic: bool| {
+                    adapter.search(CliSearchOptions {
+                        space: cli.space.as_deref(),
+                        query: &search.query,
+                        collections: &search.collections,
+                        limit: search.limit,
+                        min_score: search.min_score,
+                        deep,
+                        keyword,
+                        semantic,
+                        rerank: search.rerank,
+                        no_rerank: search.no_rerank,
+                        debug: search.debug,
+                    })
+                };
 
-            match run_search(search.deep, search.keyword, search.semantic) {
-                Ok(line) => {
-                    print_text(&line);
-                }
-                Err(err) if is_model_not_available_error(&err) && interactive_output => {
-                    if prompt_pull_models()? {
-                        let pull_report = adapter.models_pull()?;
-                        print_message(&pull_report);
-                        let retried = run_search(search.deep, search.keyword, search.semantic)?;
-                        print_text(&retried);
-                    } else if requested_mode == RequestedSearchMode::Auto {
-                        print_text("models unavailable; falling back to keyword mode");
-                        let fallback = run_search(false, true, false)?;
-                        print_text(&fallback);
-                    } else {
-                        return Err(err.into());
+                match run_search(search.deep, search.keyword, search.semantic) {
+                    Ok(line) => {
+                        print_text(&line);
                     }
+                    Err(err) if is_model_not_available_error(&err) && interactive_output => {
+                        if prompt_pull_models()? {
+                            let pull_report = adapter.models_pull()?;
+                            print_message(&pull_report);
+                            let retried = run_search(search.deep, search.keyword, search.semantic)?;
+                            print_text(&retried);
+                        } else if requested_mode == RequestedSearchMode::Auto {
+                            print_text("models unavailable; falling back to keyword mode");
+                            let fallback = run_search(false, true, false)?;
+                            print_text(&fallback);
+                        } else {
+                            return Err(err.into());
+                        }
+                    }
+                    Err(err) => return Err(err.into()),
                 }
-                Err(err) => return Err(err.into()),
             }
         }
         Command::Update(update) => {
@@ -262,30 +356,74 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
             }
         }
         Command::Status => {
-            let line = adapter.status(cli.space.as_deref())?;
-            print_text(&line);
+            if wants_json {
+                let status = adapter.engine.status(cli.space.as_deref())?;
+                emit_structured_output(&status)?;
+            } else {
+                let line = adapter.status(cli.space.as_deref())?;
+                print_text(&line);
+            }
         }
         Command::Ls(ls) => {
-            let line = adapter.ls(
-                cli.space.as_deref(),
-                &ls.collection,
-                ls.prefix.as_deref(),
-                ls.all,
-            )?;
-            print_text(&line);
+            if wants_json {
+                let mut files = adapter.engine.list_files(
+                    cli.space.as_deref(),
+                    &ls.collection,
+                    ls.prefix.as_deref(),
+                )?;
+                if !ls.all {
+                    files.retain(|file| file.active);
+                }
+                emit_structured_output(&FilesJsonResponse { files })?;
+            } else {
+                let line = adapter.ls(
+                    cli.space.as_deref(),
+                    &ls.collection,
+                    ls.prefix.as_deref(),
+                    ls.all,
+                )?;
+                print_text(&line);
+            }
         }
         Command::Get(get) => {
-            let line = adapter.get(cli.space.as_deref(), &get.identifier, get.offset, get.limit)?;
-            print_text(&line);
+            if wants_json {
+                let locator = Locator::parse(&get.identifier);
+                let document = adapter.engine.get_document(GetRequest {
+                    locator,
+                    space: cli.space.clone(),
+                    offset: get.offset,
+                    limit: get.limit,
+                })?;
+                emit_structured_output(&document)?;
+            } else {
+                let line =
+                    adapter.get(cli.space.as_deref(), &get.identifier, get.offset, get.limit)?;
+                print_text(&line);
+            }
         }
         Command::MultiGet(get) => {
-            let line = adapter.multi_get(
-                cli.space.as_deref(),
-                &get.locators,
-                get.max_files,
-                get.max_bytes,
-            )?;
-            print_text(&line);
+            if wants_json {
+                let locators = get
+                    .locators
+                    .iter()
+                    .map(|item| Locator::parse(item))
+                    .collect();
+                let response = adapter.engine.multi_get(MultiGetRequest {
+                    locators,
+                    space: cli.space.clone(),
+                    max_files: get.max_files,
+                    max_bytes: get.max_bytes,
+                })?;
+                emit_structured_output(&response)?;
+            } else {
+                let line = adapter.multi_get(
+                    cli.space.as_deref(),
+                    &get.locators,
+                    get.max_files,
+                    get.max_bytes,
+                )?;
+                print_text(&line);
+            }
         }
     }
 
@@ -326,6 +464,55 @@ impl RunError {
             Self::Core(_) => 1,
         }
     }
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct SpacesJsonResponse {
+    spaces: Vec<SpaceInfo>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct ActiveSpaceJsonResponse {
+    active_space: Option<ActiveSpace>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct DefaultSpaceJsonResponse {
+    default_space: Option<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct CollectionsJsonResponse {
+    collections: Vec<CollectionInfo>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct FilesJsonResponse {
+    files: Vec<FileEntry>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct IgnoreShowJsonResponse {
+    space: String,
+    collection: String,
+    patterns: Vec<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct IgnoreListEntryJson {
+    space: String,
+    collection: String,
+    pattern_count: usize,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct IgnoreListJsonResponse {
+    ignores: Vec<IgnoreListEntryJson>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct ModelsJsonResponse {
+    models: ModelStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,6 +592,11 @@ fn emit_message_output(format: OutputFormat, line: &str) {
     println!("{}", render_message_output(format, line));
 }
 
+fn emit_structured_output<T: Serialize>(value: &T) -> std::result::Result<(), RunError> {
+    println!("{}", render_structured_output(value)?);
+    Ok(())
+}
+
 fn emit_error(format: OutputFormat, err: &RunError) {
     let rendered = render_error_output(format, err);
     if err.exit_code() == 0 {
@@ -431,6 +623,12 @@ fn render_message_output(format: OutputFormat, line: &str) -> String {
     }
 }
 
+fn render_structured_output<T: Serialize>(value: &T) -> std::result::Result<String, RunError> {
+    serde_json::to_string(value)
+        .map_err(CoreError::from)
+        .map_err(RunError::from)
+}
+
 fn render_error_output(format: OutputFormat, err: &RunError) -> String {
     if let RunError::Clap(clap_err) = err {
         if matches!(
@@ -452,6 +650,13 @@ fn render_error_output(format: OutputFormat, err: &RunError) -> String {
         })
         .to_string(),
     }
+}
+
+fn ignore_patterns_to_lines(content: Option<String>) -> Vec<String> {
+    content
+        .into_iter()
+        .flat_map(|value| value.lines().map(ToString::to_string).collect::<Vec<_>>())
+        .collect()
 }
 
 fn json_error_kind(err: &RunError) -> &'static str {
@@ -577,11 +782,12 @@ mod tests {
 
     use super::{
         ensure_supported_output_format, is_model_not_available_error, parse_pull_confirmation,
-        render_error_output, render_message_output, requested_output_format_from_args,
-        requested_search_mode, should_offer_model_pull_for_collection_add,
-        should_offer_model_pull_for_update, should_show_first_run_models_hint,
-        supports_interactive_output, with_collection_add_model_missing_guidance,
-        with_update_model_missing_guidance, RequestedSearchMode, RunError,
+        render_error_output, render_message_output, render_structured_output,
+        requested_output_format_from_args, requested_search_mode,
+        should_offer_model_pull_for_collection_add, should_offer_model_pull_for_update,
+        should_show_first_run_models_hint, supports_interactive_output,
+        with_collection_add_model_missing_guidance, with_update_model_missing_guidance,
+        DefaultSpaceJsonResponse, IgnoreShowJsonResponse, RequestedSearchMode, RunError,
     };
     use kbolt_cli::args::{Cli, Command, OutputFormat, SearchArgs};
     use kbolt_core::error::CoreError;
@@ -713,6 +919,42 @@ mod tests {
         assert!(
             !rendered.trim_start().starts_with('{'),
             "help output should not be wrapped as json: {rendered}"
+        );
+    }
+
+    #[test]
+    fn render_structured_output_serializes_object_payloads() {
+        let rendered = render_structured_output(&DefaultSpaceJsonResponse {
+            default_space: Some("work".to_string()),
+        })
+        .expect("structured output should serialize");
+        let value: serde_json::Value =
+            serde_json::from_str(&rendered).expect("rendered output should be valid json");
+        assert_eq!(
+            value,
+            json!({
+                "default_space": "work",
+            })
+        );
+    }
+
+    #[test]
+    fn ignore_show_json_response_preserves_pattern_lines() {
+        let rendered = render_structured_output(&IgnoreShowJsonResponse {
+            space: "work".to_string(),
+            collection: "api".to_string(),
+            patterns: vec!["dist/".to_string(), "# comment".to_string()],
+        })
+        .expect("structured output should serialize");
+        let value: serde_json::Value =
+            serde_json::from_str(&rendered).expect("rendered output should be valid json");
+        assert_eq!(
+            value,
+            json!({
+                "space": "work",
+                "collection": "api",
+                "patterns": ["dist/", "# comment"],
+            })
         );
     }
 

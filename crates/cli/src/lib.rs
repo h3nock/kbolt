@@ -817,7 +817,7 @@ fn format_search_mode(mode: &SearchMode) -> &'static str {
     }
 }
 
-fn resolve_no_rerank_for_mode(mode: SearchMode, rerank: bool, no_rerank: bool) -> bool {
+pub fn resolve_no_rerank_for_mode(mode: SearchMode, rerank: bool, no_rerank: bool) -> bool {
     match mode {
         SearchMode::Auto => !rerank,
         SearchMode::Deep => no_rerank,
