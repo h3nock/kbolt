@@ -6,7 +6,7 @@ Every flow is one actor performing one action to achieve one goal.
 
 - **CLI user** — human at the terminal
 - **MCP client** — LLM/agent connected via stdio
-- **System** — cron/launchd (automated)
+- **System** — launchd / systemd user timer (automated)
 
 ---
 
@@ -489,7 +489,7 @@ Shows: how many files would be added, updated, deactivated, reaped. No writes to
 ### 27. Verbose update
 
 **Actor**: CLI user
-**Goal**: See per-file decisions during indexing (for troubleshooting)
+**Goal**: See per-file decisions for an update run (for troubleshooting)
 
 ```
 kbolt update --verbose
@@ -503,7 +503,7 @@ kbolt update --collection {name} --dry-run --verbose
 - **--space** (optional) — scope to a specific space
 - **--collection** (optional) — scope to specific collections
 
-Prints why each file was skipped (hash unchanged, filtered by ignore patterns, unsupported extension, extraction failed) or processed (new, changed). Useful when a file isn't appearing in search results and the user wants to know why. `--verbose` combines with `--dry-run` to preview per-file decisions without making changes.
+After the run completes, prints buffered per-file decisions before the summary. Entries explain why each file was skipped (mtime unchanged, hash unchanged, filtered by ignore patterns, unsupported extension, extraction failed) or processed (new, changed, reactivated, deactivated). Useful when a file isn't appearing in search results and the user wants to know why. `--verbose` combines with `--dry-run` to preview per-file decisions without making changes.
 
 ---
 
@@ -670,22 +670,22 @@ Shows: list of spaces with collection counts, doc/chunk counts per collection, t
 **Goal**: Automate periodic re-indexing
 
 ```
-kbolt schedule --every {interval}
-kbolt schedule --every {interval} --no-embed
-kbolt schedule --at {time}
-kbolt schedule --every {interval} --space {name}
-kbolt schedule --every {interval} --space {name} --collection {name}
-kbolt schedule --every {interval} --space {name} --collection {name},{name},...
+kbolt schedule add --every {interval}
+kbolt schedule add --at {time}
+kbolt schedule add --on {day},{day},... --at {time}
+kbolt schedule add --every {interval} --space {name}
+kbolt schedule add --at {time} --space {name} --collection {name}
+kbolt schedule add --on {day},{day},... --at {time} --space {name} --collection {name} --collection {name}
 ```
 
 **Parameters**:
-- **--every** — interval (e.g. `6h`, `30m`, `1d`)
-- **--at** — daily at specific time (e.g. `03:00`)
-- **--no-embed** (optional) — FTS-only re-index for speed
+- **--every** — recurring interval in minutes or hours (e.g. `30m`, `2h`, minimum `5m`)
+- **--at** — daily time, accepts `HH:MM`, `3pm`, or `3:00pm`
+- **--on** (optional) — weekdays for a weekly schedule (e.g. `mon,fri`), requires `--at`
 - **--space** (optional) — scope scheduled updates to a specific space
-- **--collection** (optional) — scope scheduled updates to specific collections
+- **--collection** (optional, repeatable) — scope scheduled updates to one or more collections within the chosen space
 
-Creates a launchd plist (macOS) or cron job / systemd timer (Linux) that runs `kbolt update` on the specified schedule. Without `--space`/`--collection`, schedules a full `kbolt update` across all spaces. With scoping flags, the scheduled command runs `kbolt update --space {name}` or `kbolt update --space {name} --collection {name}` accordingly. Multiple schedules can coexist (e.g. a fast `--no-embed` every 30m for one space, and a full update daily for everything).
+Creates a schedule definition in `~/.config/kbolt/schedules.toml` and reconciles managed launchd jobs (macOS) or systemd user timers (Linux). Without `--space`/`--collection`, schedules a full `kbolt update` across all spaces. With scoping flags, the scheduled command runs the equivalent of `kbolt update --space {name}` or `kbolt update --space {name} --collection {name}...` accordingly. Schedule IDs are short local identifiers like `s1`, `s2`, and are shown by `kbolt schedule status`.
 
 ---
 
@@ -695,10 +695,10 @@ Creates a launchd plist (macOS) or cron job / systemd timer (Linux) that runs `k
 **Goal**: See current scheduled indexing setup
 
 ```
-kbolt schedule --status
+kbolt schedule status
 ```
 
-Shows all active schedules. Each entry shows: scope (all / space / collection), interval/time, last run, next run, whether embedding is included.
+Shows all saved schedules plus any orphaned backend artifacts. Each schedule entry shows: id, trigger, scope, backend, backend state (`installed`, `drifted`, `target_missing`), `last_started`, `last_finished`, and `last_result`. Failed runs also include `last_error`.
 
 ---
 
@@ -708,12 +708,14 @@ Shows all active schedules. Each entry shows: scope (all / space / collection), 
 **Goal**: Stop automated re-indexing
 
 ```
-kbolt schedule --off
-kbolt schedule --off --space {name}
-kbolt schedule --off --space {name} --collection {name}
+kbolt schedule remove {id}
+kbolt schedule remove --all
+kbolt schedule remove --space {name}
+kbolt schedule remove --space {name} --collection {name}
+kbolt schedule remove --space {name} --collection {name} --collection {name}
 ```
 
-Without scoping flags, removes all schedules. With `--space` or `--collection`, removes only the matching schedule. Removes the corresponding launchd plist or cron job.
+Removes schedules by id, all schedules, or by unique scope match. Scope-based removal only succeeds when exactly one saved schedule matches; ambiguous matches fail and list the matching ids. Removal also deletes the schedule's cached run state and reconciles the managed launchd/systemd backend artifacts.
 
 ---
 
@@ -832,10 +834,10 @@ Returns space list, collection list per space, document/chunk counts, embedding 
 
 ### 43. Scheduled re-index
 
-**Actor**: System (cron/launchd)
+**Actor**: System (launchd / systemd user timer)
 **Goal**: Keep index fresh without human intervention
 
-The system runs `kbolt update` (or `kbolt update --no-embed`) on the schedule configured via flow 34. Same pipeline as flow 23, no human interaction. Output is logged to system log.
+The OS scheduler runs the kbolt-managed schedule job by id. The job executes the same update pipeline as flow 23 with no human interaction, records `last_started`, `last_finished`, and `last_result`, and logs through the host scheduler.
 
 ---
 
@@ -867,8 +869,8 @@ The following flows are planned but deferred beyond V1. They are listed here so 
 
 These options apply across multiple commands, not to any specific flow:
 
-- **-s, --space {name}** — set the active space for this command. Overrides `KBOLT_SPACE` env var and configured default. Applies to all commands that operate on collections.
-- **-f, --format cli|json** — output format. `cli` is human-readable (default), `json` is machine-readable for scripting. Applies to: search, status, space list/info, collection list/info, models list, ls.
+- **-s, --space {name}** — set the active space for this command. Overrides `KBOLT_SPACE` env var and configured default. Applies to commands that operate on collections directly. `schedule` uses its own subcommand-level `--space` flag instead of the top-level one.
+- **-f, --format cli|json** — output format. `cli` is human-readable (default), `json` is machine-readable for scripting. Applies to all standard CLI commands except `kbolt mcp`. Structured commands emit their data directly; message-style commands emit JSON success/error envelopes.
 - **--help** — show usage for any command
 - **--version** — show kbolt version
 
