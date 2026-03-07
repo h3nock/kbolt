@@ -1,4 +1,5 @@
 use super::*;
+use kbolt_types::{UpdateDecision, UpdateDecisionKind};
 
 impl Engine {
     pub fn update(&self, options: UpdateOptions) -> Result<UpdateReport> {
@@ -427,10 +428,6 @@ impl Engine {
                 continue;
             }
 
-            if !extension_allowed(entry.path(), extension_filter.as_ref()) {
-                continue;
-            }
-
             let relative_path =
                 match collection_relative_path(&target.collection.path, entry.path()) {
                     Ok(path) => path,
@@ -443,16 +440,44 @@ impl Engine {
                     }
                 };
 
+            if !extension_allowed(entry.path(), extension_filter.as_ref()) {
+                push_update_decision(
+                    report,
+                    options,
+                    target,
+                    &relative_path,
+                    UpdateDecisionKind::Unsupported,
+                    Some("extension not allowed".to_string()),
+                );
+                continue;
+            }
+
             if let Some(matcher) = ignore_matcher.as_ref() {
                 if matcher
                     .matched(Path::new(&relative_path), false)
                     .is_ignore()
                 {
+                    push_update_decision(
+                        report,
+                        options,
+                        target,
+                        &relative_path,
+                        UpdateDecisionKind::Ignored,
+                        Some("matched ignore patterns".to_string()),
+                    );
                     continue;
                 }
             }
 
             let Some(extractor) = extractor_registry.resolve_for_path(entry.path()) else {
+                push_update_decision(
+                    report,
+                    options,
+                    target,
+                    &relative_path,
+                    UpdateDecisionKind::Unsupported,
+                    Some("no extractor available".to_string()),
+                );
                 continue;
             };
 
@@ -462,10 +487,18 @@ impl Engine {
             let metadata = match entry.metadata() {
                 Ok(data) => data,
                 Err(err) => {
-                    report.errors.push(file_error(
-                        Some(entry.path().to_path_buf()),
-                        err.to_string(),
-                    ));
+                    let detail = format!("metadata error: {err}");
+                    push_update_decision(
+                        report,
+                        options,
+                        target,
+                        &relative_path,
+                        UpdateDecisionKind::ReadFailed,
+                        Some(detail.clone()),
+                    );
+                    report
+                        .errors
+                        .push(file_error(Some(entry.path().to_path_buf()), detail));
                     continue;
                 }
             };
@@ -473,10 +506,18 @@ impl Engine {
             let modified = match modified_token(&metadata) {
                 Ok(value) => value,
                 Err(err) => {
-                    report.errors.push(file_error(
-                        Some(entry.path().to_path_buf()),
-                        format!("modified timestamp error: {err}"),
-                    ));
+                    let detail = format!("modified timestamp error: {err}");
+                    push_update_decision(
+                        report,
+                        options,
+                        target,
+                        &relative_path,
+                        UpdateDecisionKind::ReadFailed,
+                        Some(detail.clone()),
+                    );
+                    report
+                        .errors
+                        .push(file_error(Some(entry.path().to_path_buf()), detail));
                     continue;
                 }
             };
@@ -484,6 +525,14 @@ impl Engine {
             if let Some(existing) = docs_by_path.get(&relative_path) {
                 if existing.active && existing.modified == modified {
                     report.skipped_mtime += 1;
+                    push_update_decision(
+                        report,
+                        options,
+                        target,
+                        &relative_path,
+                        UpdateDecisionKind::SkippedMtime,
+                        None,
+                    );
                     continue;
                 }
             }
@@ -491,10 +540,18 @@ impl Engine {
             let bytes = match std::fs::read(entry.path()) {
                 Ok(data) => data,
                 Err(err) => {
-                    report.errors.push(file_error(
-                        Some(entry.path().to_path_buf()),
-                        err.to_string(),
-                    ));
+                    let detail = err.to_string();
+                    push_update_decision(
+                        report,
+                        options,
+                        target,
+                        &relative_path,
+                        UpdateDecisionKind::ReadFailed,
+                        Some(detail.clone()),
+                    );
+                    report
+                        .errors
+                        .push(file_error(Some(entry.path().to_path_buf()), detail));
                     continue;
                 }
             };
@@ -502,12 +559,29 @@ impl Engine {
             let mut title = file_title(entry.path());
 
             let existing = docs_by_path.get(&relative_path).cloned();
+            let pending_decision;
             if let Some(doc) = existing.as_ref() {
                 if doc.hash == hash {
                     if doc.active {
                         report.skipped_hash += 1;
+                        push_update_decision(
+                            report,
+                            options,
+                            target,
+                            &relative_path,
+                            UpdateDecisionKind::SkippedHash,
+                            None,
+                        );
                     } else {
                         report.reactivated += 1;
+                        push_update_decision(
+                            report,
+                            options,
+                            target,
+                            &relative_path,
+                            UpdateDecisionKind::Reactivated,
+                            None,
+                        );
                     }
 
                     if !options.dry_run {
@@ -521,21 +595,36 @@ impl Engine {
                 if !doc.active {
                     report.reactivated += 1;
                 }
+                pending_decision = (
+                    UpdateDecisionKind::Changed,
+                    (!doc.active).then_some("reactivated".to_string()),
+                );
             } else {
                 report.added += 1;
+                pending_decision = (UpdateDecisionKind::New, None);
             }
 
             if options.dry_run {
+                let (kind, detail) = pending_decision;
+                push_update_decision(report, options, target, &relative_path, kind, detail);
                 continue;
             }
 
             let extracted = match extractor.extract(entry.path(), &bytes) {
                 Ok(document) => document,
                 Err(err) => {
-                    report.errors.push(file_error(
-                        Some(entry.path().to_path_buf()),
-                        format!("extract failed: {err}"),
-                    ));
+                    let detail = format!("extract failed: {err}");
+                    push_update_decision(
+                        report,
+                        options,
+                        target,
+                        &relative_path,
+                        UpdateDecisionKind::ExtractFailed,
+                        Some(detail.clone()),
+                    );
+                    report
+                        .errors
+                        .push(file_error(Some(entry.path().to_path_buf()), detail));
                     continue;
                 }
             };
@@ -616,12 +705,29 @@ impl Engine {
                         ))
                     })?,
             );
+            let (kind, detail) = pending_decision;
+            push_update_decision(report, options, target, &relative_path, kind, detail);
             touched_collection = true;
         }
 
-        for doc in docs_by_path.values() {
+        let mut missing_docs = docs_by_path
+            .values()
+            .filter(|doc| doc.active && !seen_paths.contains(&doc.path))
+            .cloned()
+            .collect::<Vec<_>>();
+        missing_docs.sort_by(|left, right| left.path.cmp(&right.path));
+
+        for doc in missing_docs {
             if doc.active && !seen_paths.contains(&doc.path) {
                 report.deactivated += 1;
+                push_update_decision(
+                    report,
+                    options,
+                    target,
+                    &doc.path,
+                    UpdateDecisionKind::Deactivated,
+                    None,
+                );
                 if !options.dry_run {
                     self.storage.deactivate_document(doc.id)?;
                     touched_collection = true;
@@ -636,4 +742,25 @@ impl Engine {
 
         Ok(())
     }
+}
+
+fn push_update_decision(
+    report: &mut UpdateReport,
+    options: &UpdateOptions,
+    target: &UpdateTarget,
+    path: &str,
+    kind: UpdateDecisionKind,
+    detail: Option<String>,
+) {
+    if !options.verbose {
+        return;
+    }
+
+    report.decisions.push(UpdateDecision {
+        space: target.space.clone(),
+        collection: target.collection.name.clone(),
+        path: path.to_string(),
+        kind,
+        detail,
+    });
 }

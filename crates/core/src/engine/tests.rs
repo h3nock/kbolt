@@ -14,7 +14,7 @@ use crate::storage::Storage;
 use crate::ModelPullEvent;
 use kbolt_types::{
     ActiveSpaceSource, AddCollectionRequest, GetRequest, KboltError, Locator, MultiGetRequest,
-    OmitReason, SearchMode, SearchRequest, UpdateOptions,
+    OmitReason, SearchMode, SearchRequest, UpdateDecisionKind, UpdateOptions,
 };
 
 #[derive(Default)]
@@ -250,6 +250,12 @@ fn update_options(space: Option<&str>, collections: &[&str]) -> UpdateOptions {
         dry_run: false,
         verbose: false,
     }
+}
+
+fn verbose_update_options(space: Option<&str>, collections: &[&str]) -> UpdateOptions {
+    let mut options = update_options(space, collections);
+    options.verbose = true;
+    options
 }
 
 fn add_collection_fixture(engine: &Engine, space: &str, name: &str, path: std::path::PathBuf) {
@@ -3024,6 +3030,96 @@ fn update_applies_collection_ignore_patterns() {
 }
 
 #[test]
+fn update_verbose_records_new_ignored_unsupported_and_extract_failed_decisions() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        engine
+            .add_collection(AddCollectionRequest {
+                path: collection_path.clone(),
+                space: Some("work".to_string()),
+                name: Some("api".to_string()),
+                description: None,
+                extensions: Some(vec!["rs".to_string()]),
+                no_index: true,
+            })
+            .expect("add filtered collection");
+
+        write_text_file(&collection_path.join("src/lib.rs"), "fn alpha() {}\n");
+        write_text_file(
+            &collection_path.join("docs/ignored.rs"),
+            "fn ignored() {}\n",
+        );
+        write_text_file(
+            &collection_path.join("notes/guide.md"),
+            "# ignored by ext\n",
+        );
+        if let Some(parent) = collection_path.join("src/bad.rs").parent() {
+            std::fs::create_dir_all(parent).expect("create bad.rs parent");
+        }
+        std::fs::write(collection_path.join("src/bad.rs"), [0xff, 0xfe, 0xfd])
+            .expect("write invalid utf8 file");
+
+        let ignore_path = engine
+            .config()
+            .config_dir
+            .join("ignores")
+            .join("work")
+            .join("api.ignore");
+        write_text_file(&ignore_path, "docs/**\n");
+
+        let report = engine
+            .update(verbose_update_options(Some("work"), &["api"]))
+            .expect("run verbose update");
+
+        let new = report
+            .decisions
+            .iter()
+            .find(|decision| decision.path == "src/lib.rs")
+            .expect("expected new decision");
+        assert_eq!(new.space, "work");
+        assert_eq!(new.collection, "api");
+        assert_eq!(new.kind, UpdateDecisionKind::New);
+        assert_eq!(new.detail, None);
+
+        let ignored = report
+            .decisions
+            .iter()
+            .find(|decision| decision.path == "docs/ignored.rs")
+            .expect("expected ignored decision");
+        assert_eq!(ignored.kind, UpdateDecisionKind::Ignored);
+        assert_eq!(ignored.detail.as_deref(), Some("matched ignore patterns"));
+
+        let unsupported = report
+            .decisions
+            .iter()
+            .find(|decision| decision.path == "notes/guide.md")
+            .expect("expected unsupported decision");
+        assert_eq!(unsupported.kind, UpdateDecisionKind::Unsupported);
+        assert_eq!(unsupported.detail.as_deref(), Some("extension not allowed"));
+
+        let extract_failed = report
+            .decisions
+            .iter()
+            .find(|decision| decision.path == "src/bad.rs")
+            .expect("expected extract failure decision");
+        assert_eq!(extract_failed.kind, UpdateDecisionKind::ExtractFailed);
+        assert!(
+            extract_failed
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("non-utf8 code input")),
+            "unexpected extract failure detail: {:?}",
+            extract_failed.detail
+        );
+    });
+}
+
+#[test]
 fn update_tracks_modified_and_deactivated_documents() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
@@ -3066,6 +3162,77 @@ fn update_tracks_modified_and_deactivated_documents() {
             .expect("list all documents");
         assert_eq!(docs.len(), 1);
         assert!(!docs[0].active, "removed document should be inactive");
+    });
+}
+
+#[test]
+fn update_verbose_records_skip_change_deactivate_and_reactivate_decisions() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("src/lib.rs");
+        write_text_file(&file_path, "fn alpha() {}\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let skipped_mtime = engine
+            .update(verbose_update_options(Some("work"), &["api"]))
+            .expect("second update");
+        assert_eq!(skipped_mtime.decisions.len(), 1);
+        assert_eq!(skipped_mtime.decisions[0].path, "src/lib.rs");
+        assert_eq!(
+            skipped_mtime.decisions[0].kind,
+            UpdateDecisionKind::SkippedMtime
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        write_text_file(&file_path, "fn alpha() {}\n");
+        let skipped_hash = engine
+            .update(verbose_update_options(Some("work"), &["api"]))
+            .expect("hash-stable update");
+        assert_eq!(skipped_hash.decisions.len(), 1);
+        assert_eq!(
+            skipped_hash.decisions[0].kind,
+            UpdateDecisionKind::SkippedHash
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        write_text_file(&file_path, "fn beta() {}\n");
+        let changed = engine
+            .update(verbose_update_options(Some("work"), &["api"]))
+            .expect("changed update");
+        assert_eq!(changed.decisions.len(), 1);
+        assert_eq!(changed.decisions[0].kind, UpdateDecisionKind::Changed);
+        assert_eq!(changed.decisions[0].detail, None);
+
+        std::fs::remove_file(&file_path).expect("remove file");
+        let deactivated = engine
+            .update(verbose_update_options(Some("work"), &["api"]))
+            .expect("deactivate removed file");
+        assert_eq!(deactivated.decisions.len(), 1);
+        assert_eq!(
+            deactivated.decisions[0].kind,
+            UpdateDecisionKind::Deactivated
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        write_text_file(&file_path, "fn beta() {}\n");
+        let reactivated = engine
+            .update(verbose_update_options(Some("work"), &["api"]))
+            .expect("reactivate file");
+        assert_eq!(reactivated.decisions.len(), 1);
+        assert_eq!(
+            reactivated.decisions[0].kind,
+            UpdateDecisionKind::Reactivated
+        );
+        assert_eq!(reactivated.decisions[0].detail, None);
     });
 }
 

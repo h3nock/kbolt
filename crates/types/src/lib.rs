@@ -11,7 +11,7 @@ pub use document::{
     OmitReason, OmittedFile,
 };
 pub use error::{KboltError, Result};
-pub use indexing::{FileError, UpdateOptions, UpdateReport};
+pub use indexing::{FileError, UpdateDecision, UpdateDecisionKind, UpdateOptions, UpdateReport};
 pub use model::PullReport;
 pub use search::{SearchMode, SearchRequest, SearchResponse, SearchResult, SearchSignals};
 pub use space::{ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, SpaceInfo};
