@@ -29,6 +29,12 @@ fn main() {
 }
 
 fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
+    if let Some(schedule_id) = parse_internal_schedule_run(&argv)? {
+        let engine = Engine::new(None)?;
+        engine.run_schedule(&schedule_id)?;
+        return Ok(());
+    }
+
     let cli = Cli::try_parse_from(argv)?;
     ensure_supported_output_format(cli.format, &cli.command)?;
     maybe_print_first_run_models_hint(&cli.command, cli.format);
@@ -538,6 +544,8 @@ enum RequestedSearchMode {
     Semantic,
 }
 
+const INTERNAL_SCHEDULE_RUN_COMMAND: &str = "__schedule-run";
+
 fn requested_search_mode(search: &SearchArgs) -> RequestedSearchMode {
     if search.deep {
         RequestedSearchMode::Deep
@@ -552,6 +560,40 @@ fn requested_search_mode(search: &SearchArgs) -> RequestedSearchMode {
 
 fn is_model_not_available_error(err: &CoreError) -> bool {
     matches!(err, CoreError::Domain(KboltError::ModelNotAvailable { .. }))
+}
+
+fn parse_internal_schedule_run(args: &[OsString]) -> std::result::Result<Option<String>, RunError> {
+    let Some(command) = args.get(1).and_then(|arg| arg.to_str()) else {
+        return Ok(None);
+    };
+
+    if command != INTERNAL_SCHEDULE_RUN_COMMAND {
+        return Ok(None);
+    }
+
+    if args.len() != 3 {
+        return Err(CoreError::Domain(KboltError::InvalidInput(format!(
+            "internal schedule runner usage: kbolt {INTERNAL_SCHEDULE_RUN_COMMAND} <id>"
+        )))
+        .into());
+    }
+
+    let Some(raw_id) = args.get(2).and_then(|arg| arg.to_str()) else {
+        return Err(CoreError::Domain(KboltError::InvalidInput(
+            "schedule id must be valid utf-8".to_string(),
+        ))
+        .into());
+    };
+
+    let schedule_id = raw_id.trim();
+    if schedule_id.is_empty() {
+        return Err(CoreError::Domain(KboltError::InvalidInput(
+            "schedule id must not be empty".to_string(),
+        ))
+        .into());
+    }
+
+    Ok(Some(schedule_id.to_string()))
 }
 
 fn requested_output_format_from_args(args: &[OsString]) -> OutputFormat {
@@ -796,13 +838,14 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ensure_supported_output_format, is_model_not_available_error, parse_pull_confirmation,
-        render_error_output, render_message_output, render_structured_output,
-        requested_output_format_from_args, requested_search_mode,
+        ensure_supported_output_format, is_model_not_available_error, parse_internal_schedule_run,
+        parse_pull_confirmation, render_error_output, render_message_output,
+        render_structured_output, requested_output_format_from_args, requested_search_mode,
         should_offer_model_pull_for_collection_add, should_offer_model_pull_for_update,
         should_show_first_run_models_hint, supports_interactive_output,
         with_collection_add_model_missing_guidance, with_update_model_missing_guidance,
         DefaultSpaceJsonResponse, IgnoreShowJsonResponse, RequestedSearchMode, RunError,
+        INTERNAL_SCHEDULE_RUN_COMMAND,
     };
     use kbolt_cli::args::{Cli, Command, OutputFormat, SearchArgs};
     use kbolt_core::error::CoreError;
@@ -857,6 +900,47 @@ mod tests {
         assert!(!parse_pull_confirmation("n"));
         assert!(!parse_pull_confirmation("no"));
         assert!(!parse_pull_confirmation("anything else"));
+    }
+
+    #[test]
+    fn parse_internal_schedule_run_recognizes_hidden_runner_command() {
+        let parsed = parse_internal_schedule_run(&[
+            OsString::from("kbolt"),
+            OsString::from(INTERNAL_SCHEDULE_RUN_COMMAND),
+            OsString::from("s2"),
+        ])
+        .expect("parse internal runner");
+
+        assert_eq!(parsed.as_deref(), Some("s2"));
+    }
+
+    #[test]
+    fn parse_internal_schedule_run_ignores_normal_cli_invocations() {
+        let parsed =
+            parse_internal_schedule_run(&[OsString::from("kbolt"), OsString::from("status")])
+                .expect("parse normal cli");
+
+        assert_eq!(parsed, None);
+    }
+
+    #[test]
+    fn parse_internal_schedule_run_rejects_missing_or_empty_ids() {
+        let missing = parse_internal_schedule_run(&[
+            OsString::from("kbolt"),
+            OsString::from(INTERNAL_SCHEDULE_RUN_COMMAND),
+        ])
+        .expect_err("missing id should fail");
+        assert!(missing
+            .to_string()
+            .contains("internal schedule runner usage"));
+
+        let empty = parse_internal_schedule_run(&[
+            OsString::from("kbolt"),
+            OsString::from(INTERNAL_SCHEDULE_RUN_COMMAND),
+            OsString::from("   "),
+        ])
+        .expect_err("empty id should fail");
+        assert!(empty.to_string().contains("schedule id must not be empty"));
     }
 
     #[test]
