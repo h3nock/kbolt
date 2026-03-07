@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +18,7 @@ pub(crate) struct LaunchdPaths {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LaunchdJob {
+    pub schedule_id: String,
     pub label: String,
     pub plist_path: PathBuf,
     pub plist_contents: String,
@@ -41,6 +42,7 @@ pub(crate) fn plan_launchd(
             let plist_path = paths.agents_dir.join(format!("{label}.plist"));
             let plist_contents = render_launchd_plist(schedule, executable, &paths.log_dir)?;
             Ok(LaunchdJob {
+                schedule_id: schedule.id.clone(),
                 label,
                 plist_path,
                 plist_contents,
@@ -80,8 +82,19 @@ pub(crate) fn inspect_launchd(
 ) -> Result<BackendInspection> {
     let plan = plan_launchd(paths, schedules, executable)?;
     let mut drifted_ids = HashSet::new();
+    let planned_jobs = plan
+        .jobs
+        .iter()
+        .map(|job| (job.schedule_id.as_str(), job))
+        .collect::<HashMap<_, _>>();
 
-    for (schedule, job) in schedules.iter().zip(&plan.jobs) {
+    for schedule in schedules {
+        let job = planned_jobs.get(schedule.id.as_str()).ok_or_else(|| {
+            KboltError::Internal(format!(
+                "planned launchd job missing for schedule {}",
+                schedule.id
+            ))
+        })?;
         if launchd_job_is_drifted(job, paths, runner)? {
             drifted_ids.insert(schedule.id.clone());
         }
@@ -489,6 +502,52 @@ mod tests {
 
         assert_eq!(inspection.drifted_ids, HashSet::from(["s1".to_string()]));
         assert_eq!(inspection.orphan_ids, vec!["s9".to_string()]);
+    }
+
+    #[test]
+    fn inspect_launchd_matches_jobs_by_schedule_id_when_ids_reach_double_digits() {
+        let tmp = tempdir().expect("create tempdir");
+        let schedules = vec![
+            ScheduleDefinition {
+                id: "s2".to_string(),
+                trigger: ScheduleTrigger::Daily {
+                    time: "09:00".to_string(),
+                },
+                scope: ScheduleScope::All,
+            },
+            ScheduleDefinition {
+                id: "s10".to_string(),
+                trigger: ScheduleTrigger::Daily {
+                    time: "10:00".to_string(),
+                },
+                scope: ScheduleScope::All,
+            },
+        ];
+        let paths = LaunchdPaths {
+            agents_dir: tmp.path().join("LaunchAgents"),
+            log_dir: tmp.path().join("logs"),
+            domain: "gui/test".to_string(),
+        };
+        std::fs::create_dir_all(&paths.agents_dir).expect("create agents dir");
+
+        let plan =
+            plan_launchd(&paths, &schedules, Path::new("/usr/local/bin/kbolt")).expect("plan");
+        let s2_job = plan
+            .jobs
+            .iter()
+            .find(|job| job.schedule_id == "s2")
+            .expect("s2 job");
+        std::fs::write(&s2_job.plist_path, &s2_job.plist_contents).expect("write s2 job");
+
+        let inspection = inspect_launchd(
+            &paths,
+            &schedules,
+            Path::new("/usr/local/bin/kbolt"),
+            &NoopRunner,
+        )
+        .expect("inspect launchd");
+
+        assert_eq!(inspection.drifted_ids, HashSet::from(["s10".to_string()]));
     }
 
     #[test]

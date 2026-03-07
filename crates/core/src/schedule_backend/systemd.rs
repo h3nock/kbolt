@@ -1,8 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use kbolt_types::{ScheduleDefinition, ScheduleIntervalUnit, ScheduleTrigger, ScheduleWeekday};
+use kbolt_types::{
+    KboltError, ScheduleDefinition, ScheduleIntervalUnit, ScheduleTrigger, ScheduleWeekday,
+};
 
 use super::{command_failure, write_if_changed, BackendInspection, CommandRunner};
 use crate::Result;
@@ -16,6 +18,7 @@ pub(crate) struct SystemdUserPaths {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SystemdServiceUnit {
+    pub schedule_id: String,
     pub name: String,
     pub path: PathBuf,
     pub contents: String,
@@ -23,6 +26,7 @@ pub(crate) struct SystemdServiceUnit {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SystemdTimerUnit {
+    pub schedule_id: String,
     pub name: String,
     pub path: PathBuf,
     pub contents: String,
@@ -46,11 +50,13 @@ pub(crate) fn plan_systemd_user(
         let service_name = systemd_service_name(&schedule.id);
         let timer_name = systemd_timer_name(&schedule.id);
         services.push(SystemdServiceUnit {
+            schedule_id: schedule.id.clone(),
             name: service_name.clone(),
             path: paths.unit_dir.join(&service_name),
             contents: render_systemd_service(schedule, executable),
         });
         timers.push(SystemdTimerUnit {
+            schedule_id: schedule.id.clone(),
             name: timer_name.clone(),
             path: paths.unit_dir.join(&timer_name),
             contents: render_systemd_timer(schedule)?,
@@ -95,8 +101,30 @@ pub(crate) fn inspect_systemd_user(
 ) -> Result<BackendInspection> {
     let plan = plan_systemd_user(paths, schedules, executable)?;
     let mut drifted_ids = HashSet::new();
+    let planned_services = plan
+        .services
+        .iter()
+        .map(|service| (service.schedule_id.as_str(), service))
+        .collect::<HashMap<_, _>>();
+    let planned_timers = plan
+        .timers
+        .iter()
+        .map(|timer| (timer.schedule_id.as_str(), timer))
+        .collect::<HashMap<_, _>>();
 
-    for ((schedule, service), timer) in schedules.iter().zip(&plan.services).zip(&plan.timers) {
+    for schedule in schedules {
+        let service = planned_services.get(schedule.id.as_str()).ok_or_else(|| {
+            KboltError::Internal(format!(
+                "planned systemd service missing for schedule {}",
+                schedule.id
+            ))
+        })?;
+        let timer = planned_timers.get(schedule.id.as_str()).ok_or_else(|| {
+            KboltError::Internal(format!(
+                "planned systemd timer missing for schedule {}",
+                schedule.id
+            ))
+        })?;
         if systemd_unit_is_drifted(&service.path, &service.contents)?
             || systemd_unit_is_drifted(&timer.path, &timer.contents)?
             || !is_systemd_timer_enabled(runner, &timer.name)?
@@ -483,6 +511,56 @@ mod tests {
 
         assert_eq!(inspection.drifted_ids, HashSet::from(["s1".to_string()]));
         assert_eq!(inspection.orphan_ids, vec!["s9".to_string()]);
+    }
+
+    #[test]
+    fn inspect_systemd_matches_units_by_schedule_id_when_ids_reach_double_digits() {
+        let tmp = tempdir().expect("create tempdir");
+        let schedules = vec![
+            ScheduleDefinition {
+                id: "s2".to_string(),
+                trigger: ScheduleTrigger::Daily {
+                    time: "09:00".to_string(),
+                },
+                scope: ScheduleScope::All,
+            },
+            ScheduleDefinition {
+                id: "s10".to_string(),
+                trigger: ScheduleTrigger::Daily {
+                    time: "10:00".to_string(),
+                },
+                scope: ScheduleScope::All,
+            },
+        ];
+        let paths = SystemdUserPaths {
+            unit_dir: tmp.path().join("systemd-user"),
+        };
+        std::fs::create_dir_all(&paths.unit_dir).expect("create unit dir");
+
+        let plan =
+            plan_systemd_user(&paths, &schedules, Path::new("/usr/local/bin/kbolt")).expect("plan");
+        let s2_service = plan
+            .services
+            .iter()
+            .find(|service| service.schedule_id == "s2")
+            .expect("s2 service");
+        let s2_timer = plan
+            .timers
+            .iter()
+            .find(|timer| timer.schedule_id == "s2")
+            .expect("s2 timer");
+        std::fs::write(&s2_service.path, &s2_service.contents).expect("write s2 service");
+        std::fs::write(&s2_timer.path, &s2_timer.contents).expect("write s2 timer");
+
+        let inspection = inspect_systemd_user(
+            &paths,
+            &schedules,
+            Path::new("/usr/local/bin/kbolt"),
+            &NoopRunner,
+        )
+        .expect("inspect systemd");
+
+        assert_eq!(inspection.drifted_ids, HashSet::from(["s10".to_string()]));
     }
 
     #[test]
