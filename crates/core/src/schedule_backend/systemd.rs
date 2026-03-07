@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use kbolt_types::{ScheduleDefinition, ScheduleIntervalUnit, ScheduleTrigger, ScheduleWeekday};
 
+use super::{command_failure, write_if_changed, BackendInspection, CommandRunner};
 use crate::Result;
 
 const MANAGED_UNIT_PREFIX: &str = "kbolt-schedule-";
@@ -39,8 +40,6 @@ pub(crate) fn plan_systemd_user(
     schedules: &[ScheduleDefinition],
     executable: &Path,
 ) -> Result<SystemdPlan> {
-    fs::create_dir_all(&paths.unit_dir)?;
-
     let mut services = Vec::with_capacity(schedules.len());
     let mut timers = Vec::with_capacity(schedules.len());
     for schedule in schedules {
@@ -67,14 +66,16 @@ pub(crate) fn plan_systemd_user(
         .collect::<HashSet<_>>();
 
     let mut stale_paths = Vec::new();
-    for entry in fs::read_dir(&paths.unit_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !is_managed_systemd_unit(&path) {
-            continue;
-        }
-        if !desired_paths.contains(&path) {
-            stale_paths.push(path);
+    if let Ok(entries) = fs::read_dir(&paths.unit_dir) {
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if !is_managed_systemd_unit(&path) {
+                continue;
+            }
+            if !desired_paths.contains(&path) {
+                stale_paths.push(path);
+            }
         }
     }
     stale_paths.sort();
@@ -84,6 +85,98 @@ pub(crate) fn plan_systemd_user(
         timers,
         stale_paths,
     })
+}
+
+pub(crate) fn inspect_systemd_user(
+    paths: &SystemdUserPaths,
+    schedules: &[ScheduleDefinition],
+    executable: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<BackendInspection> {
+    let plan = plan_systemd_user(paths, schedules, executable)?;
+    let mut drifted_ids = HashSet::new();
+
+    for ((schedule, service), timer) in schedules.iter().zip(&plan.services).zip(&plan.timers) {
+        if systemd_unit_is_drifted(&service.path, &service.contents)?
+            || systemd_unit_is_drifted(&timer.path, &timer.contents)?
+            || !is_systemd_timer_enabled(runner, &timer.name)?
+        {
+            drifted_ids.insert(schedule.id.clone());
+        }
+    }
+
+    let orphan_ids = plan
+        .stale_paths
+        .iter()
+        .filter_map(|path| schedule_id_from_systemd_path(path))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut orphan_ids = orphan_ids;
+    orphan_ids.sort_by_key(|id| schedule_id_number(id));
+
+    Ok(BackendInspection {
+        drifted_ids,
+        orphan_ids,
+    })
+}
+
+pub(crate) fn reconcile_systemd_user(
+    paths: &SystemdUserPaths,
+    schedules: &[ScheduleDefinition],
+    executable: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<()> {
+    fs::create_dir_all(&paths.unit_dir)?;
+
+    let plan = plan_systemd_user(paths, schedules, executable)?;
+    let mut changed_backend = false;
+    let stale_ids = plan
+        .stale_paths
+        .iter()
+        .filter_map(|path| schedule_id_from_systemd_path(path))
+        .collect::<HashSet<_>>();
+
+    for schedule_id in &stale_ids {
+        disable_systemd_timer(runner, &systemd_timer_name(schedule_id))?;
+    }
+
+    for stale_path in &plan.stale_paths {
+        match fs::remove_file(stale_path) {
+            Ok(()) => changed_backend = true,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    for service in &plan.services {
+        changed_backend |= write_if_changed(&service.path, &service.contents)?;
+    }
+
+    for timer in &plan.timers {
+        changed_backend |= write_if_changed(&timer.path, &timer.contents)?;
+    }
+
+    if changed_backend {
+        let output = runner.run("systemctl", &["--user", "daemon-reload"])?;
+        if !output.success {
+            return Err(command_failure("systemctl", &["--user", "daemon-reload"], &output).into());
+        }
+    }
+
+    for timer in &plan.timers {
+        let output = runner.run("systemctl", &["--user", "enable", "--now", &timer.name])?;
+        if !output.success {
+            return Err(command_failure(
+                "systemctl",
+                &["--user", "enable", "--now", &timer.name],
+                &output,
+            )
+            .into());
+        }
+    }
+
+    Ok(())
 }
 
 pub(crate) fn render_systemd_service(schedule: &ScheduleDefinition, executable: &Path) -> String {
@@ -139,6 +232,73 @@ fn is_managed_systemd_unit(path: &Path) -> bool {
         })
 }
 
+fn systemd_unit_is_drifted(path: &Path, expected: &str) -> Result<bool> {
+    match fs::read_to_string(path) {
+        Ok(existing) => Ok(existing != expected),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn is_systemd_timer_enabled(runner: &dyn CommandRunner, timer_name: &str) -> Result<bool> {
+    let output = runner.run("systemctl", &["--user", "is-enabled", timer_name])?;
+    if output.success {
+        return Ok(true);
+    }
+
+    if is_missing_systemd_unit(&output.stdout) || is_missing_systemd_unit(&output.stderr) {
+        return Ok(false);
+    }
+
+    if output.stdout.trim() == "disabled" {
+        return Ok(false);
+    }
+
+    Err(command_failure("systemctl", &["--user", "is-enabled", timer_name], &output).into())
+}
+
+fn disable_systemd_timer(runner: &dyn CommandRunner, timer_name: &str) -> Result<()> {
+    let output = runner.run("systemctl", &["--user", "disable", "--now", timer_name])?;
+    if output.success
+        || is_missing_systemd_unit(&output.stdout)
+        || is_missing_systemd_unit(&output.stderr)
+    {
+        return Ok(());
+    }
+
+    Err(command_failure(
+        "systemctl",
+        &["--user", "disable", "--now", timer_name],
+        &output,
+    )
+    .into())
+}
+
+fn is_missing_systemd_unit(output: &str) -> bool {
+    let normalized = output.to_ascii_lowercase();
+    normalized.contains("not loaded")
+        || normalized.contains("not found")
+        || normalized.contains("no such file")
+}
+
+fn schedule_id_from_systemd_path(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| {
+            name.strip_prefix(MANAGED_UNIT_PREFIX).and_then(|rest| {
+                rest.strip_suffix(".service")
+                    .or_else(|| rest.strip_suffix(".timer"))
+            })
+        })
+        .map(ToString::to_string)
+}
+
+fn schedule_id_number(id: &str) -> u32 {
+    id.strip_prefix('s')
+        .and_then(|raw| raw.parse::<u32>().ok())
+        .unwrap_or(u32::MAX)
+}
+
 fn systemd_calendar(weekdays: Option<&[ScheduleWeekday]>, time: &str) -> Result<String> {
     let (hour, minute) = parse_canonical_time(time)?;
     let hhmmss = format!("{hour:02}:{minute:02}:00");
@@ -190,13 +350,17 @@ fn shell_escape_arg(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::path::Path;
+    use std::sync::Mutex;
 
     use tempfile::tempdir;
 
     use super::{
-        plan_systemd_user, render_systemd_service, render_systemd_timer, SystemdUserPaths,
+        inspect_systemd_user, plan_systemd_user, reconcile_systemd_user, render_systemd_service,
+        render_systemd_timer, SystemdUserPaths,
     };
+    use crate::schedule_backend::{CommandOutput, CommandRunner};
     use kbolt_types::{
         ScheduleDefinition, ScheduleInterval, ScheduleIntervalUnit, ScheduleScope, ScheduleTrigger,
         ScheduleWeekday,
@@ -287,5 +451,128 @@ mod tests {
                 paths.unit_dir.join("kbolt-schedule-s9.timer"),
             ]
         );
+    }
+
+    #[test]
+    fn inspect_systemd_marks_missing_units_as_drifted_and_extra_units_as_orphans() {
+        let tmp = tempdir().expect("create tempdir");
+        let schedule = ScheduleDefinition {
+            id: "s1".to_string(),
+            trigger: ScheduleTrigger::Daily {
+                time: "09:00".to_string(),
+            },
+            scope: ScheduleScope::All,
+        };
+        let paths = SystemdUserPaths {
+            unit_dir: tmp.path().join("systemd-user"),
+        };
+        std::fs::create_dir_all(&paths.unit_dir).expect("create unit dir");
+        std::fs::write(
+            paths.unit_dir.join("kbolt-schedule-s9.timer"),
+            "orphan timer",
+        )
+        .expect("write orphan timer");
+
+        let inspection = inspect_systemd_user(
+            &paths,
+            &[schedule],
+            Path::new("/usr/local/bin/kbolt"),
+            &NoopRunner,
+        )
+        .expect("inspect systemd");
+
+        assert_eq!(inspection.drifted_ids, HashSet::from(["s1".to_string()]));
+        assert_eq!(inspection.orphan_ids, vec!["s9".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_systemd_writes_units_and_enables_timers() {
+        let tmp = tempdir().expect("create tempdir");
+        let schedule = ScheduleDefinition {
+            id: "s1".to_string(),
+            trigger: ScheduleTrigger::Every {
+                interval: ScheduleInterval {
+                    value: 30,
+                    unit: ScheduleIntervalUnit::Minutes,
+                },
+            },
+            scope: ScheduleScope::All,
+        };
+        let paths = SystemdUserPaths {
+            unit_dir: tmp.path().join("systemd-user"),
+        };
+        let runner = RecordingRunner::new();
+
+        reconcile_systemd_user(
+            &paths,
+            &[schedule],
+            Path::new("/usr/local/bin/kbolt"),
+            &runner,
+        )
+        .expect("reconcile systemd");
+
+        assert!(paths.unit_dir.join("kbolt-schedule-s1.service").exists());
+        assert!(paths.unit_dir.join("kbolt-schedule-s1.timer").exists());
+        assert_eq!(
+            runner.commands(),
+            vec![
+                vec![
+                    "systemctl".to_string(),
+                    "--user".to_string(),
+                    "daemon-reload".to_string(),
+                ],
+                vec![
+                    "systemctl".to_string(),
+                    "--user".to_string(),
+                    "enable".to_string(),
+                    "--now".to_string(),
+                    "kbolt-schedule-s1.timer".to_string(),
+                ],
+            ]
+        );
+    }
+
+    struct NoopRunner;
+
+    impl CommandRunner for NoopRunner {
+        fn run(&self, _program: &str, _args: &[&str]) -> crate::Result<CommandOutput> {
+            Ok(CommandOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    struct RecordingRunner {
+        commands: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl RecordingRunner {
+        fn new() -> Self {
+            Self {
+                commands: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn commands(&self) -> Vec<Vec<String>> {
+            self.commands.lock().expect("lock runner").clone()
+        }
+    }
+
+    impl CommandRunner for RecordingRunner {
+        fn run(&self, program: &str, args: &[&str]) -> crate::Result<CommandOutput> {
+            self.commands.lock().expect("lock runner").push(
+                std::iter::once(program.to_string())
+                    .chain(args.iter().map(|arg| arg.to_string()))
+                    .collect(),
+            );
+
+            Ok(CommandOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
     }
 }
