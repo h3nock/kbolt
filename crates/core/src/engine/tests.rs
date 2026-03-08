@@ -6,7 +6,7 @@ use tempfile::tempdir;
 
 use crate::config::{
     ChunkingConfig, Config, EmbeddingConfig, InferenceConfig, ModelConfig, ModelProvider,
-    ModelSourceConfig, ReapingConfig,
+    ModelSourceConfig, ReapingConfig, TextInferenceConfig, TextInferenceProvider,
 };
 use crate::engine::{retrieval_text_with_prefix, Engine};
 use crate::ingest::chunk::FinalChunkKind;
@@ -220,6 +220,145 @@ fn test_engine_with_reaping_days(days: u32) -> Engine {
         embeddings: None,
         inference: InferenceConfig::default(),
         reaping: ReapingConfig { days },
+        chunking: ChunkingConfig::default(),
+    };
+    Engine::from_parts(storage, config)
+}
+
+fn local_text_inference_config(model_file: &str) -> TextInferenceConfig {
+    TextInferenceConfig {
+        provider: TextInferenceProvider::LocalLlama {
+            model_file: Some(model_file.to_string()),
+            max_tokens: 256,
+            n_ctx: 2048,
+            n_gpu_layers: 0,
+        },
+    }
+}
+
+fn test_engine_with_missing_embedder_model() -> Engine {
+    let root = tempdir().expect("create temp root");
+    let root_path = root.path().to_path_buf();
+    std::mem::forget(root);
+    let config_dir = root_path.join("config");
+    let cache_dir = root_path.join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+    let config = Config {
+        config_dir,
+        cache_dir,
+        default_space: None,
+        models: ModelConfig {
+            embedder: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "embed-model".to_string(),
+                revision: None,
+            },
+            reranker: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "reranker-model".to_string(),
+                revision: None,
+            },
+            expander: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "expander-model".to_string(),
+                revision: None,
+            },
+        },
+        embeddings: Some(EmbeddingConfig::LocalGguf {
+            model_file: Some("missing-embedder.gguf".to_string()),
+            batch_size: 8,
+            n_threads: None,
+            n_threads_batch: None,
+        }),
+        inference: InferenceConfig::default(),
+        reaping: ReapingConfig { days: 7 },
+        chunking: ChunkingConfig::default(),
+    };
+    let model_dir = config.cache_dir.join("models");
+    let embedder = crate::models::build_embedder_with_local_runtime(
+        config.embeddings.as_ref(),
+        &config.models,
+        &model_dir,
+    )
+    .expect("build embedder for test engine");
+    Engine::from_parts_with_embedder(storage, config, embedder)
+}
+
+fn test_engine_with_embedder_and_missing_reranker_model(
+    embedder: Arc<dyn crate::models::Embedder>,
+) -> Engine {
+    let root = tempdir().expect("create temp root");
+    let root_path = root.path().to_path_buf();
+    std::mem::forget(root);
+    let config_dir = root_path.join("config");
+    let cache_dir = root_path.join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+    let config = Config {
+        config_dir,
+        cache_dir,
+        default_space: None,
+        models: ModelConfig {
+            embedder: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "embed-model".to_string(),
+                revision: None,
+            },
+            reranker: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "reranker-model".to_string(),
+                revision: None,
+            },
+            expander: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "expander-model".to_string(),
+                revision: None,
+            },
+        },
+        embeddings: None,
+        inference: InferenceConfig {
+            reranker: Some(local_text_inference_config("missing-reranker.gguf")),
+            expander: None,
+        },
+        reaping: ReapingConfig { days: 7 },
+        chunking: ChunkingConfig::default(),
+    };
+    Engine::from_parts_with_embedder(storage, config, Some(embedder))
+}
+
+fn test_engine_with_missing_expander_model() -> Engine {
+    let root = tempdir().expect("create temp root");
+    let root_path = root.path().to_path_buf();
+    std::mem::forget(root);
+    let config_dir = root_path.join("config");
+    let cache_dir = root_path.join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+    let config = Config {
+        config_dir,
+        cache_dir,
+        default_space: None,
+        models: ModelConfig {
+            embedder: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "embed-model".to_string(),
+                revision: None,
+            },
+            reranker: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "reranker-model".to_string(),
+                revision: None,
+            },
+            expander: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "expander-model".to_string(),
+                revision: None,
+            },
+        },
+        embeddings: None,
+        inference: InferenceConfig {
+            reranker: None,
+            expander: Some(local_text_inference_config("missing-expander.gguf")),
+        },
+        reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
     };
     Engine::from_parts(storage, config)
@@ -1854,13 +1993,77 @@ fn search_auto_mode_uses_keyword_path_and_scopes_space() {
                 collections: vec![],
                 limit: 10,
                 min_score: 0.0,
-                no_rerank: false,
+                no_rerank: true,
                 debug: false,
             })
             .expect("run auto search");
 
+        assert_eq!(response.requested_mode, SearchMode::Auto);
         assert_eq!(response.effective_mode, SearchMode::Keyword);
+        assert!(response.pipeline.keyword);
+        assert!(!response.pipeline.dense);
+        assert!(
+            response
+                .pipeline
+                .notices
+                .iter()
+                .any(|notice| notice.step == kbolt_types::SearchPipelineStep::Dense),
+            "expected dense-unavailable notice: {:?}",
+            response.pipeline.notices
+        );
         assert!(response.results.iter().all(|item| item.space == "work"));
+    });
+}
+
+#[test]
+fn search_auto_mode_falls_back_when_dense_model_is_missing() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_missing_embedder_model();
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        write_text_file(&work_path.join("guide.md"), "fallback dense token\n");
+        engine
+            .update(UpdateOptions {
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                no_embed: true,
+                dry_run: false,
+                verbose: false,
+            })
+            .expect("index without embeddings");
+
+        let response = engine
+            .search(SearchRequest {
+                query: "fallback dense token".to_string(),
+                mode: SearchMode::Auto,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 10,
+                min_score: 0.0,
+                no_rerank: true,
+                debug: false,
+            })
+            .expect("auto search should fall back to keyword");
+
+        assert_eq!(response.requested_mode, SearchMode::Auto);
+        assert_eq!(response.effective_mode, SearchMode::Keyword);
+        assert!(response.pipeline.keyword);
+        assert!(!response.pipeline.dense);
+        assert!(
+            response.pipeline.notices.iter().any(|notice| {
+                notice.step == kbolt_types::SearchPipelineStep::Dense
+                    && notice.reason
+                        == kbolt_types::SearchPipelineUnavailableReason::ModelNotAvailable
+            }),
+            "expected dense model-missing notice: {:?}",
+            response.pipeline.notices
+        );
+        assert!(!response.results.is_empty(), "expected fallback results");
     });
 }
 
@@ -1979,6 +2182,103 @@ fn search_deep_mode_returns_results_with_reranker_signal() {
         let signals = first.signals.as_ref().expect("debug signals");
         assert!(signals.bm25.is_some() || signals.dense.is_some());
         assert!(signals.reranker.is_some());
+    });
+}
+
+#[test]
+fn search_deep_mode_reports_rerank_unavailable_when_model_is_missing() {
+    with_kbolt_space_env(None, || {
+        let engine =
+            test_engine_with_embedder_and_missing_reranker_model(Arc::new(DeterministicEmbedder));
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        write_text_file(
+            &work_path.join("guide.md"),
+            "# Setup\n\nThis document explains setup steps and install details.\n",
+        );
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let response = engine
+            .search(SearchRequest {
+                query: "setup install".to_string(),
+                mode: SearchMode::Deep,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 10,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: true,
+            })
+            .expect("deep search should skip missing reranker");
+
+        assert_eq!(response.requested_mode, SearchMode::Deep);
+        assert_eq!(response.effective_mode, SearchMode::Deep);
+        assert!(response.pipeline.expansion);
+        assert!(!response.pipeline.rerank);
+        assert!(
+            response.pipeline.notices.iter().any(|notice| {
+                notice.step == kbolt_types::SearchPipelineStep::Rerank
+                    && notice.reason
+                        == kbolt_types::SearchPipelineUnavailableReason::ModelNotAvailable
+            }),
+            "expected rerank model-missing notice: {:?}",
+            response.pipeline.notices
+        );
+        assert!(!response.results.is_empty(), "expected deep results");
+        let first = &response.results[0];
+        let signals = first.signals.as_ref().expect("debug signals");
+        assert!(signals.reranker.is_none());
+    });
+}
+
+#[test]
+fn search_deep_mode_fails_when_expansion_model_is_missing() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_missing_expander_model();
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        write_text_file(&work_path.join("guide.md"), "setup install details\n");
+        engine
+            .update(UpdateOptions {
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                no_embed: true,
+                dry_run: false,
+                verbose: false,
+            })
+            .expect("index without embeddings");
+
+        let err = engine
+            .search(SearchRequest {
+                query: "setup install".to_string(),
+                mode: SearchMode::Deep,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 10,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: false,
+            })
+            .expect_err("deep search should require working expansion");
+
+        match KboltError::from(err) {
+            KboltError::ModelNotAvailable { name } => {
+                assert_eq!(name, "expander-model");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     });
 }
 

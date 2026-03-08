@@ -634,20 +634,9 @@ impl Engine {
         }
 
         let requested_mode = req.mode.clone();
-        let mode = match requested_mode {
-            SearchMode::Auto => {
-                if self.embedder.is_some() {
-                    SearchMode::Auto
-                } else {
-                    SearchMode::Keyword
-                }
-            }
-            SearchMode::Keyword => SearchMode::Keyword,
-            SearchMode::Semantic => SearchMode::Semantic,
-            SearchMode::Deep => SearchMode::Deep,
-        };
-        let rerank_enabled = matches!(mode, SearchMode::Auto | SearchMode::Deep) && !req.no_rerank;
-        let pipeline = self.initial_search_pipeline(&requested_mode, &mode, rerank_enabled);
+        let rerank_enabled =
+            matches!(requested_mode, SearchMode::Auto | SearchMode::Deep) && !req.no_rerank;
+        let mut pipeline = self.initial_search_pipeline(&requested_mode);
 
         let targets = self.resolve_targets(TargetScope {
             space: req.space.as_deref(),
@@ -664,8 +653,8 @@ impl Engine {
             return Ok(SearchResponse {
                 results: Vec::new(),
                 query: req.query,
-                requested_mode,
-                effective_mode: mode,
+                requested_mode: requested_mode.clone(),
+                effective_mode: self.effective_search_mode(&requested_mode, &pipeline),
                 pipeline,
                 staleness_hint,
                 elapsed_ms: started.elapsed().as_millis() as u64,
@@ -686,17 +675,23 @@ impl Engine {
 
         let max_candidates = self.max_search_candidates(&targets)?;
         let mut retrieval_limit =
-            self.initial_search_candidate_limit(&mode, req.limit, rerank_enabled);
+            self.initial_search_candidate_limit(&requested_mode, req.limit, rerank_enabled);
         let results = loop {
-            let ranked_chunks =
-                self.rank_chunks_for_mode(&mode, &targets, query, retrieval_limit, req.min_score)?;
+            let ranked_chunks = self.rank_chunks_for_mode(
+                &requested_mode,
+                &targets,
+                query,
+                retrieval_limit,
+                req.min_score,
+                &mut pipeline,
+            )?;
 
             if ranked_chunks.is_empty() {
                 return Ok(SearchResponse {
                     results: Vec::new(),
                     query: req.query,
-                    requested_mode,
-                    effective_mode: mode,
+                    requested_mode: requested_mode.clone(),
+                    effective_mode: self.effective_search_mode(&requested_mode, &pipeline),
                     pipeline,
                     staleness_hint,
                     elapsed_ms: started.elapsed().as_millis() as u64,
@@ -710,6 +705,7 @@ impl Engine {
                 &collections_by_id,
                 req.debug,
                 rerank_enabled,
+                &mut pipeline,
                 req.limit,
             )?;
 
@@ -730,8 +726,8 @@ impl Engine {
         Ok(SearchResponse {
             results,
             query: req.query,
-            requested_mode,
-            effective_mode: mode,
+            requested_mode: requested_mode.clone(),
+            effective_mode: self.effective_search_mode(&requested_mode, &pipeline),
             pipeline,
             staleness_hint,
             elapsed_ms: started.elapsed().as_millis() as u64,

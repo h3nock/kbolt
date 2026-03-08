@@ -1,35 +1,50 @@
 use super::*;
 
 impl Engine {
-    pub(super) fn initial_search_pipeline(
-        &self,
-        requested_mode: &SearchMode,
-        effective_mode: &SearchMode,
-        rerank_enabled: bool,
-    ) -> SearchPipeline {
+    pub(super) fn initial_search_pipeline(&self, requested_mode: &SearchMode) -> SearchPipeline {
         let mut pipeline = SearchPipeline {
             keyword: matches!(
-                effective_mode,
+                requested_mode,
                 SearchMode::Keyword | SearchMode::Auto | SearchMode::Deep
             ),
-            dense: matches!(
-                effective_mode,
-                SearchMode::Auto | SearchMode::Semantic | SearchMode::Deep
-            ) && self.embedder.is_some(),
-            expansion: matches!(effective_mode, SearchMode::Deep),
-            rerank: rerank_enabled,
+            dense: matches!(requested_mode, SearchMode::Semantic)
+                || matches!(requested_mode, SearchMode::Auto | SearchMode::Deep)
+                    && self.embedder.is_some(),
+            expansion: matches!(requested_mode, SearchMode::Deep),
+            rerank: false,
             notices: Vec::new(),
         };
 
         if matches!(requested_mode, SearchMode::Auto | SearchMode::Deep) && !self.embedder.is_some()
         {
-            pipeline.notices.push(SearchPipelineNotice {
-                step: SearchPipelineStep::Dense,
-                reason: SearchPipelineUnavailableReason::NotConfigured,
-            });
+            pipeline.dense = false;
+            add_search_pipeline_notice(
+                &mut pipeline,
+                SearchPipelineStep::Dense,
+                SearchPipelineUnavailableReason::NotConfigured,
+            );
         }
 
         pipeline
+    }
+
+    pub(super) fn effective_search_mode(
+        &self,
+        requested_mode: &SearchMode,
+        pipeline: &SearchPipeline,
+    ) -> SearchMode {
+        match requested_mode {
+            SearchMode::Auto => {
+                if pipeline.dense || pipeline.rerank {
+                    SearchMode::Auto
+                } else {
+                    SearchMode::Keyword
+                }
+            }
+            SearchMode::Keyword => SearchMode::Keyword,
+            SearchMode::Semantic => SearchMode::Semantic,
+            SearchMode::Deep => SearchMode::Deep,
+        }
     }
 
     pub(super) fn initial_search_candidate_limit(
@@ -69,12 +84,13 @@ impl Engine {
         query: &str,
         limit: usize,
         min_score: f32,
+        pipeline: &mut SearchPipeline,
     ) -> Result<Vec<RankedChunk>> {
         match mode {
             SearchMode::Keyword => self.rank_keyword_chunks(targets, query, limit, min_score),
-            SearchMode::Auto => self.rank_auto_chunks(targets, query, limit, min_score),
+            SearchMode::Auto => self.rank_auto_chunks(targets, query, limit, min_score, pipeline),
             SearchMode::Semantic => self.rank_semantic_chunks(targets, query, limit, min_score),
-            SearchMode::Deep => self.rank_deep_chunks(targets, query, limit, min_score),
+            SearchMode::Deep => self.rank_deep_chunks(targets, query, limit, min_score, pipeline),
         }
     }
 
@@ -212,11 +228,27 @@ impl Engine {
         query: &str,
         limit: usize,
         min_score: f32,
+        pipeline: &mut SearchPipeline,
     ) -> Result<Vec<RankedChunk>> {
         let candidate_limit = limit.saturating_mul(4).max(limit);
         let keyword = self.rank_keyword_chunks(targets, query, candidate_limit, 0.0)?;
         let semantic = if self.embedder.is_some() {
-            self.rank_semantic_chunks(targets, query, candidate_limit, 0.0)?
+            match self.rank_semantic_chunks(targets, query, candidate_limit, 0.0) {
+                Ok(ranked) => {
+                    pipeline.dense = true;
+                    ranked
+                }
+                Err(err) if is_model_not_available_error(&err) => {
+                    pipeline.dense = false;
+                    add_search_pipeline_notice(
+                        pipeline,
+                        SearchPipelineStep::Dense,
+                        SearchPipelineUnavailableReason::ModelNotAvailable,
+                    );
+                    Vec::new()
+                }
+                Err(err) => return Err(err),
+            }
         } else {
             Vec::new()
         };
@@ -302,12 +334,14 @@ impl Engine {
         query: &str,
         limit: usize,
         min_score: f32,
+        pipeline: &mut SearchPipeline,
     ) -> Result<Vec<RankedChunk>> {
         let variants = self.expander.expand(query)?;
+        pipeline.expansion = true;
         let mut aggregates: HashMap<i64, RankedChunk> = HashMap::new();
 
         for variant in variants {
-            let ranked = self.rank_auto_chunks(targets, &variant, limit, 0.0)?;
+            let ranked = self.rank_auto_chunks(targets, &variant, limit, 0.0, pipeline)?;
             for (index, item) in ranked.into_iter().enumerate() {
                 let variant_rrf = 1.0 / (40.0 + (index + 1) as f32);
                 let entry = aggregates
@@ -351,6 +385,7 @@ impl Engine {
         collections_by_id: &HashMap<i64, SearchCollectionMeta>,
         debug: bool,
         apply_rerank: bool,
+        pipeline: &mut SearchPipeline,
         limit: usize,
     ) -> Result<Vec<SearchResult>> {
         let chunk_ids = ranked_chunks
@@ -440,7 +475,49 @@ impl Engine {
                 .take(rerank_count)
                 .map(|candidate| candidate.rerank_input.clone())
                 .collect::<Vec<_>>();
-            let raw_scores = self.reranker.rerank(query, &rerank_inputs)?;
+            let raw_scores = match self.reranker.rerank(query, &rerank_inputs) {
+                Ok(scores) => {
+                    pipeline.rerank = true;
+                    Some(scores)
+                }
+                Err(err) if is_model_not_available_error(&err) => {
+                    pipeline.rerank = false;
+                    add_search_pipeline_notice(
+                        pipeline,
+                        SearchPipelineStep::Rerank,
+                        SearchPipelineUnavailableReason::ModelNotAvailable,
+                    );
+                    None
+                }
+                Err(err) => return Err(err),
+            };
+            let Some(raw_scores) = raw_scores else {
+                candidates.sort_by(|left, right| right.final_score.total_cmp(&left.final_score));
+                candidates.truncate(limit);
+                return Ok(candidates
+                    .into_iter()
+                    .map(|candidate| SearchResult {
+                        docid: candidate.docid,
+                        path: candidate.path,
+                        title: candidate.title,
+                        space: candidate.space,
+                        collection: candidate.collection,
+                        heading: candidate.heading,
+                        text: candidate.text,
+                        score: candidate.final_score,
+                        signals: if debug {
+                            Some(SearchSignals {
+                                bm25: candidate.bm25,
+                                dense: candidate.dense,
+                                rrf: candidate.rrf,
+                                reranker: candidate.reranker,
+                            })
+                        } else {
+                            None
+                        },
+                    })
+                    .collect::<Vec<_>>());
+            };
             if raw_scores.len() != rerank_inputs.len() {
                 return Err(KboltError::Inference(format!(
                     "reranker returned {} scores for {} candidates",
@@ -489,4 +566,24 @@ impl Engine {
 
         Ok(results)
     }
+}
+
+fn add_search_pipeline_notice(
+    pipeline: &mut SearchPipeline,
+    step: SearchPipelineStep,
+    reason: SearchPipelineUnavailableReason,
+) {
+    if pipeline
+        .notices
+        .iter()
+        .any(|notice| notice.step == step && notice.reason == reason)
+    {
+        return;
+    }
+
+    pipeline.notices.push(SearchPipelineNotice { step, reason });
+}
+
+fn is_model_not_available_error(err: &CoreError) -> bool {
+    matches!(err, CoreError::Domain(KboltError::ModelNotAvailable { .. }))
 }
