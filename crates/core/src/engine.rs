@@ -25,6 +25,7 @@ use kbolt_types::{
 };
 use walkdir::WalkDir;
 
+mod eval_ops;
 mod file_utils;
 mod ignore_helpers;
 mod ignore_ops;
