@@ -450,22 +450,30 @@ fn read_model_manifest(path: &Path) -> Result<Option<ModelManifest>> {
 
 fn ensure_runtime_paths(target_dir: &Path, requirements: &[ModelFileRequirement]) -> Result<()> {
     for requirement in requirements {
-        let ModelFileRequirement::ExactPath { path, config_field } = requirement else {
-            continue;
-        };
-        ensure_runtime_path(target_dir, path, config_field)?;
+        match requirement {
+            ModelFileRequirement::ExactPath { path, config_field } => {
+                ensure_runtime_path(target_dir, path, config_field)?;
+            }
+            ModelFileRequirement::SingleExtension {
+                extension,
+                config_field,
+            } => ensure_single_extension_runtime_path(target_dir, extension, config_field)?,
+            ModelFileRequirement::SingleTokenizerJson { config_field } => {
+                ensure_tokenizer_runtime_path(target_dir, config_field)?
+            }
+        }
     }
+    cleanup_provider_cache_dirs(target_dir)?;
     Ok(())
 }
 
 fn ensure_runtime_path(target_dir: &Path, configured_path: &str, config_field: &str) -> Result<()> {
     let runtime_path = target_dir.join(configured_path);
-    if runtime_path.is_file() {
-        return Ok(());
-    }
-
     match fs::symlink_metadata(&runtime_path) {
         Ok(metadata) => {
+            if metadata.file_type().is_file() {
+                return Ok(());
+            }
             if metadata.file_type().is_dir() {
                 return Err(KboltError::Inference(format!(
                     "{config_field} path is a directory, expected a file: {}",
@@ -483,7 +491,83 @@ fn ensure_runtime_path(target_dir: &Path, configured_path: &str, config_field: &
     if let Some(parent) = runtime_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    create_file_symlink(&source, &runtime_path).map_err(|err| {
+    materialize_runtime_file(&source, &runtime_path).map_err(|err| {
+        KboltError::Inference(format!(
+            "failed to materialize {config_field} at {} from {}: {err}",
+            runtime_path.display(),
+            source.display()
+        ))
+    })?;
+    Ok(())
+}
+
+fn ensure_single_extension_runtime_path(
+    target_dir: &Path,
+    extension: &str,
+    config_field: &str,
+) -> Result<()> {
+    let materialized =
+        discover_materialized_files(target_dir, |path| has_extension(path, extension))?;
+    match materialized.len() {
+        1 => return Ok(()),
+        0 => {}
+        _ => {
+            return Err(KboltError::Inference(format!(
+                "multiple .{extension} artifacts found under {}. set {config_field} to choose one",
+                target_dir.display()
+            ))
+            .into())
+        }
+    }
+
+    let source = locate_single_cached_file(
+        target_dir,
+        |path| has_extension(path, extension),
+        &format!(".{extension} artifact"),
+        config_field,
+    )?;
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| {
+            KboltError::Inference(format!(
+                "downloaded .{extension} artifact is missing a file name: {}",
+                source.display()
+            ))
+        })?
+        .to_owned();
+    let runtime_path = target_dir.join(file_name);
+    materialize_runtime_file(&source, &runtime_path).map_err(|err| {
+        KboltError::Inference(format!(
+            "failed to materialize {config_field} at {} from {}: {err}",
+            runtime_path.display(),
+            source.display()
+        ))
+    })?;
+    Ok(())
+}
+
+fn ensure_tokenizer_runtime_path(target_dir: &Path, config_field: &str) -> Result<()> {
+    let materialized = discover_materialized_files(target_dir, is_tokenizer_json)?;
+    match materialized.len() {
+        1 => return Ok(()),
+        0 => {}
+        _ => {
+            return Err(KboltError::Inference(format!(
+                "multiple tokenizer.json files found under {}. set {config_field} to choose one",
+                target_dir.display()
+            ))
+            .into())
+        }
+    }
+
+    let source = locate_single_cached_file(
+        target_dir,
+        is_tokenizer_json,
+        "tokenizer.json",
+        config_field,
+    )?;
+    let runtime_path = target_dir.join("tokenizer.json");
+    materialize_runtime_file(&source, &runtime_path).map_err(|err| {
         KboltError::Inference(format!(
             "failed to materialize {config_field} at {} from {}: {err}",
             runtime_path.display(),
@@ -532,6 +616,9 @@ fn locate_current_snapshot_file(
             continue;
         }
         let repo_dir = entry.path();
+        if !is_provider_cache_dir(&repo_dir) {
+            continue;
+        }
         let refs_main = repo_dir.join("refs").join("main");
         let snapshot_id = match fs::read_to_string(&refs_main) {
             Ok(contents) => contents.trim().to_string(),
@@ -560,23 +647,98 @@ fn locate_current_snapshot_file(
 }
 
 fn discover_cached_files(target_dir: &Path, repo_path: &Path) -> Result<Vec<std::path::PathBuf>> {
+    discover_provider_cache_files(target_dir, |relative| path_ends_with(relative, repo_path))
+}
+
+fn locate_single_cached_file<F>(
+    target_dir: &Path,
+    predicate: F,
+    label: &str,
+    config_field: &str,
+) -> Result<std::path::PathBuf>
+where
+    F: FnMut(&Path) -> bool,
+{
+    let matches = discover_provider_cache_files(target_dir, predicate)?;
+    match matches.len() {
+        0 => Err(KboltError::Inference(format!(
+            "missing {label} under {}. set {config_field} to choose one",
+            target_dir.display()
+        ))
+        .into()),
+        1 => Ok(matches[0].clone()),
+        _ => Err(KboltError::Inference(format!(
+            "multiple {label} files found under {}. set {config_field} to choose one",
+            target_dir.display()
+        ))
+        .into()),
+    }
+}
+
+fn discover_provider_cache_files<F>(
+    target_dir: &Path,
+    mut predicate: F,
+) -> Result<Vec<std::path::PathBuf>>
+where
+    F: FnMut(&Path) -> bool,
+{
     let mut matches = Vec::new();
-    for entry in WalkDir::new(target_dir).follow_links(false) {
+    for entry in fs::read_dir(target_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let repo_dir = entry.path();
+        if !is_provider_cache_dir(&repo_dir) {
+            continue;
+        }
+        for entry in WalkDir::new(&repo_dir).follow_links(false) {
+            let entry = entry.map_err(|err| {
+                KboltError::Inference(format!(
+                    "failed to walk downloaded model artifacts under {}: {err}",
+                    repo_dir.display()
+                ))
+            })?;
+            if !entry.file_type().is_file() && !entry.file_type().is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(relative) = path.strip_prefix(&repo_dir) else {
+                continue;
+            };
+            if predicate(relative) {
+                matches.push(path.to_path_buf());
+            }
+        }
+    }
+    matches.sort();
+    Ok(matches)
+}
+
+fn discover_materialized_files<F>(
+    target_dir: &Path,
+    mut predicate: F,
+) -> Result<Vec<std::path::PathBuf>>
+where
+    F: FnMut(&Path) -> bool,
+{
+    let mut matches = Vec::new();
+    for entry in WalkDir::new(target_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| !is_provider_cache_dir(entry.path()))
+    {
         let entry = entry.map_err(|err| {
             KboltError::Inference(format!(
-                "failed to walk downloaded model artifacts under {}: {err}",
+                "failed to walk model runtime directory {}: {err}",
                 target_dir.display()
             ))
         })?;
-        if !entry.file_type().is_file() && !entry.file_type().is_symlink() {
+        if !entry.file_type().is_file() {
             continue;
         }
-        let path = entry.path();
-        let Ok(relative) = path.strip_prefix(target_dir) else {
-            continue;
-        };
-        if path_ends_with(relative, repo_path) {
-            matches.push(path.to_path_buf());
+        if predicate(entry.path()) {
+            matches.push(entry.path().to_path_buf());
         }
     }
     matches.sort();
@@ -590,6 +752,27 @@ fn path_ends_with(path: &Path, suffix: &Path) -> bool {
         return false;
     }
     path_components[path_components.len() - suffix_components.len()..] == suffix_components[..]
+}
+
+fn cleanup_provider_cache_dirs(target_dir: &Path) -> Result<()> {
+    for entry in fs::read_dir(target_dir)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        if is_provider_cache_dir(&entry.path()) {
+            fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn is_provider_cache_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.starts_with("models--"))
+        .unwrap_or(false)
 }
 
 fn dir_size_bytes(path: &Path, skip_manifest: bool) -> Result<u64> {
@@ -623,14 +806,29 @@ fn dir_size_bytes(path: &Path, skip_manifest: bool) -> Result<u64> {
     Ok(total)
 }
 
-#[cfg(unix)]
-fn create_file_symlink(source: &Path, target: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(source, target)
+fn materialize_runtime_file(source: &Path, target: &Path) -> std::io::Result<()> {
+    let source = fs::canonicalize(source)?;
+    match fs::hard_link(&source, target) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            fs::copy(&source, target)?;
+            Ok(())
+        }
+    }
 }
 
-#[cfg(windows)]
-fn create_file_symlink(source: &Path, target: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_file(source, target)
+fn has_extension(path: &Path, extension: &str) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case(extension))
+        .unwrap_or(false)
+}
+
+fn is_tokenizer_json(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.eq_ignore_ascii_case("tokenizer.json"))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

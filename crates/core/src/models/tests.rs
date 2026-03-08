@@ -25,7 +25,20 @@ struct FakeDownloader {
 impl ModelArtifactProvider for FakeDownloader {
     fn download_model(&self, request: &ModelDownloadRequest, target_dir: &Path) -> Result<u64> {
         std::fs::create_dir_all(target_dir)?;
-        std::fs::write(target_dir.join("model.bin"), request.model_id.as_bytes())?;
+        for requirement in &request.requirements {
+            let relative_path = match requirement {
+                ModelFileRequirement::ExactPath { path, .. } => path.to_string(),
+                ModelFileRequirement::SingleExtension { extension, .. } => {
+                    format!("artifact.{extension}")
+                }
+                ModelFileRequirement::SingleTokenizerJson { .. } => "tokenizer.json".to_string(),
+            };
+            let file_path = target_dir.join(relative_path);
+            if let Some(parent) = file_path.parent() {
+                std::fs::create_dir_all(parent).expect("create file parent");
+            }
+            std::fs::write(file_path, request.model_id.as_bytes()).expect("write fixture file");
+        }
         Ok(self.bytes_per_model)
     }
 }
@@ -110,7 +123,7 @@ fn provider_key(provider: &ModelProvider) -> &'static str {
 fn seed_model(root: &Path, role: &str, source: &ModelSourceConfig, payload: &[u8]) {
     let role_dir = root.join(role);
     std::fs::create_dir_all(&role_dir).expect("create role dir");
-    std::fs::write(role_dir.join("model.bin"), payload).expect("write model payload");
+    std::fs::write(role_dir.join("artifact.gguf"), payload).expect("write model payload");
 
     let manifest = json!({
         "provider": provider_key(&source.provider),
@@ -617,6 +630,13 @@ fn pull_materializes_configured_runtime_paths_from_nested_hf_layout() {
         .join("embedder/embeddinggemma-300M-Q8_0.gguf")
         .is_file());
     assert!(root.path().join("reranker/weights/rerank.gguf").is_file());
+    assert!(!root.path().join("embedder/models--embed-model").exists());
+    assert!(
+        !std::fs::symlink_metadata(root.path().join("embedder/embeddinggemma-300M-Q8_0.gguf"))
+            .expect("read embedder metadata")
+            .file_type()
+            .is_symlink()
+    );
 }
 
 #[test]
@@ -654,6 +674,7 @@ fn pull_repairs_runtime_paths_for_existing_nested_hf_layout() {
         .path()
         .join("embedder/embeddinggemma-300M-Q8_0.gguf")
         .is_file());
+    assert!(!root.path().join("embedder/models--embed-model").exists());
     assert!(downloader.take_requests().is_empty());
 }
 
