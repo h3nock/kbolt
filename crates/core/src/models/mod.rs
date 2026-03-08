@@ -4,6 +4,7 @@ use std::path::Path;
 use kbolt_types::KboltError;
 use kbolt_types::{ModelInfo, ModelStatus, PullReport};
 use serde::{Deserialize, Serialize};
+use walkdir::WalkDir;
 
 use crate::config::{
     EmbeddingConfig, InferenceConfig, ModelConfig, ModelProvider, ModelSourceConfig,
@@ -201,7 +202,9 @@ where
         let role = target.role_dir.to_string();
         let model = target.source.id.clone();
         let target_dir = model_dir.join(target.role_dir);
+        let request = download_request_for_target(&target, embeddings, inference);
         if let Some(existing_bytes) = model_payload_size_bytes(&target_dir, &target.source)? {
+            ensure_runtime_paths(&target_dir, &request.requirements)?;
             on_event(ModelPullEvent::AlreadyPresent {
                 role,
                 model: model.clone(),
@@ -215,8 +218,8 @@ where
             role: role.clone(),
             model: model.clone(),
         });
-        let request = download_request_for_target(&target, embeddings, inference);
         let downloaded_bytes = downloader.download_model(&request, &target_dir)?;
+        ensure_runtime_paths(&target_dir, &request.requirements)?;
         on_event(ModelPullEvent::DownloadCompleted {
             role,
             model: model.clone(),
@@ -445,6 +448,150 @@ fn read_model_manifest(path: &Path) -> Result<Option<ModelManifest>> {
     Ok(Some(parsed))
 }
 
+fn ensure_runtime_paths(target_dir: &Path, requirements: &[ModelFileRequirement]) -> Result<()> {
+    for requirement in requirements {
+        let ModelFileRequirement::ExactPath { path, config_field } = requirement else {
+            continue;
+        };
+        ensure_runtime_path(target_dir, path, config_field)?;
+    }
+    Ok(())
+}
+
+fn ensure_runtime_path(target_dir: &Path, configured_path: &str, config_field: &str) -> Result<()> {
+    let runtime_path = target_dir.join(configured_path);
+    if runtime_path.is_file() {
+        return Ok(());
+    }
+
+    match fs::symlink_metadata(&runtime_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_dir() {
+                return Err(KboltError::Inference(format!(
+                    "{config_field} path is a directory, expected a file: {}",
+                    runtime_path.display()
+                ))
+                .into());
+            }
+            fs::remove_file(&runtime_path)?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+
+    let source = locate_cached_file(target_dir, configured_path, config_field)?;
+    if let Some(parent) = runtime_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    create_file_symlink(&source, &runtime_path).map_err(|err| {
+        KboltError::Inference(format!(
+            "failed to materialize {config_field} at {} from {}: {err}",
+            runtime_path.display(),
+            source.display()
+        ))
+    })?;
+    Ok(())
+}
+
+fn locate_cached_file(
+    target_dir: &Path,
+    configured_path: &str,
+    config_field: &str,
+) -> Result<std::path::PathBuf> {
+    let repo_path = Path::new(configured_path);
+    if let Some(current) = locate_current_snapshot_file(target_dir, repo_path)? {
+        return Ok(current);
+    }
+
+    let matches = discover_cached_files(target_dir, repo_path)?;
+    match matches.len() {
+        0 => Err(KboltError::Inference(format!(
+            "{config_field} does not point to a downloaded file under {}: {}",
+            target_dir.display(),
+            configured_path
+        ))
+        .into()),
+        1 => Ok(matches[0].clone()),
+        _ => Err(KboltError::Inference(format!(
+            "{config_field} matches multiple downloaded files under {}: {}",
+            target_dir.display(),
+            configured_path
+        ))
+        .into()),
+    }
+}
+
+fn locate_current_snapshot_file(
+    target_dir: &Path,
+    repo_path: &Path,
+) -> Result<Option<std::path::PathBuf>> {
+    let mut matches = Vec::new();
+    for entry in fs::read_dir(target_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let repo_dir = entry.path();
+        let refs_main = repo_dir.join("refs").join("main");
+        let snapshot_id = match fs::read_to_string(&refs_main) {
+            Ok(contents) => contents.trim().to_string(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err.into()),
+        };
+        if snapshot_id.is_empty() {
+            continue;
+        }
+        let candidate = repo_dir.join("snapshots").join(snapshot_id).join(repo_path);
+        if candidate.is_file() {
+            matches.push(candidate);
+        }
+    }
+
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        _ => Err(KboltError::Inference(format!(
+            "multiple snapshot files found for {} under {}",
+            repo_path.display(),
+            target_dir.display()
+        ))
+        .into()),
+    }
+}
+
+fn discover_cached_files(target_dir: &Path, repo_path: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut matches = Vec::new();
+    for entry in WalkDir::new(target_dir).follow_links(false) {
+        let entry = entry.map_err(|err| {
+            KboltError::Inference(format!(
+                "failed to walk downloaded model artifacts under {}: {err}",
+                target_dir.display()
+            ))
+        })?;
+        if !entry.file_type().is_file() && !entry.file_type().is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(relative) = path.strip_prefix(target_dir) else {
+            continue;
+        };
+        if path_ends_with(relative, repo_path) {
+            matches.push(path.to_path_buf());
+        }
+    }
+    matches.sort();
+    Ok(matches)
+}
+
+fn path_ends_with(path: &Path, suffix: &Path) -> bool {
+    let path_components = path.components().collect::<Vec<_>>();
+    let suffix_components = suffix.components().collect::<Vec<_>>();
+    if suffix_components.len() > path_components.len() {
+        return false;
+    }
+    path_components[path_components.len() - suffix_components.len()..] == suffix_components[..]
+}
+
 fn dir_size_bytes(path: &Path, skip_manifest: bool) -> Result<u64> {
     if !path.exists() {
         return Ok(0);
@@ -454,8 +601,12 @@ fn dir_size_bytes(path: &Path, skip_manifest: bool) -> Result<u64> {
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let entry_path = entry.path();
-        let metadata = entry.metadata()?;
-        if metadata.is_file() {
+        let metadata = fs::symlink_metadata(&entry_path)?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_file() {
             if skip_manifest
                 && entry_path.file_name().and_then(|name| name.to_str())
                     == Some(MODEL_MANIFEST_FILENAME)
@@ -465,11 +616,21 @@ fn dir_size_bytes(path: &Path, skip_manifest: bool) -> Result<u64> {
             total = total.saturating_add(metadata.len());
             continue;
         }
-        if metadata.is_dir() {
+        if file_type.is_dir() {
             total = total.saturating_add(dir_size_bytes(&entry_path, skip_manifest)?);
         }
     }
     Ok(total)
+}
+
+#[cfg(unix)]
+fn create_file_symlink(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(source, target)
+}
+
+#[cfg(windows)]
+fn create_file_symlink(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(source, target)
 }
 
 #[cfg(test)]

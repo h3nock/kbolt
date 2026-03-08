@@ -31,6 +31,40 @@ impl ModelArtifactProvider for FakeDownloader {
 }
 
 #[derive(Default)]
+struct HfLayoutDownloader {
+    bytes_per_model: u64,
+}
+
+impl ModelArtifactProvider for HfLayoutDownloader {
+    fn download_model(&self, request: &ModelDownloadRequest, target_dir: &Path) -> Result<u64> {
+        std::fs::create_dir_all(target_dir)?;
+        let repo_dir = target_dir.join(format!("models--{}", request.model_id.replace('/', "--")));
+        let snapshot = repo_dir.join("snapshots/current");
+        let refs_dir = repo_dir.join("refs");
+        std::fs::create_dir_all(&snapshot).expect("create snapshot dir");
+        std::fs::create_dir_all(&refs_dir).expect("create refs dir");
+        std::fs::write(refs_dir.join("main"), b"current").expect("write refs/main");
+
+        for requirement in &request.requirements {
+            let relative_path = match requirement {
+                ModelFileRequirement::ExactPath { path, .. } => path.to_string(),
+                ModelFileRequirement::SingleExtension { extension, .. } => {
+                    format!("artifact.{extension}")
+                }
+                ModelFileRequirement::SingleTokenizerJson { .. } => "tokenizer.json".to_string(),
+            };
+            let file_path = snapshot.join(relative_path);
+            if let Some(parent) = file_path.parent() {
+                std::fs::create_dir_all(parent).expect("create file parent");
+            }
+            std::fs::write(file_path, request.model_id.as_bytes()).expect("write snapshot file");
+        }
+
+        Ok(self.bytes_per_model)
+    }
+}
+
+#[derive(Default)]
 struct CapturingDownloader {
     requests: Mutex<Vec<ModelDownloadRequest>>,
 }
@@ -49,7 +83,20 @@ impl ModelArtifactProvider for CapturingDownloader {
             .expect("lock requests")
             .push(request.clone());
         std::fs::create_dir_all(target_dir)?;
-        std::fs::write(target_dir.join("model.bin"), request.model_id.as_bytes())?;
+        for requirement in &request.requirements {
+            let relative_path = match requirement {
+                ModelFileRequirement::ExactPath { path, .. } => path.to_string(),
+                ModelFileRequirement::SingleExtension { extension, .. } => {
+                    format!("artifact.{extension}")
+                }
+                ModelFileRequirement::SingleTokenizerJson { .. } => "tokenizer.json".to_string(),
+            };
+            let file_path = target_dir.join(relative_path);
+            if let Some(parent) = file_path.parent() {
+                std::fs::create_dir_all(parent).expect("create file parent");
+            }
+            std::fs::write(file_path, request.model_id.as_bytes()).expect("write fixture file");
+        }
         Ok(1)
     }
 }
@@ -64,6 +111,69 @@ fn seed_model(root: &Path, role: &str, source: &ModelSourceConfig, payload: &[u8
     let role_dir = root.join(role);
     std::fs::create_dir_all(&role_dir).expect("create role dir");
     std::fs::write(role_dir.join("model.bin"), payload).expect("write model payload");
+
+    let manifest = json!({
+        "provider": provider_key(&source.provider),
+        "id": source.id,
+        "revision": source.revision,
+    });
+    let bytes = serde_json::to_vec_pretty(&manifest).expect("serialize manifest");
+    std::fs::write(role_dir.join(MODEL_MANIFEST_FILENAME), bytes).expect("write model manifest");
+}
+
+fn seed_hf_layout_model(
+    root: &Path,
+    role: &str,
+    source: &ModelSourceConfig,
+    repo_path: &str,
+    payload: &[u8],
+) {
+    let role_dir = root.join(role);
+    let repo_dir = role_dir.join(format!("models--{}", source.id.replace('/', "--")));
+    let snapshot = repo_dir.join("snapshots/current");
+    let refs_dir = repo_dir.join("refs");
+    std::fs::create_dir_all(&snapshot).expect("create snapshot dir");
+    std::fs::create_dir_all(&refs_dir).expect("create refs dir");
+    if let Some(parent) = snapshot.join(repo_path).parent() {
+        std::fs::create_dir_all(parent).expect("create repo path parent");
+    }
+    std::fs::write(snapshot.join(repo_path), payload).expect("write snapshot payload");
+    std::fs::write(refs_dir.join("main"), b"current").expect("write refs/main");
+
+    let manifest = json!({
+        "provider": provider_key(&source.provider),
+        "id": source.id,
+        "revision": source.revision,
+    });
+    let bytes = serde_json::to_vec_pretty(&manifest).expect("serialize manifest");
+    std::fs::write(role_dir.join(MODEL_MANIFEST_FILENAME), bytes).expect("write model manifest");
+}
+
+fn seed_hf_symlink_layout_model(
+    root: &Path,
+    role: &str,
+    source: &ModelSourceConfig,
+    repo_path: &str,
+    payload: &[u8],
+) {
+    let role_dir = root.join(role);
+    let repo_dir = role_dir.join(format!("models--{}", source.id.replace('/', "--")));
+    let blobs_dir = repo_dir.join("blobs");
+    let snapshot = repo_dir.join("snapshots/current");
+    let refs_dir = repo_dir.join("refs");
+    std::fs::create_dir_all(&blobs_dir).expect("create blobs dir");
+    std::fs::create_dir_all(&snapshot).expect("create snapshot dir");
+    std::fs::create_dir_all(&refs_dir).expect("create refs dir");
+
+    let blob = blobs_dir.join("payload.bin");
+    std::fs::write(&blob, payload).expect("write blob");
+    let snapshot_file = snapshot.join(repo_path);
+    if let Some(parent) = snapshot_file.parent() {
+        std::fs::create_dir_all(parent).expect("create repo path parent");
+    }
+    create_test_symlink(&blob, &snapshot_file);
+    create_test_symlink(&snapshot_file, &role_dir.join(repo_path));
+    std::fs::write(refs_dir.join("main"), b"current").expect("write refs/main");
 
     let manifest = json!({
         "provider": provider_key(&source.provider),
@@ -468,4 +578,109 @@ fn pull_uses_gguf_requirements_when_embedder_is_local_gguf() {
             config_field: "embeddings.model_file",
         }]
     );
+}
+
+#[test]
+fn pull_materializes_configured_runtime_paths_from_nested_hf_layout() {
+    let root = tempdir().expect("create temp root");
+    let config = test_config();
+    let downloader = HfLayoutDownloader { bytes_per_model: 9 };
+    let embeddings = EmbeddingConfig::LocalGguf {
+        model_file: Some("embeddinggemma-300M-Q8_0.gguf".to_string()),
+        batch_size: 4,
+        n_threads: None,
+        n_threads_batch: None,
+    };
+    let inference = InferenceConfig {
+        reranker: Some(TextInferenceConfig {
+            provider: TextInferenceProvider::LocalLlama {
+                model_file: Some("weights/rerank.gguf".to_string()),
+                max_tokens: 128,
+                n_ctx: 2048,
+                n_gpu_layers: 0,
+            },
+        }),
+        expander: None,
+    };
+
+    let report = pull_with_downloader(
+        &config,
+        Some(&embeddings),
+        &inference,
+        root.path(),
+        &downloader,
+    )
+    .expect("pull models");
+    assert_eq!(report.downloaded.len(), 3);
+    assert!(root
+        .path()
+        .join("embedder/embeddinggemma-300M-Q8_0.gguf")
+        .is_file());
+    assert!(root.path().join("reranker/weights/rerank.gguf").is_file());
+}
+
+#[test]
+fn pull_repairs_runtime_paths_for_existing_nested_hf_layout() {
+    let root = tempdir().expect("create temp root");
+    let config = test_config();
+    let downloader = CapturingDownloader::default();
+    let embeddings = EmbeddingConfig::LocalGguf {
+        model_file: Some("embeddinggemma-300M-Q8_0.gguf".to_string()),
+        batch_size: 4,
+        n_threads: None,
+        n_threads_batch: None,
+    };
+    seed_hf_layout_model(
+        root.path(),
+        "embedder",
+        &config.embedder,
+        "embeddinggemma-300M-Q8_0.gguf",
+        b"embedder",
+    );
+    seed_model(root.path(), "reranker", &config.reranker, b"rerank");
+    seed_model(root.path(), "expander", &config.expander, b"expand");
+
+    let report = pull_with_downloader(
+        &config,
+        Some(&embeddings),
+        &InferenceConfig::default(),
+        root.path(),
+        &downloader,
+    )
+    .expect("repair pulled model layout");
+    assert_eq!(report.downloaded.len(), 0);
+    assert_eq!(report.already_present.len(), 3);
+    assert!(root
+        .path()
+        .join("embedder/embeddinggemma-300M-Q8_0.gguf")
+        .is_file());
+    assert!(downloader.take_requests().is_empty());
+}
+
+#[test]
+fn status_counts_hf_symlink_layout_once() {
+    let root = tempdir().expect("create temp root");
+    let config = test_config();
+    seed_hf_symlink_layout_model(
+        root.path(),
+        "embedder",
+        &config.embedder,
+        "embeddinggemma-300M-Q8_0.gguf",
+        b"payload-123",
+    );
+    seed_model(root.path(), "reranker", &config.reranker, b"rerank");
+    seed_model(root.path(), "expander", &config.expander, b"expand");
+
+    let model_status = status(&config, root.path()).expect("read model status");
+    assert_eq!(model_status.embedder.size_bytes, Some(18));
+}
+
+#[cfg(unix)]
+fn create_test_symlink(source: &Path, target: &Path) {
+    std::os::unix::fs::symlink(source, target).expect("create symlink");
+}
+
+#[cfg(windows)]
+fn create_test_symlink(source: &Path, target: &Path) {
+    std::os::windows::fs::symlink_file(source, target).expect("create symlink");
 }
