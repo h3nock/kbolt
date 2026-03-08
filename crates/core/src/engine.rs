@@ -101,23 +101,6 @@ struct RankedChunk {
     dense: Option<f32>,
 }
 
-#[derive(Debug, Clone)]
-struct AssembledCandidate {
-    docid: String,
-    path: String,
-    title: String,
-    space: String,
-    collection: String,
-    heading: Option<String>,
-    text: String,
-    bm25: Option<f32>,
-    dense: Option<f32>,
-    rrf: f32,
-    reranker: Option<f32>,
-    final_score: f32,
-    rerank_input: String,
-}
-
 impl Engine {
     pub fn new(config_path: Option<&Path>) -> Result<Self> {
         let config = config::load(config_path)?;

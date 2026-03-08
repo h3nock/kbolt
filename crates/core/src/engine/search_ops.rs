@@ -230,10 +230,9 @@ impl Engine {
         min_score: f32,
         pipeline: &mut SearchPipeline,
     ) -> Result<Vec<RankedChunk>> {
-        let candidate_limit = limit.saturating_mul(4).max(limit);
-        let keyword = self.rank_keyword_chunks(targets, query, candidate_limit, 0.0)?;
+        let keyword = self.rank_keyword_chunks(targets, query, limit, 0.0)?;
         let semantic = if self.embedder.is_some() {
-            match self.rank_semantic_chunks(targets, query, candidate_limit, 0.0) {
+            match self.rank_semantic_chunks(targets, query, limit, 0.0) {
                 Ok(ranked) => {
                     pipeline.dense = true;
                     ranked
@@ -406,8 +405,6 @@ impl Engine {
             .collect::<HashMap<_, _>>();
 
         let mut docs_by_id: HashMap<i64, DocumentRow> = HashMap::new();
-        let mut chunks_by_doc: HashMap<i64, Vec<ChunkRow>> = HashMap::new();
-        let neighbor_window = self.config.chunking.defaults.neighbor_window;
         let mut candidates = Vec::new();
         for ranked in ranked_chunks {
             let Some(chunk) = chunk_by_id.get(&ranked.chunk_id) else {
@@ -429,59 +426,56 @@ impl Engine {
                 continue;
             };
 
-            let full_path = collection.path.join(&document.path);
-            let bytes = match std::fs::read(&full_path) {
-                Ok(bytes) => bytes,
-                Err(_) => continue,
-            };
-            if neighbor_window > 0 && !chunks_by_doc.contains_key(&chunk.doc_id) {
-                chunks_by_doc.insert(
-                    chunk.doc_id,
-                    self.storage.get_chunks_for_document(chunk.doc_id)?,
-                );
-            }
-            let text = search_text_with_neighbors(
-                &bytes,
-                chunk,
-                chunks_by_doc.get(&chunk.doc_id),
-                neighbor_window,
-            );
-            let primary_text = chunk_text_from_bytes(&bytes, chunk.offset, chunk.length);
-            let rerank_input = retrieval_text_with_prefix(
-                if primary_text.trim().is_empty() {
-                    text.as_str()
-                } else {
-                    primary_text.as_str()
-                },
-                document.title.as_str(),
-                chunk.heading.as_deref(),
-                self.config.chunking.defaults.contextual_prefix,
-            );
-
-            candidates.push(AssembledCandidate {
+            candidates.push(PendingSearchCandidate {
+                chunk_id: ranked.chunk_id,
+                doc_id: chunk.doc_id,
                 docid: short_docid(&document.hash),
                 path: format!("{}/{}", collection.collection, document.path),
                 title: document.title,
                 space: collection.space.clone(),
                 collection: collection.collection.clone(),
                 heading: chunk.heading.clone(),
-                text,
+                chunk: chunk.clone(),
+                full_path: collection.path.join(&document.path),
                 bm25: ranked.bm25,
                 dense: ranked.dense,
                 rrf: ranked.rrf,
                 reranker: ranked.reranker,
                 final_score: ranked.score,
-                rerank_input,
             });
         }
 
+        let mut bytes_by_doc: HashMap<i64, Vec<u8>> = HashMap::new();
+        let mut chunks_by_doc: HashMap<i64, Vec<ChunkRow>> = HashMap::new();
+        let neighbor_window = self.config.chunking.defaults.neighbor_window;
+        let contextual_prefix = self.config.chunking.defaults.contextual_prefix;
+
         if apply_rerank && !candidates.is_empty() {
             let rerank_count = candidates.len().min(20);
-            let rerank_inputs = candidates
-                .iter()
-                .take(rerank_count)
-                .map(|candidate| candidate.rerank_input.clone())
-                .collect::<Vec<_>>();
+            let mut rerank_chunk_ids = Vec::new();
+            let mut rerank_inputs = Vec::new();
+            let mut invalid_chunk_ids = HashSet::new();
+            for candidate in candidates.iter().take(rerank_count) {
+                match build_rerank_input(
+                    candidate,
+                    &self.storage,
+                    &mut bytes_by_doc,
+                    &mut chunks_by_doc,
+                    neighbor_window,
+                    contextual_prefix,
+                )? {
+                    Some(rerank_input) => {
+                        rerank_chunk_ids.push(candidate.chunk_id);
+                        rerank_inputs.push(rerank_input);
+                    }
+                    None => {
+                        invalid_chunk_ids.insert(candidate.chunk_id);
+                    }
+                }
+            }
+            if !invalid_chunk_ids.is_empty() {
+                candidates.retain(|candidate| !invalid_chunk_ids.contains(&candidate.chunk_id));
+            }
             let raw_scores = match self.reranker.as_ref() {
                 Some(reranker) => match reranker.rerank(query, &rerank_inputs) {
                     Ok(scores) => {
@@ -510,31 +504,15 @@ impl Engine {
                 }
             };
             let Some(raw_scores) = raw_scores else {
-                candidates.sort_by(|left, right| right.final_score.total_cmp(&left.final_score));
-                candidates.truncate(limit);
-                return Ok(candidates
-                    .into_iter()
-                    .map(|candidate| SearchResult {
-                        docid: candidate.docid,
-                        path: candidate.path,
-                        title: candidate.title,
-                        space: candidate.space,
-                        collection: candidate.collection,
-                        heading: candidate.heading,
-                        text: candidate.text,
-                        score: candidate.final_score,
-                        signals: if debug {
-                            Some(SearchSignals {
-                                bm25: candidate.bm25,
-                                dense: candidate.dense,
-                                rrf: candidate.rrf,
-                                reranker: candidate.reranker,
-                            })
-                        } else {
-                            None
-                        },
-                    })
-                    .collect::<Vec<_>>());
+                return finalize_search_results(
+                    candidates,
+                    &self.storage,
+                    &mut bytes_by_doc,
+                    &mut chunks_by_doc,
+                    neighbor_window,
+                    debug,
+                    limit,
+                );
             };
             if raw_scores.len() != rerank_inputs.len() {
                 return Err(KboltError::Inference(format!(
@@ -545,45 +523,167 @@ impl Engine {
                 .into());
             }
             let normalized_scores = normalize_scores(&raw_scores);
-            for (candidate, reranker_score) in candidates
-                .iter_mut()
-                .take(rerank_count)
+            let reranker_scores = rerank_chunk_ids
+                .into_iter()
                 .zip(normalized_scores.into_iter())
-            {
-                candidate.reranker = Some(reranker_score);
-                candidate.final_score = 0.7 * reranker_score + 0.3 * candidate.rrf;
+                .collect::<HashMap<_, _>>();
+            for candidate in &mut candidates {
+                if let Some(reranker_score) = reranker_scores.get(&candidate.chunk_id).copied() {
+                    candidate.reranker = Some(reranker_score);
+                    candidate.final_score = 0.7 * reranker_score + 0.3 * candidate.rrf;
+                }
             }
         }
 
-        candidates.sort_by(|left, right| right.final_score.total_cmp(&left.final_score));
-        candidates.truncate(limit);
-
-        let results = candidates
-            .into_iter()
-            .map(|candidate| SearchResult {
-                docid: candidate.docid,
-                path: candidate.path,
-                title: candidate.title,
-                space: candidate.space,
-                collection: candidate.collection,
-                heading: candidate.heading,
-                text: candidate.text,
-                score: candidate.final_score,
-                signals: if debug {
-                    Some(SearchSignals {
-                        bm25: candidate.bm25,
-                        dense: candidate.dense,
-                        rrf: candidate.rrf,
-                        reranker: candidate.reranker,
-                    })
-                } else {
-                    None
-                },
-            })
-            .collect::<Vec<_>>();
-
-        Ok(results)
+        finalize_search_results(
+            candidates,
+            &self.storage,
+            &mut bytes_by_doc,
+            &mut chunks_by_doc,
+            neighbor_window,
+            debug,
+            limit,
+        )
     }
+}
+
+#[derive(Debug, Clone)]
+struct PendingSearchCandidate {
+    chunk_id: i64,
+    doc_id: i64,
+    docid: String,
+    path: String,
+    title: String,
+    space: String,
+    collection: String,
+    heading: Option<String>,
+    chunk: ChunkRow,
+    full_path: std::path::PathBuf,
+    bm25: Option<f32>,
+    dense: Option<f32>,
+    rrf: f32,
+    reranker: Option<f32>,
+    final_score: f32,
+}
+
+fn build_rerank_input(
+    candidate: &PendingSearchCandidate,
+    storage: &Storage,
+    bytes_by_doc: &mut HashMap<i64, Vec<u8>>,
+    chunks_by_doc: &mut HashMap<i64, Vec<ChunkRow>>,
+    neighbor_window: usize,
+    contextual_prefix: bool,
+) -> Result<Option<String>> {
+    let Some(bytes) = load_candidate_bytes(candidate, bytes_by_doc)? else {
+        return Ok(None);
+    };
+    let primary_text = chunk_text_from_bytes(bytes, candidate.chunk.offset, candidate.chunk.length);
+    let rerank_body = if primary_text.trim().is_empty() {
+        search_text_with_neighbors(
+            bytes,
+            &candidate.chunk,
+            candidate_neighbors(storage, candidate, chunks_by_doc, neighbor_window)?,
+            neighbor_window,
+        )
+    } else {
+        primary_text
+    };
+
+    Ok(Some(retrieval_text_with_prefix(
+        rerank_body.as_str(),
+        candidate.title.as_str(),
+        candidate.heading.as_deref(),
+        contextual_prefix,
+    )))
+}
+
+fn finalize_search_results(
+    mut candidates: Vec<PendingSearchCandidate>,
+    storage: &Storage,
+    bytes_by_doc: &mut HashMap<i64, Vec<u8>>,
+    chunks_by_doc: &mut HashMap<i64, Vec<ChunkRow>>,
+    neighbor_window: usize,
+    debug: bool,
+    limit: usize,
+) -> Result<Vec<SearchResult>> {
+    candidates.sort_by(|left, right| right.final_score.total_cmp(&left.final_score));
+
+    let mut results = Vec::new();
+    for candidate in candidates {
+        if results.len() >= limit {
+            break;
+        }
+
+        let Some(bytes) = load_candidate_bytes(&candidate, bytes_by_doc)? else {
+            continue;
+        };
+        let text = search_text_with_neighbors(
+            bytes,
+            &candidate.chunk,
+            candidate_neighbors(storage, &candidate, chunks_by_doc, neighbor_window)?,
+            neighbor_window,
+        );
+
+        results.push(SearchResult {
+            docid: candidate.docid,
+            path: candidate.path,
+            title: candidate.title,
+            space: candidate.space,
+            collection: candidate.collection,
+            heading: candidate.heading,
+            text,
+            score: candidate.final_score,
+            signals: if debug {
+                Some(SearchSignals {
+                    bm25: candidate.bm25,
+                    dense: candidate.dense,
+                    rrf: candidate.rrf,
+                    reranker: candidate.reranker,
+                })
+            } else {
+                None
+            },
+        });
+    }
+
+    Ok(results)
+}
+
+fn candidate_neighbors<'a>(
+    storage: &Storage,
+    candidate: &PendingSearchCandidate,
+    chunks_by_doc: &'a mut HashMap<i64, Vec<ChunkRow>>,
+    neighbor_window: usize,
+) -> Result<Option<&'a Vec<ChunkRow>>> {
+    if neighbor_window == 0 {
+        return Ok(None);
+    }
+
+    if !chunks_by_doc.contains_key(&candidate.doc_id) {
+        chunks_by_doc.insert(
+            candidate.doc_id,
+            storage.get_chunks_for_document(candidate.doc_id)?,
+        );
+    }
+
+    Ok(chunks_by_doc.get(&candidate.doc_id))
+}
+
+fn load_candidate_bytes<'a>(
+    candidate: &PendingSearchCandidate,
+    bytes_by_doc: &'a mut HashMap<i64, Vec<u8>>,
+) -> Result<Option<&'a [u8]>> {
+    if !bytes_by_doc.contains_key(&candidate.doc_id) {
+        match std::fs::read(&candidate.full_path) {
+            Ok(bytes) => {
+                bytes_by_doc.insert(candidate.doc_id, bytes);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    Ok(bytes_by_doc.get(&candidate.doc_id).map(Vec::as_slice))
 }
 
 fn add_search_pipeline_notice(
