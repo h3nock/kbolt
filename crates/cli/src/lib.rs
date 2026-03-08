@@ -8,8 +8,9 @@ use kbolt_types::{
     GetRequest, KboltError, Locator, MultiGetRequest, OmitReason, RemoveScheduleRequest,
     ScheduleAddResponse, ScheduleBackend, ScheduleInterval, ScheduleIntervalUnit,
     ScheduleRunResult, ScheduleScope, ScheduleState, ScheduleStatusResponse, ScheduleTrigger,
-    ScheduleWeekday, SearchMode, SearchRequest, UpdateDecision, UpdateDecisionKind, UpdateOptions,
-    UpdateReport,
+    ScheduleWeekday, SearchMode, SearchPipeline, SearchPipelineNotice, SearchPipelineStep,
+    SearchPipelineUnavailableReason, SearchRequest, UpdateDecision, UpdateDecisionKind,
+    UpdateOptions, UpdateReport,
 };
 
 pub struct CliAdapter {
@@ -544,9 +545,20 @@ impl CliAdapter {
         let mut lines = Vec::new();
         lines.push(format!("query: {}", response.query));
         lines.push(format!(
-            "mode: {}",
+            "requested_mode: {}",
+            format_search_mode(&response.requested_mode)
+        ));
+        lines.push(format!(
+            "effective_mode: {}",
             format_search_mode(&response.effective_mode)
         ));
+        lines.push(format!(
+            "pipeline: {}",
+            format_search_pipeline(&response.pipeline)
+        ));
+        for notice in &response.pipeline.notices {
+            lines.push(format!("note: {}", format_search_pipeline_notice(notice)));
+        }
         lines.push(format!("results: {}", response.results.len()));
         for (index, item) in response.results.iter().enumerate() {
             lines.push(format!(
@@ -825,6 +837,40 @@ fn format_search_mode(mode: &SearchMode) -> &'static str {
         SearchMode::Keyword => "keyword",
         SearchMode::Semantic => "semantic",
     }
+}
+
+fn format_search_pipeline(pipeline: &SearchPipeline) -> String {
+    let mut parts = Vec::new();
+    if pipeline.expansion {
+        parts.push("expansion");
+    }
+    if pipeline.keyword {
+        parts.push("keyword");
+    }
+    if pipeline.dense {
+        parts.push("dense");
+    }
+    if pipeline.rerank {
+        parts.push("rerank");
+    }
+
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" + ")
+    }
+}
+
+fn format_search_pipeline_notice(notice: &SearchPipelineNotice) -> String {
+    let step = match notice.step {
+        SearchPipelineStep::Dense => "dense retrieval",
+        SearchPipelineStep::Rerank => "rerank",
+    };
+    let reason = match notice.reason {
+        SearchPipelineUnavailableReason::NotConfigured => "not configured",
+        SearchPipelineUnavailableReason::ModelNotAvailable => "required model not downloaded",
+    };
+    format!("{step} unavailable: {reason}")
 }
 
 fn format_update_report(report: &UpdateReport, verbose: bool) -> String {
@@ -2468,13 +2514,77 @@ mod tests {
                 "unexpected output: {output}"
             );
             assert!(
-                output.contains("mode: keyword"),
+                output.contains("requested_mode: keyword"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("effective_mode: keyword"),
                 "unexpected output: {output}"
             );
             assert!(output.contains("results: 1"), "unexpected output: {output}");
             assert!(output.contains("1. #"), "unexpected output: {output}");
             assert!(output.contains("api/a.md"), "unexpected output: {output}");
             assert!(output.contains("signals:"), "unexpected output: {output}");
+        });
+    }
+
+    #[test]
+    fn search_reports_requested_and_effective_mode_for_auto_keyword_fallback() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+
+            let work_path = new_collection_dir(root.path(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: work_path.clone(),
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add collection");
+            fs::write(work_path.join("a.md"), "fallback token\n").expect("write file");
+
+            let adapter = CliAdapter::new(engine);
+            adapter
+                .update(Some("work"), &["api".to_string()], true, false, false)
+                .expect("run update");
+
+            let output = adapter
+                .search(CliSearchOptions {
+                    space: Some("work"),
+                    query: "fallback",
+                    collections: &["api".to_string()],
+                    limit: 5,
+                    min_score: 0.0,
+                    deep: false,
+                    keyword: false,
+                    semantic: false,
+                    rerank: false,
+                    no_rerank: false,
+                    debug: false,
+                })
+                .expect("run auto search");
+
+            assert!(
+                output.contains("requested_mode: auto"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("effective_mode: keyword"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("pipeline: keyword"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("note: dense retrieval unavailable: required model not downloaded"),
+                "unexpected output: {output}"
+            );
         });
     }
 

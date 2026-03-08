@@ -4,7 +4,7 @@ pub mod stdio;
 mod test_support;
 
 use kbolt_core::engine::Engine;
-use kbolt_core::{CoreError, Result};
+use kbolt_core::Result;
 use kbolt_types::{
     CollectionInfo, DocumentResponse, FileEntry, GetRequest, KboltError, Locator, ModelStatus,
     MultiGetRequest, MultiGetResponse, SearchMode, SearchRequest, SearchResponse, SpaceInfo,
@@ -114,19 +114,6 @@ impl McpAdapter {
         self.engine.search(req)
     }
 
-    fn search_with_auto_fallback(&self, req: SearchRequest) -> Result<SearchResponse> {
-        match self.search(req.clone()) {
-            Ok(response) => Ok(response),
-            Err(err) if should_fallback_to_keyword_search(&req, &err) => {
-                let mut fallback = req;
-                fallback.mode = SearchMode::Keyword;
-                fallback.no_rerank = true;
-                self.search(fallback)
-            }
-            Err(err) => Err(err),
-        }
-    }
-
     pub fn tool_definitions() -> Vec<McpToolDefinition> {
         vec![
             McpToolDefinition {
@@ -234,7 +221,7 @@ impl McpAdapter {
                     None => Vec::new(),
                 };
 
-                let response = self.search_with_auto_fallback(SearchRequest {
+                let response = self.search(SearchRequest {
                     query,
                     mode,
                     space,
@@ -516,11 +503,6 @@ fn resolve_tool_no_rerank(mode: &SearchMode, no_rerank: Option<bool>) -> bool {
         Some(value) => value,
         None => matches!(mode, SearchMode::Auto),
     }
-}
-
-fn should_fallback_to_keyword_search(req: &SearchRequest, err: &CoreError) -> bool {
-    matches!(req.mode, SearchMode::Auto)
-        && matches!(err, CoreError::Domain(KboltError::ModelNotAvailable { .. }))
 }
 
 #[cfg(test)]
@@ -913,7 +895,7 @@ mod tests {
 
             match response {
                 McpToolResponse::Search(search) => {
-                    assert_eq!(search.mode, SearchMode::Keyword);
+                    assert_eq!(search.effective_mode, SearchMode::Keyword);
                     assert_eq!(search.query, "search-token");
                     assert_eq!(search.results.len(), 1);
                     assert_eq!(search.results[0].space, "work");
@@ -1052,7 +1034,8 @@ mod tests {
                 .expect("run search via json bridge");
 
             assert_eq!(response["query"], "search-token");
-            assert_eq!(response["mode"], "Keyword");
+            assert_eq!(response["requested_mode"], "Auto");
+            assert_eq!(response["effective_mode"], "Keyword");
             let results = response["results"]
                 .as_array()
                 .expect("results should be an array");

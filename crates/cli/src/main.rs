@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use clap::Parser;
 use kbolt_cli::args::{
     Cli, CollectionCommand, Command, EvalCommand, IgnoreCommand, ModelsCommand, OutputFormat,
-    ScheduleAddArgs, ScheduleCommand, ScheduleDayArg, ScheduleRemoveArgs, SearchArgs, SpaceCommand,
+    ScheduleAddArgs, ScheduleCommand, ScheduleDayArg, ScheduleRemoveArgs, SpaceCommand,
 };
 use kbolt_cli::{resolve_no_rerank_for_mode, CliAdapter, CliSearchOptions};
 use kbolt_core::config;
@@ -313,7 +313,6 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
         }
         Command::Mcp => unreachable!("mcp command handled before adapter setup"),
         Command::Search(search) => {
-            let requested_mode = requested_search_mode(&search);
             let mode = if search.deep {
                 SearchMode::Deep
             } else if search.keyword {
@@ -365,10 +364,6 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
                             print_message(&pull_report);
                             let retried = run_search(search.deep, search.keyword, search.semantic)?;
                             print_text(&retried);
-                        } else if requested_mode == RequestedSearchMode::Auto {
-                            print_text("models unavailable; falling back to keyword mode");
-                            let fallback = run_search(false, true, false)?;
-                            print_text(&fallback);
                         } else {
                             return Err(err.into());
                         }
@@ -586,27 +581,7 @@ struct ModelsJsonResponse {
     models: ModelStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RequestedSearchMode {
-    Auto,
-    Deep,
-    Keyword,
-    Semantic,
-}
-
 const INTERNAL_SCHEDULE_RUN_COMMAND: &str = "__schedule-run";
-
-fn requested_search_mode(search: &SearchArgs) -> RequestedSearchMode {
-    if search.deep {
-        RequestedSearchMode::Deep
-    } else if search.keyword {
-        RequestedSearchMode::Keyword
-    } else if search.semantic {
-        RequestedSearchMode::Semantic
-    } else {
-        RequestedSearchMode::Auto
-    }
-}
 
 fn ensure_schedule_uses_local_scope(space: Option<&str>) -> std::result::Result<(), RunError> {
     if space.is_none() {
@@ -1009,15 +984,14 @@ mod tests {
         ensure_supported_output_format, is_model_not_available_error, parse_internal_schedule_run,
         parse_pull_confirmation, parse_schedule_interval, render_error_output,
         render_message_output, render_structured_output, requested_output_format_from_args,
-        requested_search_mode, schedule_add_request, schedule_remove_request,
-        should_offer_model_pull_for_collection_add, should_offer_model_pull_for_update,
-        should_show_first_run_models_hint, supports_interactive_output,
-        with_collection_add_model_missing_guidance, with_update_model_missing_guidance,
-        DefaultSpaceJsonResponse, IgnoreShowJsonResponse, RequestedSearchMode, RunError,
-        INTERNAL_SCHEDULE_RUN_COMMAND,
+        schedule_add_request, schedule_remove_request, should_offer_model_pull_for_collection_add,
+        should_offer_model_pull_for_update, should_show_first_run_models_hint,
+        supports_interactive_output, with_collection_add_model_missing_guidance,
+        with_update_model_missing_guidance, DefaultSpaceJsonResponse, IgnoreShowJsonResponse,
+        RunError, INTERNAL_SCHEDULE_RUN_COMMAND,
     };
     use kbolt_cli::args::{
-        Cli, Command, OutputFormat, ScheduleAddArgs, ScheduleDayArg, ScheduleRemoveArgs, SearchArgs,
+        Cli, Command, OutputFormat, ScheduleAddArgs, ScheduleDayArg, ScheduleRemoveArgs,
     };
     use kbolt_core::error::CoreError;
     use kbolt_types::{
@@ -1025,42 +999,6 @@ mod tests {
         ScheduleScope, ScheduleTrigger, ScheduleWeekday, UpdateDecision, UpdateDecisionKind,
         UpdateReport,
     };
-
-    fn search_args() -> SearchArgs {
-        SearchArgs {
-            query: "query".to_string(),
-            collections: Vec::new(),
-            limit: 10,
-            min_score: 0.0,
-            deep: false,
-            keyword: false,
-            semantic: false,
-            rerank: false,
-            no_rerank: false,
-            debug: false,
-        }
-    }
-
-    #[test]
-    fn requested_search_mode_defaults_to_auto() {
-        let args = search_args();
-        assert_eq!(requested_search_mode(&args), RequestedSearchMode::Auto);
-    }
-
-    #[test]
-    fn requested_search_mode_respects_explicit_flags() {
-        let mut args = search_args();
-        args.deep = true;
-        assert_eq!(requested_search_mode(&args), RequestedSearchMode::Deep);
-
-        args.deep = false;
-        args.keyword = true;
-        assert_eq!(requested_search_mode(&args), RequestedSearchMode::Keyword);
-
-        args.keyword = false;
-        args.semantic = true;
-        assert_eq!(requested_search_mode(&args), RequestedSearchMode::Semantic);
-    }
 
     #[test]
     fn eval_rejects_top_level_space_flag() {
