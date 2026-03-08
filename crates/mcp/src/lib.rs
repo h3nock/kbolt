@@ -862,7 +862,7 @@ mod tests {
                     debug: false,
                 })
                 .expect("run search");
-            assert_eq!(response.mode, SearchMode::Keyword);
+            assert_eq!(response.effective_mode, SearchMode::Keyword);
             assert_eq!(response.query, "search-token");
             assert_eq!(response.results.len(), 1);
             assert_eq!(response.results[0].space, "work");

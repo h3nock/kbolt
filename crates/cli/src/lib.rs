@@ -543,7 +543,10 @@ impl CliAdapter {
 
         let mut lines = Vec::new();
         lines.push(format!("query: {}", response.query));
-        lines.push(format!("mode: {}", format_search_mode(&response.mode)));
+        lines.push(format!(
+            "mode: {}",
+            format_search_mode(&response.effective_mode)
+        ));
         lines.push(format!("results: {}", response.results.len()));
         for (index, item) in response.results.iter().enumerate() {
             lines.push(format!(

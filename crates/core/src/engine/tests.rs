@@ -1708,7 +1708,7 @@ fn search_keyword_returns_ranked_results_for_targeted_collection() {
             })
             .expect("run keyword search");
 
-        assert_eq!(response.mode, SearchMode::Keyword);
+        assert_eq!(response.effective_mode, SearchMode::Keyword);
         assert_eq!(response.query, "alpha_search_term");
         assert!(!response.results.is_empty(), "expected at least one result");
         let first = &response.results[0];
@@ -1811,7 +1811,7 @@ fn search_semantic_returns_dense_ranked_results_when_embedder_is_configured() {
             })
             .expect("run semantic search");
 
-        assert_eq!(response.mode, SearchMode::Semantic);
+        assert_eq!(response.effective_mode, SearchMode::Semantic);
         assert!(!response.results.is_empty(), "expected at least one result");
         let first = &response.results[0];
         assert_eq!(first.space, "work");
@@ -1859,7 +1859,7 @@ fn search_auto_mode_uses_keyword_path_and_scopes_space() {
             })
             .expect("run auto search");
 
-        assert_eq!(response.mode, SearchMode::Keyword);
+        assert_eq!(response.effective_mode, SearchMode::Keyword);
         assert!(response.results.iter().all(|item| item.space == "work"));
     });
 }
@@ -1893,7 +1893,7 @@ fn search_auto_mode_uses_hybrid_signals_when_embedder_is_configured() {
             })
             .expect("run auto search");
 
-        assert_eq!(response.mode, SearchMode::Auto);
+        assert_eq!(response.effective_mode, SearchMode::Auto);
         assert!(!response.results.is_empty(), "expected at least one result");
         let first = &response.results[0];
         let signals = first.signals.as_ref().expect("debug signals");
@@ -1973,7 +1973,7 @@ fn search_deep_mode_returns_results_with_reranker_signal() {
             })
             .expect("run deep search");
 
-        assert_eq!(response.mode, SearchMode::Deep);
+        assert_eq!(response.effective_mode, SearchMode::Deep);
         assert!(!response.results.is_empty(), "expected at least one result");
         let first = &response.results[0];
         let signals = first.signals.as_ref().expect("debug signals");
@@ -2095,7 +2095,7 @@ fn search_validates_semantic_and_collection_scope() {
                 debug: false,
             })
             .expect("deep mode should execute");
-        assert_eq!(deep.mode, SearchMode::Deep);
+        assert_eq!(deep.effective_mode, SearchMode::Deep);
         assert!(deep.results.is_empty());
 
         let ambiguous_err = engine

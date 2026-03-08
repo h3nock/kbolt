@@ -19,7 +19,8 @@ use crate::Result;
 use kbolt_types::{
     ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, CollectionStatus,
     DocumentResponse, FileEntry, GetRequest, KboltError, Locator, ModelStatus, MultiGetRequest,
-    MultiGetResponse, OmitReason, OmittedFile, PullReport, SearchMode, SearchRequest,
+    MultiGetResponse, OmitReason, OmittedFile, PullReport, SearchMode, SearchPipeline,
+    SearchPipelineNotice, SearchPipelineStep, SearchPipelineUnavailableReason, SearchRequest,
     SearchResponse, SearchResult, SearchSignals, SpaceInfo, SpaceStatus, StatusResponse,
     UpdateOptions, UpdateReport,
 };
@@ -632,7 +633,8 @@ impl Engine {
             return Err(KboltError::InvalidInput("query cannot be empty".to_string()).into());
         }
 
-        let mode = match req.mode {
+        let requested_mode = req.mode.clone();
+        let mode = match requested_mode {
             SearchMode::Auto => {
                 if self.embedder.is_some() {
                     SearchMode::Auto
@@ -645,6 +647,7 @@ impl Engine {
             SearchMode::Deep => SearchMode::Deep,
         };
         let rerank_enabled = matches!(mode, SearchMode::Auto | SearchMode::Deep) && !req.no_rerank;
+        let pipeline = self.initial_search_pipeline(&requested_mode, &mode, rerank_enabled);
 
         let targets = self.resolve_targets(TargetScope {
             space: req.space.as_deref(),
@@ -661,7 +664,9 @@ impl Engine {
             return Ok(SearchResponse {
                 results: Vec::new(),
                 query: req.query,
-                mode,
+                requested_mode,
+                effective_mode: mode,
+                pipeline,
                 staleness_hint,
                 elapsed_ms: started.elapsed().as_millis() as u64,
             });
@@ -690,7 +695,9 @@ impl Engine {
                 return Ok(SearchResponse {
                     results: Vec::new(),
                     query: req.query,
-                    mode,
+                    requested_mode,
+                    effective_mode: mode,
+                    pipeline,
                     staleness_hint,
                     elapsed_ms: started.elapsed().as_millis() as u64,
                 });
@@ -723,7 +730,9 @@ impl Engine {
         Ok(SearchResponse {
             results,
             query: req.query,
-            mode,
+            requested_mode,
+            effective_mode: mode,
+            pipeline,
             staleness_hint,
             elapsed_ms: started.elapsed().as_millis() as u64,
         })

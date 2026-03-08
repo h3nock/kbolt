@@ -1,5 +1,6 @@
 use kbolt_types::{
-    Locator, OmitReason, SearchMode, SearchRequest, SearchResponse, SearchResult, SearchSignals,
+    Locator, OmitReason, SearchMode, SearchPipeline, SearchPipelineNotice, SearchPipelineStep,
+    SearchPipelineUnavailableReason, SearchRequest, SearchResponse, SearchResult, SearchSignals,
 };
 
 #[test]
@@ -55,7 +56,18 @@ fn search_response_roundtrip() {
             }),
         }],
         query: "engine struct".to_string(),
-        mode: SearchMode::Auto,
+        requested_mode: SearchMode::Auto,
+        effective_mode: SearchMode::Auto,
+        pipeline: SearchPipeline {
+            keyword: true,
+            dense: true,
+            expansion: false,
+            rerank: true,
+            notices: vec![SearchPipelineNotice {
+                step: SearchPipelineStep::Rerank,
+                reason: SearchPipelineUnavailableReason::ModelNotAvailable,
+            }],
+        },
         staleness_hint: Some("Index last updated: 2m ago".to_string()),
         elapsed_ms: 24,
     };

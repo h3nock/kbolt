@@ -1,6 +1,37 @@
 use super::*;
 
 impl Engine {
+    pub(super) fn initial_search_pipeline(
+        &self,
+        requested_mode: &SearchMode,
+        effective_mode: &SearchMode,
+        rerank_enabled: bool,
+    ) -> SearchPipeline {
+        let mut pipeline = SearchPipeline {
+            keyword: matches!(
+                effective_mode,
+                SearchMode::Keyword | SearchMode::Auto | SearchMode::Deep
+            ),
+            dense: matches!(
+                effective_mode,
+                SearchMode::Auto | SearchMode::Semantic | SearchMode::Deep
+            ) && self.embedder.is_some(),
+            expansion: matches!(effective_mode, SearchMode::Deep),
+            rerank: rerank_enabled,
+            notices: Vec::new(),
+        };
+
+        if matches!(requested_mode, SearchMode::Auto | SearchMode::Deep) && !self.embedder.is_some()
+        {
+            pipeline.notices.push(SearchPipelineNotice {
+                step: SearchPipelineStep::Dense,
+                reason: SearchPipelineUnavailableReason::NotConfigured,
+            });
+        }
+
+        pipeline
+    }
+
     pub(super) fn initial_search_candidate_limit(
         &self,
         mode: &SearchMode,

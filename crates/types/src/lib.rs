@@ -22,7 +22,10 @@ pub use schedule::{
     ScheduleRemoveResponse, ScheduleRunResult, ScheduleRunState, ScheduleScope, ScheduleState,
     ScheduleStatusEntry, ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday,
 };
-pub use search::{SearchMode, SearchRequest, SearchResponse, SearchResult, SearchSignals};
+pub use search::{
+    SearchMode, SearchPipeline, SearchPipelineNotice, SearchPipelineStep,
+    SearchPipelineUnavailableReason, SearchRequest, SearchResponse, SearchResult, SearchSignals,
+};
 pub use space::{ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, SpaceInfo};
 pub use status::{
     CollectionStatus, DiskUsage, ModelInfo, ModelStatus, SpaceStatus, StatusResponse,
