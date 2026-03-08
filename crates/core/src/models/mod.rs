@@ -46,14 +46,9 @@ pub(crate) use reranker::Reranker;
 
 #[derive(Debug, Clone)]
 struct ModelTarget {
+    role: ModelRole,
     role_dir: &'static str,
     source: ModelSourceConfig,
-}
-
-#[derive(Debug, Clone)]
-struct PullTarget {
-    target: ModelTarget,
-    requirements: Vec<ModelFileRequirement>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,13 +198,18 @@ where
         total_bytes: 0,
     };
 
-    for pull_target in pull_targets(model_config, embeddings, inference) {
-        let target = &pull_target.target;
+    for (target, requirements) in model_targets(model_config)
+        .into_iter()
+        .filter_map(|target| {
+            local_download_requirements_for_target(&target, embeddings, inference)
+                .map(|requirements| (target, requirements))
+        })
+    {
         let role = target.role_dir.to_string();
         let model = target.source.id.clone();
         let target_dir = model_dir.join(target.role_dir);
         if let Some(existing_bytes) = model_payload_size_bytes(&target_dir, &target.source)? {
-            ensure_runtime_paths(&target_dir, &pull_target.requirements)?;
+            ensure_runtime_paths(&target_dir, &requirements)?;
             on_event(ModelPullEvent::AlreadyPresent {
                 role,
                 model: model.clone(),
@@ -225,10 +225,10 @@ where
         });
         let request = ModelDownloadRequest {
             model_id: target.source.id.clone(),
-            requirements: pull_target.requirements.clone(),
+            requirements: requirements.clone(),
         };
         let downloaded_bytes = downloader.download_model(&request, &target_dir)?;
-        ensure_runtime_paths(&target_dir, &pull_target.requirements)?;
+        ensure_runtime_paths(&target_dir, &requirements)?;
         on_event(ModelPullEvent::DownloadCompleted {
             role,
             model: model.clone(),
@@ -280,64 +280,39 @@ pub(crate) fn resolve_model_artifact(
 fn model_targets(config: &ModelConfig) -> [ModelTarget; 3] {
     [
         ModelTarget {
+            role: ModelRole::Embedder,
             role_dir: MODEL_DIRNAME_EMBEDDER,
             source: config.embedder.clone(),
         },
         ModelTarget {
+            role: ModelRole::Reranker,
             role_dir: MODEL_DIRNAME_RERANKER,
             source: config.reranker.clone(),
         },
         ModelTarget {
+            role: ModelRole::Expander,
             role_dir: MODEL_DIRNAME_EXPANDER,
             source: config.expander.clone(),
         },
     ]
 }
 
-fn pull_targets(
-    model_config: &ModelConfig,
+fn local_download_requirements_for_target(
+    target: &ModelTarget,
     embeddings: Option<&EmbeddingConfig>,
     inference: &InferenceConfig,
-) -> Vec<PullTarget> {
-    let mut targets = Vec::new();
-
-    if let Some(requirements) = embedder_download_requirements(embeddings) {
-        targets.push(PullTarget {
-            target: ModelTarget {
-                role_dir: MODEL_DIRNAME_EMBEDDER,
-                source: model_config.embedder.clone(),
-            },
-            requirements,
-        });
+) -> Option<Vec<ModelFileRequirement>> {
+    match target.role {
+        ModelRole::Embedder => embedder_download_requirements(embeddings),
+        ModelRole::Reranker => text_role_download_requirements(
+            inference.reranker.as_ref(),
+            "inference.reranker.model_file",
+        ),
+        ModelRole::Expander => text_role_download_requirements(
+            inference.expander.as_ref(),
+            "inference.expander.model_file",
+        ),
     }
-
-    if let Some(requirements) = text_role_download_requirements(
-        inference.reranker.as_ref(),
-        "inference.reranker.model_file",
-    ) {
-        targets.push(PullTarget {
-            target: ModelTarget {
-                role_dir: MODEL_DIRNAME_RERANKER,
-                source: model_config.reranker.clone(),
-            },
-            requirements,
-        });
-    }
-
-    if let Some(requirements) = text_role_download_requirements(
-        inference.expander.as_ref(),
-        "inference.expander.model_file",
-    ) {
-        targets.push(PullTarget {
-            target: ModelTarget {
-                role_dir: MODEL_DIRNAME_EXPANDER,
-                source: model_config.expander.clone(),
-            },
-            requirements,
-        });
-    }
-
-    targets
 }
 
 fn embedder_download_requirements(

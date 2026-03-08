@@ -217,31 +217,33 @@ fn test_config() -> ModelConfig {
     }
 }
 
-fn local_gguf_embeddings() -> EmbeddingConfig {
-    EmbeddingConfig::LocalGguf {
-        model_file: None,
-        batch_size: 4,
-        n_threads: None,
-        n_threads_batch: None,
-    }
-}
-
-fn local_text_inference(model_file: Option<&str>) -> TextInferenceConfig {
-    TextInferenceConfig {
-        provider: TextInferenceProvider::LocalLlama {
-            model_file: model_file.map(ToString::to_string),
-            max_tokens: 128,
-            n_ctx: 2048,
-            n_gpu_layers: 0,
+fn local_runtime_config() -> (EmbeddingConfig, InferenceConfig) {
+    (
+        EmbeddingConfig::LocalGguf {
+            model_file: None,
+            batch_size: 4,
+            n_threads: None,
+            n_threads_batch: None,
         },
-    }
-}
-
-fn local_inference() -> InferenceConfig {
-    InferenceConfig {
-        reranker: Some(local_text_inference(None)),
-        expander: Some(local_text_inference(None)),
-    }
+        InferenceConfig {
+            reranker: Some(TextInferenceConfig {
+                provider: TextInferenceProvider::LocalLlama {
+                    model_file: None,
+                    max_tokens: 128,
+                    n_ctx: 2048,
+                    n_gpu_layers: 0,
+                },
+            }),
+            expander: Some(TextInferenceConfig {
+                provider: TextInferenceProvider::LocalLlama {
+                    model_file: None,
+                    max_tokens: 128,
+                    n_ctx: 2048,
+                    n_gpu_layers: 0,
+                },
+            }),
+        },
+    )
 }
 
 #[test]
@@ -280,8 +282,7 @@ fn pull_downloads_all_missing_models_and_reports_bytes() {
     let downloader = FakeDownloader {
         bytes_per_model: 11,
     };
-    let embeddings = local_gguf_embeddings();
-    let inference = local_inference();
+    let (embeddings, inference) = local_runtime_config();
 
     let report = pull_with_downloader(
         &config,
@@ -307,8 +308,7 @@ fn pull_skips_models_that_are_already_present() {
     let root = tempdir().expect("create temp root");
     let config = test_config();
     let downloader = FakeDownloader { bytes_per_model: 5 };
-    let embeddings = local_gguf_embeddings();
-    let inference = local_inference();
+    let (embeddings, inference) = local_runtime_config();
 
     seed_model(root.path(), "embedder", &config.embedder, b"existing");
 
@@ -330,8 +330,7 @@ fn pull_emits_progress_events_for_downloaded_and_present_models() {
     let root = tempdir().expect("create temp root");
     let config = test_config();
     let downloader = FakeDownloader { bytes_per_model: 7 };
-    let embeddings = local_gguf_embeddings();
-    let inference = local_inference();
+    let (embeddings, inference) = local_runtime_config();
 
     seed_model(root.path(), "embedder", &config.embedder, b"existing");
 
@@ -400,8 +399,7 @@ fn pull_redownloads_model_when_manifest_does_not_match_source() {
     let root = tempdir().expect("create temp root");
     let config = test_config();
     let downloader = FakeDownloader { bytes_per_model: 5 };
-    let embeddings = local_gguf_embeddings();
-    let inference = local_inference();
+    let (embeddings, inference) = local_runtime_config();
 
     let mut mismatched_embedder = config.embedder.clone();
     mismatched_embedder.id = "embed-model-old".to_string();
@@ -490,8 +488,7 @@ fn pull_builds_role_specific_default_download_requirements() {
     let root = tempdir().expect("create temp root");
     let config = test_config();
     let downloader = CapturingDownloader::default();
-    let embeddings = local_gguf_embeddings();
-    let inference = local_inference();
+    let (embeddings, inference) = local_runtime_config();
 
     let report = pull_with_downloader(
         &config,
