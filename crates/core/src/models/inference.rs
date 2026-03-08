@@ -9,12 +9,10 @@ use crate::config::{EmbeddingConfig, ModelConfig, TextInferenceConfig, TextInfer
 use crate::models::artifacts::resolve_file_with_extension;
 use crate::models::chat::HttpChatClient;
 use crate::models::completion::CompletionClient;
-use crate::models::expander::HeuristicExpander;
 use crate::models::http::{HttpJsonClient, HttpOperation};
 use crate::models::local_gguf::build_local_gguf_embedder;
 use crate::models::local_llama::build_local_llama_completion_client;
 use crate::models::local_onnx::build_local_onnx_embedder;
-use crate::models::reranker::HeuristicReranker;
 use crate::models::{resolve_model_artifact, Embedder, Expander, ModelRole, Reranker};
 use crate::Result;
 
@@ -69,7 +67,9 @@ pub(crate) fn build_embedder_with_local_runtime(
 }
 
 #[cfg(test)]
-pub(crate) fn build_reranker(config: Option<&TextInferenceConfig>) -> Result<Arc<dyn Reranker>> {
+pub(crate) fn build_reranker(
+    config: Option<&TextInferenceConfig>,
+) -> Result<Option<Arc<dyn Reranker>>> {
     build_reranker_inner(config, None)
 }
 
@@ -77,7 +77,7 @@ pub(crate) fn build_reranker_with_local_runtime(
     config: Option<&TextInferenceConfig>,
     model_config: &ModelConfig,
     model_dir: &Path,
-) -> Result<Arc<dyn Reranker>> {
+) -> Result<Option<Arc<dyn Reranker>>> {
     build_reranker_inner(
         config,
         Some(LocalRuntimeContext::new(model_config, model_dir)),
@@ -85,7 +85,9 @@ pub(crate) fn build_reranker_with_local_runtime(
 }
 
 #[cfg(test)]
-pub(crate) fn build_expander(config: Option<&TextInferenceConfig>) -> Result<Arc<dyn Expander>> {
+pub(crate) fn build_expander(
+    config: Option<&TextInferenceConfig>,
+) -> Result<Option<Arc<dyn Expander>>> {
     build_expander_inner(config, None)
 }
 
@@ -93,7 +95,7 @@ pub(crate) fn build_expander_with_local_runtime(
     config: Option<&TextInferenceConfig>,
     model_config: &ModelConfig,
     model_dir: &Path,
-) -> Result<Arc<dyn Expander>> {
+) -> Result<Option<Arc<dyn Expander>>> {
     build_expander_inner(
         config,
         Some(LocalRuntimeContext::new(model_config, model_dir)),
@@ -236,17 +238,17 @@ fn build_embedder_inner(
 fn build_reranker_inner(
     config: Option<&TextInferenceConfig>,
     local_runtime: Option<LocalRuntimeContext>,
-) -> Result<Arc<dyn Reranker>> {
-    let reranker: Arc<dyn Reranker> = match config {
-        Some(config) => Arc::new(ChatBackedReranker {
+) -> Result<Option<Arc<dyn Reranker>>> {
+    let reranker = match config {
+        Some(config) => Some(Arc::new(ChatBackedReranker {
             chat: build_completion_client_for_role(
                 &config.provider,
                 local_runtime,
                 ModelRole::Reranker,
                 "reranker",
             )?,
-        }),
-        None => Arc::new(HeuristicReranker),
+        }) as Arc<dyn Reranker>),
+        None => None,
     };
     Ok(reranker)
 }
@@ -254,17 +256,17 @@ fn build_reranker_inner(
 fn build_expander_inner(
     config: Option<&TextInferenceConfig>,
     local_runtime: Option<LocalRuntimeContext>,
-) -> Result<Arc<dyn Expander>> {
-    let expander: Arc<dyn Expander> = match config {
-        Some(config) => Arc::new(ChatBackedExpander {
+) -> Result<Option<Arc<dyn Expander>>> {
+    let expander = match config {
+        Some(config) => Some(Arc::new(ChatBackedExpander {
             chat: build_completion_client_for_role(
                 &config.provider,
                 local_runtime,
                 ModelRole::Expander,
                 "expander",
             )?,
-        }),
-        None => Arc::new(HeuristicExpander),
+        }) as Arc<dyn Expander>),
+        None => None,
     };
     Ok(expander)
 }
@@ -992,19 +994,9 @@ mod tests {
     }
 
     #[test]
-    fn build_reranker_uses_heuristic_when_inference_config_is_missing() {
+    fn build_reranker_returns_none_when_inference_config_is_missing() {
         let reranker = build_reranker(None).expect("build reranker");
-        let scores = reranker
-            .rerank(
-                "rust traits",
-                &[
-                    "Rust traits and impl examples".to_string(),
-                    "Python decorators".to_string(),
-                ],
-            )
-            .expect("rerank docs");
-        assert_eq!(scores.len(), 2);
-        assert!(scores[0] > scores[1]);
+        assert!(reranker.is_none());
     }
 
     #[test]
@@ -1027,6 +1019,7 @@ mod tests {
 
         let reranker = build_reranker_with_local_runtime(Some(&config), &model_config, root.path())
             .expect("build reranker");
+        let reranker = reranker.expect("reranker should exist");
         let err = reranker
             .rerank("query", &["doc".to_string()])
             .expect_err("missing local model should fail on first use");
@@ -1120,6 +1113,7 @@ mod tests {
         let base_url = serve_once(200, body);
         let config = base_text_config(base_url, TextInferenceOutputMode::JsonObject);
         let reranker = build_reranker(Some(&config)).expect("build reranker");
+        let reranker = reranker.expect("reranker should exist");
 
         let scores = reranker
             .rerank("query", &["doc one".to_string(), "doc two".to_string()])
@@ -1128,11 +1122,9 @@ mod tests {
     }
 
     #[test]
-    fn build_expander_uses_heuristic_when_inference_config_is_missing() {
+    fn build_expander_returns_none_when_inference_config_is_missing() {
         let expander = build_expander(None).expect("build expander");
-        let variants = expander.expand("rust traits").expect("expand query");
-        assert!(!variants.is_empty());
-        assert_eq!(variants[0], "rust traits");
+        assert!(expander.is_none());
     }
 
     #[test]
@@ -1149,6 +1141,7 @@ mod tests {
         let base_url = serve_once(200, body);
         let config = base_text_config(base_url, TextInferenceOutputMode::JsonObject);
         let expander = build_expander(Some(&config)).expect("build expander");
+        let expander = expander.expect("expander should exist");
 
         let variants = expander.expand("rust traits").expect("expand query");
         assert_eq!(
@@ -1192,6 +1185,7 @@ mod tests {
         let base_url = serve_once(200, body);
         let config = base_text_config(base_url, TextInferenceOutputMode::Text);
         let reranker = build_reranker(Some(&config)).expect("build reranker");
+        let reranker = reranker.expect("reranker should exist");
 
         let scores = reranker
             .rerank("query", &["doc one".to_string(), "doc two".to_string()])
@@ -1213,6 +1207,7 @@ mod tests {
         let base_url = serve_once(200, body);
         let config = base_text_config(base_url, TextInferenceOutputMode::Text);
         let reranker = build_reranker(Some(&config)).expect("build reranker");
+        let reranker = reranker.expect("reranker should exist");
 
         let err = reranker
             .rerank("query", &["doc one".to_string(), "doc two".to_string()])

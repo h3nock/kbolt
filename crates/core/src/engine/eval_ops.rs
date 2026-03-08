@@ -140,7 +140,7 @@ mod tests {
         ChunkingConfig, Config, EmbeddingConfig, InferenceConfig, ModelConfig, ModelProvider,
         ModelSourceConfig, ReapingConfig,
     };
-    use crate::models::Embedder;
+    use crate::models::{Embedder, Expander};
     use crate::storage::Storage;
     use kbolt_types::{AddCollectionRequest, SearchMode, UpdateOptions};
 
@@ -162,11 +162,20 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct DeterministicExpander;
+
+    impl Expander for DeterministicExpander {
+        fn expand(&self, query: &str) -> crate::Result<Vec<String>> {
+            Ok(vec![query.to_string(), format!("explain {query}")])
+        }
+    }
+
     #[test]
     fn run_eval_reports_keyword_auto_and_deep_without_embedder() {
         let root = tempdir().expect("create temp root");
         let collection_dir = seed_collection(root.path(), "rust", "guides/traits.md", TRAITS_DOC);
-        let engine = test_engine(None);
+        let engine = test_engine(None, Some(Arc::new(DeterministicExpander)));
         seed_eval_file(
             &engine,
             r#"
@@ -221,7 +230,10 @@ expected_paths = ["rust/guides/traits.md"]
     fn run_eval_includes_semantic_mode_when_embedder_is_available() {
         let root = tempdir().expect("create temp root");
         let collection_dir = seed_collection(root.path(), "rust", "guides/traits.md", TRAITS_DOC);
-        let engine = test_engine(Some(Arc::new(DeterministicEmbedder)));
+        let engine = test_engine(
+            Some(Arc::new(DeterministicEmbedder)),
+            Some(Arc::new(DeterministicExpander)),
+        );
         seed_eval_file(
             &engine,
             r#"
@@ -269,7 +281,10 @@ expected_paths = ["rust/guides/traits.md"]
         assert_eq!(semantic.mrr_at_10, 1.0);
     }
 
-    fn test_engine(embedder: Option<Arc<dyn Embedder>>) -> Engine {
+    fn test_engine(
+        embedder: Option<Arc<dyn Embedder>>,
+        expander: Option<Arc<dyn Expander>>,
+    ) -> Engine {
         let root = tempdir().expect("create temp root");
         let root_path = root.path().to_path_buf();
         std::mem::forget(root);
@@ -311,7 +326,7 @@ expected_paths = ["rust/guides/traits.md"]
             reaping: ReapingConfig { days: 7 },
             chunking: ChunkingConfig::default(),
         };
-        Engine::from_parts_with_embedder(storage, config, embedder)
+        Engine::from_parts_with_models(storage, config, embedder, None, expander)
     }
 
     fn seed_collection(

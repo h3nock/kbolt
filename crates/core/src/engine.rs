@@ -55,8 +55,8 @@ pub struct Engine {
     storage: Storage,
     config: Config,
     embedder: Option<Arc<dyn models::Embedder>>,
-    reranker: Arc<dyn models::Reranker>,
-    expander: Arc<dyn models::Expander>,
+    reranker: Option<Arc<dyn models::Reranker>>,
+    expander: Option<Arc<dyn models::Expander>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,7 +149,7 @@ impl Engine {
 
     #[cfg(test)]
     pub(crate) fn from_parts(storage: Storage, config: Config) -> Self {
-        Self::from_parts_with_embedder(storage, config, None)
+        Self::from_parts_with_models(storage, config, None, None, None)
     }
 
     #[cfg(test)]
@@ -158,19 +158,34 @@ impl Engine {
         config: Config,
         embedder: Option<Arc<dyn models::Embedder>>,
     ) -> Self {
+        Self::from_parts_with_models(storage, config, embedder, None, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_parts_with_models(
+        storage: Storage,
+        config: Config,
+        embedder: Option<Arc<dyn models::Embedder>>,
+        reranker: Option<Arc<dyn models::Reranker>>,
+        expander: Option<Arc<dyn models::Expander>>,
+    ) -> Self {
         let model_dir = config.cache_dir.join("models");
-        let reranker = models::build_reranker_with_local_runtime(
-            config.inference.reranker.as_ref(),
-            &config.models,
-            &model_dir,
-        )
-        .expect("build reranker for test engine");
-        let expander = models::build_expander_with_local_runtime(
-            config.inference.expander.as_ref(),
-            &config.models,
-            &model_dir,
-        )
-        .expect("build expander for test engine");
+        let reranker = reranker.or_else(|| {
+            models::build_reranker_with_local_runtime(
+                config.inference.reranker.as_ref(),
+                &config.models,
+                &model_dir,
+            )
+            .expect("build reranker for test engine")
+        });
+        let expander = expander.or_else(|| {
+            models::build_expander_with_local_runtime(
+                config.inference.expander.as_ref(),
+                &config.models,
+                &model_dir,
+            )
+            .expect("build expander for test engine")
+        });
         Self {
             storage,
             config,

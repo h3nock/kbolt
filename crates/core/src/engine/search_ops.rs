@@ -336,7 +336,14 @@ impl Engine {
         min_score: f32,
         pipeline: &mut SearchPipeline,
     ) -> Result<Vec<RankedChunk>> {
-        let variants = self.expander.expand(query)?;
+        let Some(expander) = self.expander.as_ref() else {
+            return Err(KboltError::InvalidInput(
+                "deep search requires expander configuration. add [inference.expander] to index.toml".to_string(),
+            )
+            .into());
+        };
+
+        let variants = expander.expand(query)?;
         pipeline.expansion = true;
         let mut aggregates: HashMap<i64, RankedChunk> = HashMap::new();
 
@@ -475,21 +482,32 @@ impl Engine {
                 .take(rerank_count)
                 .map(|candidate| candidate.rerank_input.clone())
                 .collect::<Vec<_>>();
-            let raw_scores = match self.reranker.rerank(query, &rerank_inputs) {
-                Ok(scores) => {
-                    pipeline.rerank = true;
-                    Some(scores)
-                }
-                Err(err) if is_model_not_available_error(&err) => {
+            let raw_scores = match self.reranker.as_ref() {
+                Some(reranker) => match reranker.rerank(query, &rerank_inputs) {
+                    Ok(scores) => {
+                        pipeline.rerank = true;
+                        Some(scores)
+                    }
+                    Err(err) if is_model_not_available_error(&err) => {
+                        pipeline.rerank = false;
+                        add_search_pipeline_notice(
+                            pipeline,
+                            SearchPipelineStep::Rerank,
+                            SearchPipelineUnavailableReason::ModelNotAvailable,
+                        );
+                        None
+                    }
+                    Err(err) => return Err(err),
+                },
+                None => {
                     pipeline.rerank = false;
                     add_search_pipeline_notice(
                         pipeline,
                         SearchPipelineStep::Rerank,
-                        SearchPipelineUnavailableReason::ModelNotAvailable,
+                        SearchPipelineUnavailableReason::NotConfigured,
                     );
                     None
                 }
-                Err(err) => return Err(err),
             };
             let Some(raw_scores) = raw_scores else {
                 candidates.sort_by(|left, right| right.final_score.total_cmp(&left.final_score));
