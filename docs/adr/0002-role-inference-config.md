@@ -57,5 +57,6 @@ Validation rules match embedding config expectations:
 ## Consequences
 - Reranker and expander can be configured independently from embeddings.
 - Providers are pluggable per role.
-- If a role is not configured, kbolt currently uses deterministic heuristic implementations.
+- Unset roles stay unset: kbolt does not synthesize heuristic replacements.
+- Deep search therefore requires an expander configuration, while reranking is skipped and reported when no reranker is configured.
 - V1 provider scope for these role adapters is `openai_compatible` and `local_llama`.

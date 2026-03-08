@@ -209,8 +209,8 @@ core/
     provider.rs          # model artifact provider trait
     providers/hf.rs      # HuggingFace artifact download adapter
     embedder.rs          # Embedder trait
-    reranker.rs          # Reranker trait + heuristic fallback
-    expander.rs          # Expander trait + heuristic fallback
+    reranker.rs          # Reranker trait
+    expander.rs          # Expander trait
     inference.rs         # provider wiring and role implementations
     http.rs              # shared HTTP transport/retry behavior
     chat.rs              # chat completion client + request/response shaping
@@ -234,8 +234,8 @@ pub struct Engine {
     storage: Storage,
     config: Config,
     embedder: Option<Arc<dyn Embedder>>,
-    reranker: Arc<dyn Reranker>,
-    expander: Arc<dyn Expander>,
+    reranker: Option<Arc<dyn Reranker>>,
+    expander: Option<Arc<dyn Expander>>,
 }
 
 impl Engine {
@@ -300,7 +300,7 @@ struct SpaceIndexes {
 
 | Store | Role | Stores | Good at |
 |---|---|---|---|
-| SQLite | Source of truth | All entities (spaces, collections, documents, chunks, embeddings, cache) | Relational queries, joins, CRUD, metadata |
+| SQLite | Source of truth | All entities (spaces, collections, documents, chunks, embeddings) | Relational queries, joins, CRUD, metadata |
 | Tantivy (per-space) | BM25 search | Denormalized chunk entries (chunk_id, filepath, title, heading, body) | Full-text search, tokenization, field boosting |
 | USearch (per-space) | Dense search | Vectors keyed by chunk_id | Approximate nearest neighbor in high dimensions |
 
@@ -744,10 +744,6 @@ impl Storage {
     pub fn count_usearch(&self, space: &str) -> Result<usize>;
     pub fn clear_usearch(&self, space: &str) -> Result<()>;
 
-    // --- LLM Cache ---
-    pub fn cache_get(&self, key: &str) -> Result<Option<String>>;
-    pub fn cache_set(&self, key: &str, value: &str) -> Result<()>;
-
     // --- Aggregate queries (for status) ---
     pub fn count_documents(&self, space_id: Option<i64>) -> Result<usize>;
     pub fn count_chunks(&self, space_id: Option<i64>) -> Result<usize>;
@@ -889,7 +885,7 @@ pub fn pull(config: &ModelConfig, model_dir: &Path) -> Result<PullReport>;
 pub fn status(config: &ModelConfig, model_dir: &Path) -> Result<ModelStatus>;
 ```
 
-Engine composes role adapters through model builders (`build_embedder_*`, `build_reranker_*`, `build_expander_*`) and then routes update/search through those role traits. If a reranker/expander role is unset in config, deterministic heuristic implementations are used.
+Engine composes role adapters through model builders (`build_embedder_*`, `build_reranker_*`, `build_expander_*`) and then routes update/search through those role traits. Unset reranker and expander roles stay unset: deep search requires an expander, and reranking is skipped with an explicit pipeline notice when no reranker is configured.
 
 Model download is delegated through a provider abstraction (for example, HuggingFace, local filesystem mirrors, or cloud object storage). The core model module must not hardcode provider-specific assumptions in orchestration logic.
 
@@ -1005,14 +1001,6 @@ UNIQUE constraint on `(doc_id, seq)`. Offset and length define a byte slice into
 
 PRIMARY KEY on `(chunk_id, model)`. Tracks which chunks have been embedded and by which model. When the embedding model changes, stale entries are detected by comparing the `model` column against the current model config.
 
-**LLM Cache** — Internal cache for expensive model calls (query expansion). Not a domain entity.
-
-| Column | Type | Purpose |
-|---|---|---|
-| `key` | TEXT PK | Hash of (model identifier + prompt) |
-| `value` | TEXT | The model's response |
-| `created` | TEXT | ISO 8601 |
-
 **Docid** — Not an entity. A computed display value: `"#" + document.hash[0..6]`. Used for quick document reference in CLI output and `kbolt get #a1b2c3`. Looked up via `SELECT ... FROM documents WHERE hash LIKE 'a1b2c3%'`.
 
 ### SQLite Schema
@@ -1072,11 +1060,6 @@ CREATE TABLE embeddings (
     PRIMARY KEY (chunk_id, model)
 );
 
-CREATE TABLE llm_cache (
-    key     TEXT PRIMARY KEY,
-    value   TEXT NOT NULL,
-    created TEXT NOT NULL
-);
 ```
 
 ### Tantivy Schema (per-space)
@@ -1119,7 +1102,7 @@ Key type:       u64 (chunk_id from SQLite)
             {collection}.ignore   # .gitignore syntax, per-collection
 
 ~/.cache/kbolt/
-    meta.sqlite             # all entities: spaces, collections, documents, chunks, embeddings, cache
+    meta.sqlite             # all entities: spaces, collections, documents, chunks, embeddings
     spaces/                 # per-space indexes (BM25 IDF isolation)
         {space}/
             tantivy/        # Tantivy index (managed by Tantivy)
@@ -1514,7 +1497,7 @@ Expander model (Qwen3 1.7B GGUF) generates three query variants:
 - **Semantic variant**: describes the concept differently (for dense recall)
 - **HyDE variant**: a hypothetical answer paragraph (embedded for vector search)
 
-Each variant is fed to Stage 4 independently, producing its own BM25 and dense candidate lists. All candidates from all variants are collected into a single pool, then enter Stage 5 (fusion) together. Results are cached in `llm_cache` to avoid repeating expensive model calls.
+Each variant is fed to Stage 4 independently, producing its own BM25 and dense candidate lists. All candidates from all variants are collected into a single pool, then enter Stage 5 (fusion) together.
 
 ### Stage 4: Multi-Signal Retrieval (parallel)
 
