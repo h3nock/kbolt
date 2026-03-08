@@ -1,5 +1,6 @@
 pub mod document;
 pub mod error;
+pub mod eval;
 pub mod indexing;
 pub mod model;
 pub mod schedule;
@@ -12,6 +13,7 @@ pub use document::{
     OmitReason, OmittedFile,
 };
 pub use error::{KboltError, Result};
+pub use eval::{EvalCase, EvalDataset, EvalModeReport, EvalQueryReport, EvalRunReport};
 pub use indexing::{FileError, UpdateDecision, UpdateDecisionKind, UpdateOptions, UpdateReport};
 pub use model::PullReport;
 pub use schedule::{

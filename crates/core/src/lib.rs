@@ -1,6 +1,7 @@
 pub mod config;
 pub mod engine;
 pub mod error;
+mod eval_store;
 pub mod ingest;
 mod lock;
 mod models;
