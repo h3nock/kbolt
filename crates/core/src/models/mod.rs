@@ -242,11 +242,28 @@ where
     Ok(report)
 }
 
-pub fn status(config: &ModelConfig, model_dir: &Path) -> Result<ModelStatus> {
+pub fn status(
+    config: &ModelConfig,
+    embeddings: Option<&EmbeddingConfig>,
+    inference: &InferenceConfig,
+    model_dir: &Path,
+) -> Result<ModelStatus> {
     let targets = model_targets(config);
-    let embedder = info_for_target(model_dir, &targets[0])?;
-    let reranker = info_for_target(model_dir, &targets[1])?;
-    let expander = info_for_target(model_dir, &targets[2])?;
+    let embedder = info_for_target(
+        model_dir,
+        &targets[0],
+        local_download_requirements_for_target(&targets[0], embeddings, inference).is_some(),
+    )?;
+    let reranker = info_for_target(
+        model_dir,
+        &targets[1],
+        local_download_requirements_for_target(&targets[1], embeddings, inference).is_some(),
+    )?;
+    let expander = info_for_target(
+        model_dir,
+        &targets[2],
+        local_download_requirements_for_target(&targets[2], embeddings, inference).is_some(),
+    )?;
 
     Ok(ModelStatus {
         embedder,
@@ -396,7 +413,20 @@ fn configured_repo_path(configured: Option<&str>) -> Option<String> {
     Some(configured.trim_start_matches("./").to_string())
 }
 
-fn info_for_target(model_dir: &Path, target: &ModelTarget) -> Result<ModelInfo> {
+fn info_for_target(
+    model_dir: &Path,
+    target: &ModelTarget,
+    is_local_role: bool,
+) -> Result<ModelInfo> {
+    if !is_local_role {
+        return Ok(ModelInfo {
+            name: target.source.id.clone(),
+            downloaded: false,
+            size_bytes: None,
+            path: None,
+        });
+    }
+
     let target_dir = model_dir.join(target.role_dir);
     let size = model_payload_size_bytes(&target_dir, &target.source)?.unwrap_or(0);
     Ok(ModelInfo {

@@ -836,7 +836,12 @@ impl Engine {
     }
 
     fn model_status_unlocked(&self) -> Result<ModelStatus> {
-        models::status(&self.config.models, &self.model_dir())
+        models::status(
+            &self.config.models,
+            self.config.embeddings.as_ref(),
+            &self.config.inference,
+            &self.model_dir(),
+        )
     }
 
     pub fn pull_models(&self) -> Result<PullReport> {

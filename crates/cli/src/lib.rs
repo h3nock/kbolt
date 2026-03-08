@@ -437,11 +437,7 @@ impl CliAdapter {
             ("reranker", status.reranker),
             ("expander", status.expander),
         ] {
-            let availability = if info.downloaded {
-                "downloaded"
-            } else {
-                "missing"
-            };
+            let availability = format_model_availability(info.downloaded, info.path.is_some());
             let mut line = format!("- {label}: {} ({availability})", info.name);
             if let Some(size_bytes) = info.size_bytes {
                 line.push_str(&format!(", size_bytes: {size_bytes}"));
@@ -682,29 +678,26 @@ impl CliAdapter {
         lines.push(format!(
             "model_embedder: {} ({})",
             status.models.embedder.name,
-            if status.models.embedder.downloaded {
-                "downloaded"
-            } else {
-                "missing"
-            }
+            format_model_availability(
+                status.models.embedder.downloaded,
+                status.models.embedder.path.is_some(),
+            )
         ));
         lines.push(format!(
             "model_reranker: {} ({})",
             status.models.reranker.name,
-            if status.models.reranker.downloaded {
-                "downloaded"
-            } else {
-                "missing"
-            }
+            format_model_availability(
+                status.models.reranker.downloaded,
+                status.models.reranker.path.is_some(),
+            )
         ));
         lines.push(format!(
             "model_expander: {} ({})",
             status.models.expander.name,
-            if status.models.expander.downloaded {
-                "downloaded"
-            } else {
-                "missing"
-            }
+            format_model_availability(
+                status.models.expander.downloaded,
+                status.models.expander.path.is_some(),
+            )
         ));
         lines.push(format!("cache_dir: {}", status.cache_dir.display()));
         lines.push(format!("config_dir: {}", status.config_dir.display()));
@@ -836,6 +829,16 @@ fn format_search_mode(mode: &SearchMode) -> &'static str {
         SearchMode::Deep => "deep",
         SearchMode::Keyword => "keyword",
         SearchMode::Semantic => "semantic",
+    }
+}
+
+fn format_model_availability(downloaded: bool, has_local_path: bool) -> &'static str {
+    if downloaded {
+        "downloaded"
+    } else if has_local_path {
+        "missing"
+    } else {
+        "not_applicable"
     }
 }
 

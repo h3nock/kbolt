@@ -14,6 +14,7 @@ use crate::models::{
     ModelFileRequirement, ModelPullEvent, ModelRole,
 };
 use crate::Result;
+use kbolt_types::ModelStatus;
 
 const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";
 
@@ -246,12 +247,17 @@ fn local_runtime_config() -> (EmbeddingConfig, InferenceConfig) {
     )
 }
 
+fn local_status(config: &ModelConfig, root: &Path) -> ModelStatus {
+    let (embeddings, inference) = local_runtime_config();
+    status(config, Some(&embeddings), &inference, root).expect("read model status")
+}
+
 #[test]
 fn status_reports_missing_models_when_directories_are_empty() {
     let root = tempdir().expect("create temp root");
     let config = test_config();
 
-    let model_status = status(&config, root.path()).expect("read model status");
+    let model_status = local_status(&config, root.path());
     assert!(!model_status.embedder.downloaded);
     assert!(!model_status.reranker.downloaded);
     assert!(!model_status.expander.downloaded);
@@ -296,7 +302,7 @@ fn pull_downloads_all_missing_models_and_reports_bytes() {
     assert_eq!(report.already_present.len(), 0);
     assert_eq!(report.total_bytes, 33);
 
-    let model_status = status(&config, root.path()).expect("read model status");
+    let model_status = local_status(&config, root.path());
     assert!(model_status.embedder.downloaded);
     assert!(model_status.reranker.downloaded);
     assert!(model_status.expander.downloaded);
@@ -389,7 +395,7 @@ fn status_treats_payload_without_manifest_as_missing() {
     std::fs::create_dir_all(root.path().join("embedder")).expect("create embedder dir");
     std::fs::write(root.path().join("embedder/model.bin"), b"payload").expect("seed embedder");
 
-    let model_status = status(&config, root.path()).expect("read model status");
+    let model_status = local_status(&config, root.path());
     assert!(!model_status.embedder.downloaded);
     assert_eq!(model_status.embedder.size_bytes, None);
 }
@@ -725,7 +731,7 @@ fn status_counts_hf_symlink_layout_once() {
     seed_model(root.path(), "reranker", &config.reranker, b"rerank");
     seed_model(root.path(), "expander", &config.expander, b"expand");
 
-    let model_status = status(&config, root.path()).expect("read model status");
+    let model_status = local_status(&config, root.path());
     assert_eq!(model_status.embedder.size_bytes, Some(18));
 }
 
@@ -769,6 +775,45 @@ fn pull_skips_remote_and_unconfigured_roles() {
     assert!(report.already_present.is_empty());
     assert_eq!(report.total_bytes, 0);
     assert!(downloader.take_requests().is_empty());
+}
+
+#[test]
+fn status_marks_remote_and_unconfigured_roles_not_applicable() {
+    let root = tempdir().expect("create temp root");
+    let config = test_config();
+    let embeddings = EmbeddingConfig::OpenAiCompatible {
+        model: "text-embedding-3-small".to_string(),
+        base_url: "https://example.com/v1".to_string(),
+        api_key_env: None,
+        timeout_ms: 5_000,
+        batch_size: 8,
+        max_retries: 0,
+    };
+    let inference = InferenceConfig {
+        reranker: Some(TextInferenceConfig {
+            provider: TextInferenceProvider::OpenAiCompatible {
+                output_mode: TextInferenceOutputMode::JsonObject,
+                model: "remote-reranker".to_string(),
+                base_url: "https://example.com/v1".to_string(),
+                api_key_env: None,
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        }),
+        expander: None,
+    };
+
+    let model_status =
+        status(&config, Some(&embeddings), &inference, root.path()).expect("read model status");
+    assert!(!model_status.embedder.downloaded);
+    assert!(!model_status.reranker.downloaded);
+    assert!(!model_status.expander.downloaded);
+    assert_eq!(model_status.embedder.size_bytes, None);
+    assert_eq!(model_status.reranker.size_bytes, None);
+    assert_eq!(model_status.expander.size_bytes, None);
+    assert_eq!(model_status.embedder.path, None);
+    assert_eq!(model_status.reranker.path, None);
+    assert_eq!(model_status.expander.path, None);
 }
 
 #[cfg(unix)]
