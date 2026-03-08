@@ -2,8 +2,8 @@ use std::ffi::OsString;
 
 use clap::Parser;
 use kbolt_cli::args::{
-    Cli, CollectionCommand, Command, IgnoreCommand, ModelsCommand, OutputFormat, ScheduleAddArgs,
-    ScheduleCommand, ScheduleDayArg, ScheduleRemoveArgs, SearchArgs, SpaceCommand,
+    Cli, CollectionCommand, Command, EvalCommand, IgnoreCommand, ModelsCommand, OutputFormat,
+    ScheduleAddArgs, ScheduleCommand, ScheduleDayArg, ScheduleRemoveArgs, SearchArgs, SpaceCommand,
 };
 use kbolt_cli::{resolve_no_rerank_for_mode, CliAdapter, CliSearchOptions};
 use kbolt_core::config;
@@ -263,6 +263,20 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
                 print_message(&line);
             }
         },
+        Command::Eval(eval) => {
+            ensure_eval_uses_local_scope(cli.space.as_deref())?;
+            match eval.command {
+                EvalCommand::Run => {
+                    if wants_json {
+                        let report = adapter.engine.run_eval()?;
+                        emit_structured_output(&report)?;
+                    } else {
+                        let line = adapter.eval_run()?;
+                        print_text(&line);
+                    }
+                }
+            }
+        }
         Command::Schedule(schedule) => {
             ensure_schedule_uses_local_scope(cli.space.as_deref())?;
             match schedule.command {
@@ -601,6 +615,18 @@ fn ensure_schedule_uses_local_scope(space: Option<&str>) -> std::result::Result<
 
     Err(CoreError::Domain(KboltError::InvalidInput(
         "schedule commands do not use the top-level --space flag; use schedule --space instead"
+            .to_string(),
+    ))
+    .into())
+}
+
+fn ensure_eval_uses_local_scope(space: Option<&str>) -> std::result::Result<(), RunError> {
+    if space.is_none() {
+        return Ok(());
+    }
+
+    Err(CoreError::Domain(KboltError::InvalidInput(
+        "eval commands do not use the top-level --space flag; set scope inside eval.toml"
             .to_string(),
     ))
     .into())
@@ -979,15 +1005,16 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ensure_schedule_uses_local_scope, ensure_supported_output_format,
-        is_model_not_available_error, parse_internal_schedule_run, parse_pull_confirmation,
-        parse_schedule_interval, render_error_output, render_message_output,
-        render_structured_output, requested_output_format_from_args, requested_search_mode,
-        schedule_add_request, schedule_remove_request, should_offer_model_pull_for_collection_add,
-        should_offer_model_pull_for_update, should_show_first_run_models_hint,
-        supports_interactive_output, with_collection_add_model_missing_guidance,
-        with_update_model_missing_guidance, DefaultSpaceJsonResponse, IgnoreShowJsonResponse,
-        RequestedSearchMode, RunError, INTERNAL_SCHEDULE_RUN_COMMAND,
+        ensure_eval_uses_local_scope, ensure_schedule_uses_local_scope,
+        ensure_supported_output_format, is_model_not_available_error, parse_internal_schedule_run,
+        parse_pull_confirmation, parse_schedule_interval, render_error_output,
+        render_message_output, render_structured_output, requested_output_format_from_args,
+        requested_search_mode, schedule_add_request, schedule_remove_request,
+        should_offer_model_pull_for_collection_add, should_offer_model_pull_for_update,
+        should_show_first_run_models_hint, supports_interactive_output,
+        with_collection_add_model_missing_guidance, with_update_model_missing_guidance,
+        DefaultSpaceJsonResponse, IgnoreShowJsonResponse, RequestedSearchMode, RunError,
+        INTERNAL_SCHEDULE_RUN_COMMAND,
     };
     use kbolt_cli::args::{
         Cli, Command, OutputFormat, ScheduleAddArgs, ScheduleDayArg, ScheduleRemoveArgs, SearchArgs,
@@ -1033,6 +1060,17 @@ mod tests {
         args.keyword = false;
         args.semantic = true;
         assert_eq!(requested_search_mode(&args), RequestedSearchMode::Semantic);
+    }
+
+    #[test]
+    fn eval_rejects_top_level_space_flag() {
+        let err = ensure_eval_uses_local_scope(Some("work")).expect_err("space should fail");
+        assert!(
+            err.to_string()
+                .contains("eval commands do not use the top-level --space flag"),
+            "unexpected error: {err}"
+        );
+        ensure_eval_uses_local_scope(None).expect("no top-level scope");
     }
 
     #[test]

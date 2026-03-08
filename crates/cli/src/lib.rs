@@ -4,11 +4,12 @@ use kbolt_core::engine::Engine;
 use kbolt_core::ModelPullEvent;
 use kbolt_core::Result;
 use kbolt_types::{
-    ActiveSpaceSource, AddCollectionRequest, AddScheduleRequest, GetRequest, KboltError, Locator,
-    MultiGetRequest, OmitReason, RemoveScheduleRequest, ScheduleAddResponse, ScheduleBackend,
-    ScheduleInterval, ScheduleIntervalUnit, ScheduleRunResult, ScheduleScope, ScheduleState,
-    ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode, SearchRequest,
-    UpdateDecision, UpdateDecisionKind, UpdateOptions, UpdateReport,
+    ActiveSpaceSource, AddCollectionRequest, AddScheduleRequest, EvalModeReport, EvalRunReport,
+    GetRequest, KboltError, Locator, MultiGetRequest, OmitReason, RemoveScheduleRequest,
+    ScheduleAddResponse, ScheduleBackend, ScheduleInterval, ScheduleIntervalUnit,
+    ScheduleRunResult, ScheduleScope, ScheduleState, ScheduleStatusResponse, ScheduleTrigger,
+    ScheduleWeekday, SearchMode, SearchRequest, UpdateDecision, UpdateDecisionKind, UpdateOptions,
+    UpdateReport,
 };
 
 pub struct CliAdapter {
@@ -489,6 +490,11 @@ impl CliAdapter {
 
         lines.push(format!("total_bytes: {}", report.total_bytes));
         Ok(lines.join("\n"))
+    }
+
+    pub fn eval_run(&self) -> Result<String> {
+        let report = self.engine.run_eval()?;
+        Ok(format_eval_run_report(&report))
     }
 
     pub fn search(&self, options: CliSearchOptions<'_>) -> Result<String> {
@@ -1081,6 +1087,68 @@ fn format_schedule_time(time: &str) -> String {
     format!("{hour}:{minute:02} {meridiem}")
 }
 
+fn format_eval_run_report(report: &EvalRunReport) -> String {
+    let mut lines = vec!["eval:".to_string()];
+    for mode in &report.modes {
+        lines.push(format!(
+            "- {}: recall@5 {:.3}, mrr@10 {:.3}, p50 {}ms, p95 {}ms",
+            format_eval_mode(mode),
+            mode.recall_at_5,
+            mode.mrr_at_10,
+            mode.latency_p50_ms,
+            mode.latency_p95_ms
+        ));
+    }
+
+    let findings = report
+        .modes
+        .iter()
+        .flat_map(|mode| {
+            mode.queries.iter().filter_map(|query| {
+                let perfect_recall = query.matched_paths.len() == query.expected_paths.len();
+                let perfect_rank = query.first_relevant_rank == Some(1);
+                if perfect_recall && perfect_rank {
+                    return None;
+                }
+
+                Some(format!(
+                    "- [{}] {} | first relevant: {} | expected: {} | returned: {}",
+                    format_eval_mode(mode),
+                    query.query,
+                    query
+                        .first_relevant_rank
+                        .map(|rank| rank.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    query.expected_paths.join(", "),
+                    if query.returned_paths.is_empty() {
+                        "none".to_string()
+                    } else {
+                        query.returned_paths.join(", ")
+                    }
+                ))
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if findings.is_empty() {
+        lines.push("queries needing attention: none".to_string());
+    } else {
+        lines.push("queries needing attention:".to_string());
+        lines.extend(findings);
+    }
+
+    lines.join("\n")
+}
+
+fn format_eval_mode(report: &EvalModeReport) -> &'static str {
+    match report.mode {
+        SearchMode::Keyword => "keyword",
+        SearchMode::Auto => "auto",
+        SearchMode::Deep => "deep",
+        SearchMode::Semantic => "semantic",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
@@ -1093,15 +1161,16 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        format_schedule_add_response, format_schedule_status_response, parse_editor_command,
-        resolve_editor_command, resolve_no_rerank_for_mode, CliAdapter, CliSearchOptions,
+        format_eval_run_report, format_schedule_add_response, format_schedule_status_response,
+        parse_editor_command, resolve_editor_command, resolve_no_rerank_for_mode, CliAdapter,
+        CliSearchOptions,
     };
     use kbolt_core::engine::Engine;
     use kbolt_types::{
-        AddCollectionRequest, ScheduleAddResponse, ScheduleBackend, ScheduleDefinition,
-        ScheduleInterval, ScheduleIntervalUnit, ScheduleOrphan, ScheduleRunResult,
-        ScheduleRunState, ScheduleScope, ScheduleState, ScheduleStatusEntry,
-        ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode,
+        AddCollectionRequest, EvalModeReport, EvalQueryReport, EvalRunReport, ScheduleAddResponse,
+        ScheduleBackend, ScheduleDefinition, ScheduleInterval, ScheduleIntervalUnit,
+        ScheduleOrphan, ScheduleRunResult, ScheduleRunState, ScheduleScope, ScheduleState,
+        ScheduleStatusEntry, ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode,
     };
 
     const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";
@@ -2137,6 +2206,54 @@ mod tests {
             err.to_string().contains("invalid editor command"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn eval_run_report_formats_summary_and_attention_queries() {
+        let output = format_eval_run_report(&EvalRunReport {
+            total_cases: 1,
+            modes: vec![
+                EvalModeReport {
+                    mode: SearchMode::Keyword,
+                    recall_at_5: 1.0,
+                    mrr_at_10: 1.0,
+                    latency_p50_ms: 2,
+                    latency_p95_ms: 3,
+                    queries: vec![EvalQueryReport {
+                        query: "trait object generic".to_string(),
+                        space: Some("default".to_string()),
+                        collections: vec!["rust".to_string()],
+                        expected_paths: vec!["rust/guides/traits.md".to_string()],
+                        returned_paths: vec!["rust/guides/traits.md".to_string()],
+                        matched_paths: vec!["rust/guides/traits.md".to_string()],
+                        first_relevant_rank: Some(1),
+                        elapsed_ms: 2,
+                    }],
+                },
+                EvalModeReport {
+                    mode: SearchMode::Deep,
+                    recall_at_5: 0.0,
+                    mrr_at_10: 0.0,
+                    latency_p50_ms: 8,
+                    latency_p95_ms: 12,
+                    queries: vec![EvalQueryReport {
+                        query: "trait object generic".to_string(),
+                        space: Some("default".to_string()),
+                        collections: vec!["rust".to_string()],
+                        expected_paths: vec!["rust/guides/traits.md".to_string()],
+                        returned_paths: vec!["rust/overview.md".to_string()],
+                        matched_paths: vec![],
+                        first_relevant_rank: None,
+                        elapsed_ms: 8,
+                    }],
+                },
+            ],
+        });
+
+        assert!(output.contains("- keyword: recall@5 1.000, mrr@10 1.000, p50 2ms, p95 3ms"));
+        assert!(output.contains("- deep: recall@5 0.000, mrr@10 0.000, p50 8ms, p95 12ms"));
+        assert!(output.contains("queries needing attention:"));
+        assert!(output.contains("[deep] trait object generic | first relevant: none"));
     }
 
     #[test]
