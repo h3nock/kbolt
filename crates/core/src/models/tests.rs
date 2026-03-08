@@ -217,6 +217,33 @@ fn test_config() -> ModelConfig {
     }
 }
 
+fn local_gguf_embeddings() -> EmbeddingConfig {
+    EmbeddingConfig::LocalGguf {
+        model_file: None,
+        batch_size: 4,
+        n_threads: None,
+        n_threads_batch: None,
+    }
+}
+
+fn local_text_inference(model_file: Option<&str>) -> TextInferenceConfig {
+    TextInferenceConfig {
+        provider: TextInferenceProvider::LocalLlama {
+            model_file: model_file.map(ToString::to_string),
+            max_tokens: 128,
+            n_ctx: 2048,
+            n_gpu_layers: 0,
+        },
+    }
+}
+
+fn local_inference() -> InferenceConfig {
+    InferenceConfig {
+        reranker: Some(local_text_inference(None)),
+        expander: Some(local_text_inference(None)),
+    }
+}
+
 #[test]
 fn status_reports_missing_models_when_directories_are_empty() {
     let root = tempdir().expect("create temp root");
@@ -253,11 +280,13 @@ fn pull_downloads_all_missing_models_and_reports_bytes() {
     let downloader = FakeDownloader {
         bytes_per_model: 11,
     };
+    let embeddings = local_gguf_embeddings();
+    let inference = local_inference();
 
     let report = pull_with_downloader(
         &config,
-        None,
-        &crate::config::InferenceConfig::default(),
+        Some(&embeddings),
+        &inference,
         root.path(),
         &downloader,
     )
@@ -278,13 +307,15 @@ fn pull_skips_models_that_are_already_present() {
     let root = tempdir().expect("create temp root");
     let config = test_config();
     let downloader = FakeDownloader { bytes_per_model: 5 };
+    let embeddings = local_gguf_embeddings();
+    let inference = local_inference();
 
     seed_model(root.path(), "embedder", &config.embedder, b"existing");
 
     let report = pull_with_downloader(
         &config,
-        None,
-        &crate::config::InferenceConfig::default(),
+        Some(&embeddings),
+        &inference,
         root.path(),
         &downloader,
     )
@@ -299,14 +330,16 @@ fn pull_emits_progress_events_for_downloaded_and_present_models() {
     let root = tempdir().expect("create temp root");
     let config = test_config();
     let downloader = FakeDownloader { bytes_per_model: 7 };
+    let embeddings = local_gguf_embeddings();
+    let inference = local_inference();
 
     seed_model(root.path(), "embedder", &config.embedder, b"existing");
 
     let mut events = Vec::new();
     let report = pull_with_downloader_and_progress(
         &config,
-        None,
-        &crate::config::InferenceConfig::default(),
+        Some(&embeddings),
+        &inference,
         root.path(),
         &downloader,
         |event| {
@@ -367,6 +400,8 @@ fn pull_redownloads_model_when_manifest_does_not_match_source() {
     let root = tempdir().expect("create temp root");
     let config = test_config();
     let downloader = FakeDownloader { bytes_per_model: 5 };
+    let embeddings = local_gguf_embeddings();
+    let inference = local_inference();
 
     let mut mismatched_embedder = config.embedder.clone();
     mismatched_embedder.id = "embed-model-old".to_string();
@@ -376,8 +411,8 @@ fn pull_redownloads_model_when_manifest_does_not_match_source() {
 
     let report = pull_with_downloader(
         &config,
-        None,
-        &crate::config::InferenceConfig::default(),
+        Some(&embeddings),
+        &inference,
         root.path(),
         &downloader,
     )
@@ -455,10 +490,17 @@ fn pull_builds_role_specific_default_download_requirements() {
     let root = tempdir().expect("create temp root");
     let config = test_config();
     let downloader = CapturingDownloader::default();
-    let inference = InferenceConfig::default();
+    let embeddings = local_gguf_embeddings();
+    let inference = local_inference();
 
-    let report = pull_with_downloader(&config, None, &inference, root.path(), &downloader)
-        .expect("pull models");
+    let report = pull_with_downloader(
+        &config,
+        Some(&embeddings),
+        &inference,
+        root.path(),
+        &downloader,
+    )
+    .expect("pull models");
     assert_eq!(report.downloaded.len(), 3);
 
     let requests = downloader.take_requests();
@@ -528,9 +570,10 @@ fn pull_uses_configured_relative_file_overrides() {
         &downloader,
     )
     .expect("pull models");
-    assert_eq!(report.downloaded.len(), 3);
+    assert_eq!(report.downloaded.len(), 2);
 
     let requests = downloader.take_requests();
+    assert_eq!(requests.len(), 2);
     assert_eq!(
         requests[0].requirements,
         vec![
@@ -549,13 +592,6 @@ fn pull_uses_configured_relative_file_overrides() {
         vec![ModelFileRequirement::ExactPath {
             path: "weights/rerank.gguf".to_string(),
             config_field: "inference.reranker.model_file",
-        }]
-    );
-    assert_eq!(
-        requests[2].requirements,
-        vec![ModelFileRequirement::SingleExtension {
-            extension: "gguf",
-            config_field: "inference.expander.model_file",
         }]
     );
 }
@@ -580,10 +616,10 @@ fn pull_uses_gguf_requirements_when_embedder_is_local_gguf() {
         &downloader,
     )
     .expect("pull models");
-    assert_eq!(report.downloaded.len(), 3);
+    assert_eq!(report.downloaded.len(), 1);
 
     let requests = downloader.take_requests();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 1);
     assert_eq!(
         requests[0].requirements,
         vec![ModelFileRequirement::ExactPath {
@@ -624,7 +660,7 @@ fn pull_materializes_configured_runtime_paths_from_nested_hf_layout() {
         &downloader,
     )
     .expect("pull models");
-    assert_eq!(report.downloaded.len(), 3);
+    assert_eq!(report.downloaded.len(), 2);
     assert!(root
         .path()
         .join("embedder/embeddinggemma-300M-Q8_0.gguf")
@@ -669,7 +705,7 @@ fn pull_repairs_runtime_paths_for_existing_nested_hf_layout() {
     )
     .expect("repair pulled model layout");
     assert_eq!(report.downloaded.len(), 0);
-    assert_eq!(report.already_present.len(), 3);
+    assert_eq!(report.already_present, vec!["embed-model"]);
     assert!(root
         .path()
         .join("embedder/embeddinggemma-300M-Q8_0.gguf")
@@ -694,6 +730,48 @@ fn status_counts_hf_symlink_layout_once() {
 
     let model_status = status(&config, root.path()).expect("read model status");
     assert_eq!(model_status.embedder.size_bytes, Some(18));
+}
+
+#[test]
+fn pull_skips_remote_and_unconfigured_roles() {
+    let root = tempdir().expect("create temp root");
+    let config = test_config();
+    let downloader = CapturingDownloader::default();
+    let embeddings = EmbeddingConfig::OpenAiCompatible {
+        model: "text-embedding-3-small".to_string(),
+        base_url: "https://example.com/v1".to_string(),
+        api_key_env: None,
+        timeout_ms: 5_000,
+        batch_size: 8,
+        max_retries: 0,
+    };
+    let inference = InferenceConfig {
+        reranker: Some(TextInferenceConfig {
+            provider: TextInferenceProvider::OpenAiCompatible {
+                output_mode: TextInferenceOutputMode::JsonObject,
+                model: "remote-reranker".to_string(),
+                base_url: "https://example.com/v1".to_string(),
+                api_key_env: None,
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        }),
+        expander: None,
+    };
+
+    let report = pull_with_downloader(
+        &config,
+        Some(&embeddings),
+        &inference,
+        root.path(),
+        &downloader,
+    )
+    .expect("pull models");
+
+    assert!(report.downloaded.is_empty());
+    assert!(report.already_present.is_empty());
+    assert_eq!(report.total_bytes, 0);
+    assert!(downloader.take_requests().is_empty());
 }
 
 #[cfg(unix)]

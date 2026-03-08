@@ -304,6 +304,64 @@ fn local_text_inference_config(model_file: &str) -> TextInferenceConfig {
     }
 }
 
+fn test_engine_with_local_model_runtime() -> Engine {
+    let root = tempdir().expect("create temp root");
+    let root_path = root.path().to_path_buf();
+    std::mem::forget(root);
+    let config_dir = root_path.join("config");
+    let cache_dir = root_path.join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+    let config = Config {
+        config_dir,
+        cache_dir,
+        default_space: None,
+        models: ModelConfig {
+            embedder: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "embed-model".to_string(),
+                revision: None,
+            },
+            reranker: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "reranker-model".to_string(),
+                revision: None,
+            },
+            expander: ModelSourceConfig {
+                provider: ModelProvider::HuggingFace,
+                id: "expander-model".to_string(),
+                revision: None,
+            },
+        },
+        embeddings: Some(EmbeddingConfig::LocalGguf {
+            model_file: None,
+            batch_size: 8,
+            n_threads: None,
+            n_threads_batch: None,
+        }),
+        inference: InferenceConfig {
+            reranker: Some(TextInferenceConfig {
+                provider: TextInferenceProvider::LocalLlama {
+                    model_file: None,
+                    max_tokens: 256,
+                    n_ctx: 2048,
+                    n_gpu_layers: 0,
+                },
+            }),
+            expander: Some(TextInferenceConfig {
+                provider: TextInferenceProvider::LocalLlama {
+                    model_file: None,
+                    max_tokens: 256,
+                    n_ctx: 2048,
+                    n_gpu_layers: 0,
+                },
+            }),
+        },
+        reaping: ReapingConfig { days: 7 },
+        chunking: ChunkingConfig::default(),
+    };
+    Engine::from_parts(storage, config)
+}
+
 fn test_engine_with_missing_embedder_model() -> Engine {
     let root = tempdir().expect("create temp root");
     let root_path = root.path().to_path_buf();
@@ -4184,7 +4242,7 @@ fn model_status_reflects_configured_model_names() {
 
 #[test]
 fn pull_models_skips_already_present_model_directories() {
-    let engine = test_engine();
+    let engine = test_engine_with_local_model_runtime();
     let model_dir = engine.config().cache_dir.join("models");
     let models = &engine.config().models;
     seed_model_artifact(&model_dir, "embedder", &models.embedder, b"e");
@@ -4199,7 +4257,7 @@ fn pull_models_skips_already_present_model_directories() {
 
 #[test]
 fn pull_models_with_progress_emits_already_present_events() {
-    let engine = test_engine();
+    let engine = test_engine_with_local_model_runtime();
     let model_dir = engine.config().cache_dir.join("models");
     let models = &engine.config().models;
     seed_model_artifact(&model_dir, "embedder", &models.embedder, b"e");

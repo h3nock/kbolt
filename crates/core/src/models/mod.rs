@@ -46,9 +46,14 @@ pub(crate) use reranker::Reranker;
 
 #[derive(Debug, Clone)]
 struct ModelTarget {
-    role: ModelRole,
     role_dir: &'static str,
     source: ModelSourceConfig,
+}
+
+#[derive(Debug, Clone)]
+struct PullTarget {
+    target: ModelTarget,
+    requirements: Vec<ModelFileRequirement>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,13 +203,13 @@ where
         total_bytes: 0,
     };
 
-    for target in model_targets(model_config) {
+    for pull_target in pull_targets(model_config, embeddings, inference) {
+        let target = &pull_target.target;
         let role = target.role_dir.to_string();
         let model = target.source.id.clone();
         let target_dir = model_dir.join(target.role_dir);
-        let request = download_request_for_target(&target, embeddings, inference);
         if let Some(existing_bytes) = model_payload_size_bytes(&target_dir, &target.source)? {
-            ensure_runtime_paths(&target_dir, &request.requirements)?;
+            ensure_runtime_paths(&target_dir, &pull_target.requirements)?;
             on_event(ModelPullEvent::AlreadyPresent {
                 role,
                 model: model.clone(),
@@ -218,8 +223,12 @@ where
             role: role.clone(),
             model: model.clone(),
         });
+        let request = ModelDownloadRequest {
+            model_id: target.source.id.clone(),
+            requirements: pull_target.requirements.clone(),
+        };
         let downloaded_bytes = downloader.download_model(&request, &target_dir)?;
-        ensure_runtime_paths(&target_dir, &request.requirements)?;
+        ensure_runtime_paths(&target_dir, &pull_target.requirements)?;
         on_event(ModelPullEvent::DownloadCompleted {
             role,
             model: model.clone(),
@@ -271,50 +280,70 @@ pub(crate) fn resolve_model_artifact(
 fn model_targets(config: &ModelConfig) -> [ModelTarget; 3] {
     [
         ModelTarget {
-            role: ModelRole::Embedder,
             role_dir: MODEL_DIRNAME_EMBEDDER,
             source: config.embedder.clone(),
         },
         ModelTarget {
-            role: ModelRole::Reranker,
             role_dir: MODEL_DIRNAME_RERANKER,
             source: config.reranker.clone(),
         },
         ModelTarget {
-            role: ModelRole::Expander,
             role_dir: MODEL_DIRNAME_EXPANDER,
             source: config.expander.clone(),
         },
     ]
 }
 
-fn download_request_for_target(
-    target: &ModelTarget,
+fn pull_targets(
+    model_config: &ModelConfig,
     embeddings: Option<&EmbeddingConfig>,
     inference: &InferenceConfig,
-) -> ModelDownloadRequest {
-    let requirements = match target.role {
-        ModelRole::Embedder => embedder_download_requirements(embeddings),
-        ModelRole::Reranker => text_role_download_requirements(
-            inference.reranker.as_ref(),
-            "inference.reranker.model_file",
-        ),
-        ModelRole::Expander => text_role_download_requirements(
-            inference.expander.as_ref(),
-            "inference.expander.model_file",
-        ),
-    };
+) -> Vec<PullTarget> {
+    let mut targets = Vec::new();
 
-    ModelDownloadRequest {
-        model_id: target.source.id.clone(),
-        requirements,
+    if let Some(requirements) = embedder_download_requirements(embeddings) {
+        targets.push(PullTarget {
+            target: ModelTarget {
+                role_dir: MODEL_DIRNAME_EMBEDDER,
+                source: model_config.embedder.clone(),
+            },
+            requirements,
+        });
     }
+
+    if let Some(requirements) = text_role_download_requirements(
+        inference.reranker.as_ref(),
+        "inference.reranker.model_file",
+    ) {
+        targets.push(PullTarget {
+            target: ModelTarget {
+                role_dir: MODEL_DIRNAME_RERANKER,
+                source: model_config.reranker.clone(),
+            },
+            requirements,
+        });
+    }
+
+    if let Some(requirements) = text_role_download_requirements(
+        inference.expander.as_ref(),
+        "inference.expander.model_file",
+    ) {
+        targets.push(PullTarget {
+            target: ModelTarget {
+                role_dir: MODEL_DIRNAME_EXPANDER,
+                source: model_config.expander.clone(),
+            },
+            requirements,
+        });
+    }
+
+    targets
 }
 
 fn embedder_download_requirements(
     embeddings: Option<&EmbeddingConfig>,
-) -> Vec<ModelFileRequirement> {
-    match embeddings {
+) -> Option<Vec<ModelFileRequirement>> {
+    Some(match embeddings {
         Some(EmbeddingConfig::LocalOnnx {
             onnx_file,
             tokenizer_file,
@@ -356,32 +385,32 @@ fn embedder_download_requirements(
         }
         Some(EmbeddingConfig::OpenAiCompatible { .. })
         | Some(EmbeddingConfig::Voyage { .. })
-        | None => {
-            vec![ModelFileRequirement::SingleExtension {
-                extension: "gguf",
-                config_field: "embeddings.model_file",
-            }]
-        }
-    }
+        | None => return None,
+    })
 }
 
 fn text_role_download_requirements(
     config: Option<&TextInferenceConfig>,
     config_field: &'static str,
-) -> Vec<ModelFileRequirement> {
-    let configured = config
-        .and_then(|config| match &config.provider {
-            TextInferenceProvider::LocalLlama { model_file, .. } => {
-                configured_repo_path(model_file.as_deref())
-            }
-            TextInferenceProvider::OpenAiCompatible { .. } => None,
-        })
-        .map(|path| ModelFileRequirement::ExactPath { path, config_field });
+) -> Option<Vec<ModelFileRequirement>> {
+    let Some(config) = config else {
+        return None;
+    };
 
-    vec![configured.unwrap_or(ModelFileRequirement::SingleExtension {
-        extension: "gguf",
-        config_field,
-    })]
+    match &config.provider {
+        TextInferenceProvider::LocalLlama { model_file, .. } => {
+            let configured = configured_repo_path(model_file.as_deref())
+                .map(|path| ModelFileRequirement::ExactPath { path, config_field });
+
+            Some(vec![configured.unwrap_or(
+                ModelFileRequirement::SingleExtension {
+                    extension: "gguf",
+                    config_field,
+                },
+            )])
+        }
+        TextInferenceProvider::OpenAiCompatible { .. } => None,
+    }
 }
 
 fn configured_repo_path(configured: Option<&str>) -> Option<String> {
