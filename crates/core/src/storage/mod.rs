@@ -227,12 +227,6 @@ CREATE TABLE IF NOT EXISTS embeddings (
     embedded_at TEXT NOT NULL,
     PRIMARY KEY (chunk_id, model)
 );
-
-CREATE TABLE IF NOT EXISTS llm_cache (
-    key     TEXT PRIMARY KEY,
-    value   TEXT NOT NULL,
-    created TEXT NOT NULL
-);
 "#,
         )?;
 
@@ -1693,41 +1687,6 @@ CREATE TABLE IF NOT EXISTS llm_cache (
         let placeholders = vec!["?"; doc_ids.len()].join(", ");
         let sql = format!("UPDATE documents SET fts_dirty = 0 WHERE id IN ({placeholders})");
         conn.execute(&sql, params_from_iter(doc_ids.iter()))?;
-        Ok(())
-    }
-
-    pub fn cache_get(&self, key: &str) -> Result<Option<String>> {
-        let conn = self
-            .db
-            .lock()
-            .map_err(|_| CoreError::poisoned("database"))?;
-
-        let value = conn.query_row(
-            "SELECT value FROM llm_cache WHERE key = ?1",
-            params![key],
-            |row| row.get::<_, String>(0),
-        );
-        match value {
-            Ok(value) => Ok(Some(value)),
-            Err(Error::QueryReturnedNoRows) => Ok(None),
-            Err(err) => Err(err.into()),
-        }
-    }
-
-    pub fn cache_set(&self, key: &str, value: &str) -> Result<()> {
-        let conn = self
-            .db
-            .lock()
-            .map_err(|_| CoreError::poisoned("database"))?;
-
-        conn.execute(
-            "INSERT INTO llm_cache (key, value, created)
-             VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-             ON CONFLICT(key) DO UPDATE SET
-               value = excluded.value,
-               created = excluded.created",
-            params![key, value],
-        )?;
         Ok(())
     }
 
