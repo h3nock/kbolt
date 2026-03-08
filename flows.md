@@ -845,11 +845,38 @@ The OS scheduler runs the kbolt-managed schedule job by id. The job executes the
 
 The following flows are planned but deferred beyond V1. They are listed here so they don't get lost.
 
-### Evaluation Framework
+### Evaluation
 
-- **`kbolt eval add {query} {expected_paths}`** — Add a test case (query + expected relevant documents) to the eval dataset stored in `~/.config/kbolt/eval.toml`.
-- **`kbolt eval run`** — Run all test cases against the current index. Measures MRR@10, Recall@K (K=1,5,10), and latency (p50, p95, p99).
-- **`kbolt eval report`** — Show the most recent evaluation results. Useful for tracking retrieval quality over time as the index, models, or chunking strategy change.
+- **`kbolt eval run`** — Run the evaluation dataset stored in `~/.config/kbolt/eval.toml` against the current index.
+- Dataset shape is intentionally lean:
+  - `query`
+  - optional `space`
+  - optional `collections`
+  - `expected_paths`
+- Modes are fixed:
+  - `keyword`
+  - `auto`
+  - `deep`
+  - `semantic` only when embeddings are configured
+- Metrics are intentionally lean:
+  - `Recall@5`
+  - `MRR@10`
+  - latency `p50` / `p95`
+- CLI output shows:
+  - per-mode summary metrics
+  - `queries needing attention`
+- JSON output returns the full structured report directly.
+- `eval` does not use the top-level `--space` flag; case scope lives inside `eval.toml`.
+
+Dataset example:
+
+```toml
+[[cases]]
+query = "trait object vs generic"
+space = "bench"
+collections = ["rust"]
+expected_paths = ["rust/traits.md", "rust/generics.md"]
+```
 
 ### HTTP + MCP Server
 

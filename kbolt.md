@@ -1793,20 +1793,26 @@ Models loaded lazily — embedder loads on first `kbolt update` (with embedding)
 
 ```
 kbolt eval run                    Run evaluation suite
-kbolt eval add <query> <expected> Add test case
-kbolt eval report                 Show metrics
 ```
 
-Metrics: MRR@10, Recall@K (K=1,5,10), latency (p50/p95/p99).
+Metrics: Recall@5, MRR@10, latency (p50/p95).
 
 Dataset in `~/.config/kbolt/eval.toml`:
 ```toml
-[[queries]]
+[[cases]]
 query = "how to handle errors in rust"
-expected = ["notes/rust/error-handling.md"]
 space = "personal"
-collection = "notes"
+collections = ["notes"]
+expected_paths = ["notes/error-handling.md"]
 ```
+
+The eval runner compares fixed retrieval modes:
+- `keyword`
+- `auto`
+- `deep`
+- `semantic` only when embeddings are configured
+
+CLI output stays lean: per-mode summary metrics plus the queries that still need attention. JSON output returns the full structured report.
 
 ---
 
