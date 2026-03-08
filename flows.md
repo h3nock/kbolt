@@ -855,9 +855,7 @@ The following flows are planned but deferred beyond V1. They are listed here so 
 
 - **`kbolt serve --port {n}`** — Start a long-running process that serves the HTTP API and MCP via streamable HTTP transport on a single port (default: 3777). Models are loaded into memory and shared across requests. The server keeps Tantivy and USearch indexes open for low-latency queries. Deferred because V1 uses `kbolt mcp` (stdio transport) for MCP and CLI for everything else.
 
-### Cleanup
-
-- **`kbolt cleanup`** — Remove orphaned content (content rows with no referencing documents), vacuum SQLite, and compact Tantivy segments. Returns a report: orphaned content removed, bytes reclaimed, vacuum duration. In V1, reaping of deactivated documents happens automatically during `kbolt update` (flow 23) based on the configured reaping period.
+Dedicated `cleanup` is not on the roadmap. Kbolt-owned lifecycle cleanup already happens through collection and space removal plus automatic reaping during `kbolt update` (flow 23). If storage compaction ever becomes necessary later, it can be reconsidered as a maintenance utility rather than a core product flow.
 
 ### Resource URIs (MCP)
 
