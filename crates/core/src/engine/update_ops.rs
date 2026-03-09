@@ -40,11 +40,20 @@ impl Engine {
         self.reconcile_dense_integrity(&targets, &options)?;
 
         let mut fts_dirty_by_space: HashMap<String, HashSet<i64>> = HashMap::new();
+        let mut pending_embeddings = Vec::new();
         for target in &targets {
-            self.update_collection_target(target, &options, &mut report, &mut fts_dirty_by_space)?;
+            self.update_collection_target(
+                target,
+                &options,
+                &mut report,
+                &mut fts_dirty_by_space,
+                &mut pending_embeddings,
+            )?;
         }
 
         if !options.dry_run {
+            self.flush_buffered_embeddings(&mut pending_embeddings, &mut report)?;
+
             for (space, doc_ids) in fts_dirty_by_space {
                 if doc_ids.is_empty() {
                     continue;
@@ -187,37 +196,88 @@ impl Engine {
                 .into());
             }
 
-            let mut grouped_vectors: HashMap<String, Vec<(i64, Vec<f32>)>> = HashMap::new();
-            let mut embedding_rows = Vec::with_capacity(chunk_ids.len());
-            for ((chunk_id, space), vector) in
-                chunk_ids.iter().zip(spaces.iter()).zip(vectors.into_iter())
-            {
-                if vector.is_empty() {
-                    return Err(KboltError::Inference(format!(
-                        "embedder returned an empty vector for chunk {chunk_id}"
-                    ))
-                    .into());
-                }
-
-                grouped_vectors
-                    .entry(space.clone())
-                    .or_default()
-                    .push((*chunk_id, vector));
-                embedding_rows.push((*chunk_id, model));
-            }
-
-            for (space, vectors) in grouped_vectors {
-                let refs = vectors
-                    .iter()
-                    .map(|(chunk_id, vector)| (*chunk_id, vector.as_slice()))
-                    .collect::<Vec<_>>();
-                self.storage.batch_insert_usearch(&space, &refs)?;
-            }
-
-            self.storage.insert_embeddings(&embedding_rows)?;
-            report.embedded = report.embedded.saturating_add(chunk_ids.len());
+            let embeddings = chunk_ids
+                .into_iter()
+                .zip(spaces.into_iter())
+                .zip(vectors.into_iter())
+                .map(|((chunk_id, space_name), vector)| (chunk_id, space_name, vector))
+                .collect::<Vec<_>>();
+            self.store_chunk_embeddings(model, embeddings, report)?;
         }
 
+        Ok(())
+    }
+
+    fn flush_buffered_embeddings(
+        &self,
+        pending_embeddings: &mut Vec<BufferedChunkEmbedding>,
+        report: &mut UpdateReport,
+    ) -> Result<()> {
+        if pending_embeddings.is_empty() {
+            return Ok(());
+        }
+
+        let Some(embedder) = self.embedder.as_ref() else {
+            pending_embeddings.clear();
+            return Ok(());
+        };
+
+        let pending = std::mem::take(pending_embeddings);
+        let texts = pending
+            .iter()
+            .map(|embedding| embedding.text.clone())
+            .collect::<Vec<_>>();
+        let vectors = embedder.embed_batch(&texts)?;
+        if vectors.len() != pending.len() {
+            return Err(KboltError::Inference(format!(
+                "embedder returned {} vectors for {} buffered chunks",
+                vectors.len(),
+                pending.len()
+            ))
+            .into());
+        }
+
+        let embeddings = pending
+            .into_iter()
+            .zip(vectors.into_iter())
+            .map(|(embedding, vector)| (embedding.chunk_id, embedding.space_name, vector))
+            .collect::<Vec<_>>();
+        self.store_chunk_embeddings(self.embedding_model_key(), embeddings, report)
+    }
+
+    fn store_chunk_embeddings(
+        &self,
+        model: &str,
+        embeddings: Vec<(i64, String, Vec<f32>)>,
+        report: &mut UpdateReport,
+    ) -> Result<()> {
+        let mut grouped_vectors: HashMap<String, Vec<(i64, Vec<f32>)>> = HashMap::new();
+        let mut embedding_rows = Vec::with_capacity(embeddings.len());
+        for (chunk_id, space_name, vector) in embeddings {
+            if vector.is_empty() {
+                return Err(KboltError::Inference(format!(
+                    "embedder returned an empty vector for chunk {chunk_id}"
+                ))
+                .into());
+            }
+
+            grouped_vectors
+                .entry(space_name)
+                .or_default()
+                .push((chunk_id, vector));
+            embedding_rows.push((chunk_id, model));
+        }
+
+        for (space, vectors) in grouped_vectors {
+            let refs = vectors
+                .iter()
+                .map(|(chunk_id, vector)| (*chunk_id, vector.as_slice()))
+                .collect::<Vec<_>>();
+            self.storage.batch_insert_usearch(&space, &refs)?;
+        }
+
+        self.storage.insert_embeddings(&embedding_rows)?;
+        report.embedded = report.embedded.saturating_add(embedding_rows.len());
         Ok(())
     }
 
@@ -385,6 +445,7 @@ impl Engine {
         options: &UpdateOptions,
         report: &mut UpdateReport,
         fts_dirty_by_space: &mut HashMap<String, HashSet<i64>>,
+        pending_embeddings: &mut Vec<BufferedChunkEmbedding>,
     ) -> Result<()> {
         let all_documents = self.storage.list_documents(target.collection.id, false)?;
         let mut docs_by_path: HashMap<String, DocumentRow> = all_documents
@@ -666,6 +727,23 @@ impl Engine {
             let chunk_ids = self.storage.insert_chunks(doc_id, &chunk_inserts)?;
 
             if !chunk_ids.is_empty() {
+                if !options.no_embed && self.embedder.is_some() {
+                    for (chunk_id, chunk) in chunk_ids.iter().zip(final_chunks.iter()) {
+                        let mut text = chunk_text_from_bytes(&bytes, chunk.offset, chunk.length);
+                        if text.trim().is_empty() {
+                            text = " ".to_string();
+                        }
+                        pending_embeddings.push(BufferedChunkEmbedding {
+                            chunk_id: *chunk_id,
+                            space_name: target.space.clone(),
+                            text,
+                        });
+                    }
+                    if pending_embeddings.len() >= 64 {
+                        self.flush_buffered_embeddings(pending_embeddings, report)?;
+                    }
+                }
+
                 let entries = chunk_ids
                     .iter()
                     .zip(final_chunks.iter())
@@ -742,6 +820,13 @@ impl Engine {
 
         Ok(())
     }
+}
+
+#[derive(Debug)]
+struct BufferedChunkEmbedding {
+    chunk_id: i64,
+    space_name: String,
+    text: String,
 }
 
 fn push_update_decision(
