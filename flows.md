@@ -544,7 +544,7 @@ kbolt search {query} --no-rerank
 
 Default behavior (no mode flag): auto mode — the system analyzes the query and routes to hybrid BM25+dense retrieval, with reranking off by default for speed. Use `--rerank` to opt in.
 
-**Cross-space search**: When searching without `--space`, each space's Tantivy and USearch indexes are queried independently. Candidate lists from all spaces are concatenated, then fused and reranked together. The cross-encoder reranker normalizes scores across spaces.
+**Cross-space search**: When searching without `--space`, each space's Tantivy and USearch indexes are queried independently. Candidate lists from all spaces are concatenated, then fused and reranked together. The cross-encoder reranker reorders that candidate set directly, independent of which space each chunk came from.
 
 Returns ranked results. Each result shows: rank, docid, space, collection, path, title, heading breadcrumb, snippet, score. The output footer includes a staleness hint: "Index last updated: {time ago}" based on the most recent update timestamp across the searched collections. This helps users understand why a recently saved file might not appear in results.
 

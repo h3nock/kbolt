@@ -1543,7 +1543,7 @@ Neighbor expansion is used for answer context in result assembly. It does not ch
 Cross-encoder (Qwen3-Reranker 0.6B GGUF) scores top-20 candidates:
 - Input: (query, primary-hit-chunk text) pairs — reranker scores the original hit chunk (optionally with deterministic contextual prefix), not neighbor-expanded context
 - Output: relevance score per pair
-- Final score: `0.7 * reranker_score + 0.3 * rrf_score` (blended, weights tunable)
+- Final score: reranker score when reranking is applied; first-stage retrieval remains the candidate-generation stage and debug signal source.
 
 ### Stage 9: Result Assembly
 
