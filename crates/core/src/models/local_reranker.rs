@@ -128,19 +128,23 @@ fn score_docs(model: &LlamaModel, n_ctx: u32, tokenized: &[Vec<LlamaToken>]) -> 
             KboltError::Inference(format!("reranker embedding read failed: {err}"))
         })?;
 
-        let score = match embeddings.len() {
-            0 => {
-                return Err(
-                    KboltError::Inference("reranker returned empty embeddings".to_string()).into(),
-                )
-            }
-            1 => embeddings[0],
-            _ => embeddings[1],
-        };
+        let score = extract_rank_pooling_score(&embeddings)?;
         scores.push(score);
     }
 
     Ok(scores)
+}
+
+fn extract_rank_pooling_score(embeddings: &[f32]) -> Result<f32> {
+    match embeddings.len() {
+        0 => Err(KboltError::Inference("reranker returned empty embeddings".to_string()).into()),
+        1 => Ok(embeddings[0]),
+        2 => Ok(embeddings[1]),
+        len => Err(KboltError::Inference(format!(
+            "reranker returned unsupported rank output shape with {len} values"
+        ))
+        .into()),
+    }
 }
 
 fn resolve_reranker_context_size(configured_n_ctx: u32, required_tokens: u32) -> Result<u32> {
@@ -156,7 +160,7 @@ fn resolve_reranker_context_size(configured_n_ctx: u32, required_tokens: u32) ->
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_reranker_context_size;
+    use super::{extract_rank_pooling_score, resolve_reranker_context_size};
 
     #[test]
     fn reranker_context_size_respects_configured_ceiling() {
@@ -164,5 +168,13 @@ mod tests {
 
         let err = resolve_reranker_context_size(128, 129).expect_err("must reject overflow");
         assert!(err.to_string().contains("requires 129 context tokens"));
+    }
+
+    #[test]
+    fn reranker_rank_pooling_score_uses_supported_shapes_only() {
+        assert_eq!(extract_rank_pooling_score(&[0.25]).expect("single"), 0.25);
+        assert_eq!(extract_rank_pooling_score(&[0.1, 0.9]).expect("pair"), 0.9);
+        assert!(extract_rank_pooling_score(&[]).is_err());
+        assert!(extract_rank_pooling_score(&[0.1, 0.2, 0.3]).is_err());
     }
 }

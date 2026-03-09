@@ -393,7 +393,7 @@ impl Engine {
         let mut aggregates: HashMap<i64, RankedChunk> = HashMap::new();
         for ranked in variant_results {
             for (index, item) in ranked?.into_iter().enumerate() {
-                let variant_rrf = 1.0 / (40.0 + (index + 1) as f32);
+                let variant_rrf = 1.0 / (60.0 + (index + 1) as f32);
                 let entry = aggregates
                     .entry(item.chunk_id)
                     .or_insert_with(|| RankedChunk {
@@ -575,15 +575,14 @@ impl Engine {
                 ))
                 .into());
             }
-            let normalized_scores = normalize_scores(&raw_scores);
             let reranker_scores = rerank_chunk_ids
                 .into_iter()
-                .zip(normalized_scores.into_iter())
+                .zip(raw_scores.into_iter())
                 .collect::<HashMap<_, _>>();
             for candidate in &mut candidates {
                 if let Some(reranker_score) = reranker_scores.get(&candidate.chunk_id).copied() {
                     candidate.reranker = Some(reranker_score);
-                    candidate.final_score = 0.7 * reranker_score + 0.3 * candidate.rrf;
+                    candidate.final_score = reranker_score;
                 }
             }
         }
@@ -778,22 +777,12 @@ fn fuse_ranked_chunks(
     let mut fused = Vec::new();
     for chunk_id in all_chunk_ids {
         let mut rrf = 0.0_f32;
-        let has_bm25 = if let Some(rank) = bm25_rank.get(&chunk_id) {
+        if let Some(rank) = bm25_rank.get(&chunk_id) {
             rrf += 1.0 / (60.0 + *rank as f32);
-            true
-        } else {
-            false
-        };
-        let has_dense = if let Some(rank) = dense_rank.get(&chunk_id) {
-            rrf += 1.0 / (60.0 + *rank as f32);
-            true
-        } else {
-            false
-        };
-        if has_bm25 && has_dense {
-            rrf *= 1.2;
         }
-
+        if let Some(rank) = dense_rank.get(&chunk_id) {
+            rrf += 1.0 / (60.0 + *rank as f32);
+        }
         fused.push(RankedChunk {
             chunk_id,
             score: rrf,

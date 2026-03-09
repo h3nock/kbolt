@@ -47,7 +47,7 @@ use path_utils::{
     collection_relative_path, extension_allowed, normalize_docid, normalize_list_prefix,
     normalized_extension_filter, path_matches_prefix, short_docid, split_collection_path,
 };
-use scoring::{dense_distance_to_score, max_option, normalize_scores};
+use scoring::{dense_distance_to_score, max_option};
 pub(crate) use text_helpers::retrieval_text_with_prefix;
 use text_helpers::{chunk_text_from_bytes, search_text_with_neighbors};
 
