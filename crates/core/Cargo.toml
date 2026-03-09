@@ -11,7 +11,7 @@ hf-hub.workspace = true
 httpdate.workspace = true
 ignore.workspace = true
 kbolt-types = { path = "../types" }
-llama_cpp.workspace = true
+llama-cpp-2.workspace = true
 ort.workspace = true
 pulldown-cmark.workspace = true
 rusqlite.workspace = true
