@@ -44,15 +44,15 @@ fn load_creates_default_config_and_directories() {
                     model_file: Some(DEFAULT_LOCAL_RERANKER_MODEL_FILE.to_string()),
                     max_tokens: DEFAULT_LOCAL_INFERENCE_MAX_TOKENS,
                     n_ctx: DEFAULT_LOCAL_INFERENCE_N_CTX,
-                    n_gpu_layers: DEFAULT_LOCAL_INFERENCE_N_GPU_LAYERS,
+                    n_gpu_layers: None,
                 },
             }),
             expander: Some(TextInferenceConfig {
                 provider: TextInferenceProvider::LocalLlama {
                     model_file: Some(DEFAULT_LOCAL_EXPANDER_MODEL_FILE.to_string()),
-                    max_tokens: DEFAULT_LOCAL_INFERENCE_MAX_TOKENS,
+                    max_tokens: DEFAULT_LOCAL_EXPANDER_MAX_TOKENS,
                     n_ctx: DEFAULT_LOCAL_INFERENCE_N_CTX,
-                    n_gpu_layers: DEFAULT_LOCAL_INFERENCE_N_GPU_LAYERS,
+                    n_gpu_layers: None,
                 },
             }),
         }
@@ -361,7 +361,7 @@ fn save_writes_index_toml() {
         })
     );
     assert_eq!(
-        parsed.inference,
+        InferenceConfig::from(parsed.inference.clone()),
         InferenceConfig {
             reranker: Some(TextInferenceConfig {
                 provider: TextInferenceProvider::OpenAiCompatible {
@@ -675,4 +675,48 @@ base_url = "https://api.openai.com/v1"
     let err = load_from_file(&config_file, &config_dir, &cache_dir)
         .expect_err("missing output_mode should fail");
     assert!(err.to_string().contains("output_mode"));
+}
+
+#[test]
+fn load_defaults_local_llama_max_tokens_by_inference_role() {
+    let tmp = tempdir().expect("create tempdir");
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    let config_file = config_dir.join(CONFIG_FILENAME);
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        &config_file,
+        r#"
+[inference.reranker]
+provider = "local_llama"
+
+[inference.expander]
+provider = "local_llama"
+"#,
+    )
+    .expect("write config file");
+
+    let config = load_from_file(&config_file, &config_dir, &cache_dir).expect("load config");
+    assert_eq!(
+        config.inference.reranker,
+        Some(TextInferenceConfig {
+            provider: TextInferenceProvider::LocalLlama {
+                model_file: None,
+                max_tokens: DEFAULT_LOCAL_INFERENCE_MAX_TOKENS,
+                n_ctx: DEFAULT_LOCAL_INFERENCE_N_CTX,
+                n_gpu_layers: None,
+            },
+        })
+    );
+    assert_eq!(
+        config.inference.expander,
+        Some(TextInferenceConfig {
+            provider: TextInferenceProvider::LocalLlama {
+                model_file: None,
+                max_tokens: DEFAULT_LOCAL_EXPANDER_MAX_TOKENS,
+                n_ctx: DEFAULT_LOCAL_INFERENCE_N_CTX,
+                n_gpu_layers: None,
+            },
+        })
+    );
 }

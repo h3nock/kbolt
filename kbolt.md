@@ -1594,14 +1594,14 @@ provider = "local_llama"         # V1: openai_compatible | local_llama
 model_file = "qwen3-reranker-0.6b-q8_0.gguf"
 max_tokens = 256
 n_ctx = 2048
-n_gpu_layers = 0
+# omit n_gpu_layers to auto-detect acceleration
 
 [inference.expander]
 provider = "local_llama"
 model_file = "qmd-query-expansion-1.7B-q4_k_m.gguf"
 max_tokens = 256
 n_ctx = 2048
-n_gpu_layers = 0
+# omit n_gpu_layers to auto-detect acceleration
 
 [reaping]
 days = 7    # hard-delete documents deactivated longer than this

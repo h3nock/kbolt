@@ -1,8 +1,10 @@
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use kbolt_types::KboltError;
 use kbolt_types::{ModelInfo, ModelStatus, PullReport};
+use llama_cpp_2::llama_backend::LlamaBackend;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -19,13 +21,25 @@ mod embedder;
 mod expander;
 mod http;
 mod inference;
+mod local_expander;
 mod local_gguf;
 mod local_llama;
 mod local_onnx;
+mod local_reranker;
 mod provider;
 mod providers;
 mod reranker;
 mod text;
+
+static LLAMA_BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
+
+pub(super) fn llama_backend() -> &'static LlamaBackend {
+    LLAMA_BACKEND.get_or_init(|| {
+        let mut backend = LlamaBackend::init().expect("llama backend initialization failed");
+        backend.void_logs();
+        backend
+    })
+}
 
 const MODEL_DIRNAME_EMBEDDER: &str = "embedder";
 const MODEL_DIRNAME_RERANKER: &str = "reranker";

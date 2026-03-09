@@ -39,7 +39,7 @@ provider = "local_llama"
 # model_file = "qwen-reranker.gguf"
 max_tokens = 256
 n_ctx = 2048
-n_gpu_layers = 0
+# omit n_gpu_layers to auto-detect acceleration
 
 [inference.expander]
 provider = "local_llama"
@@ -47,7 +47,7 @@ provider = "local_llama"
 # model_file = "qwen-expander.gguf"
 max_tokens = 256
 n_ctx = 2048
-n_gpu_layers = 0
+# omit n_gpu_layers to auto-detect acceleration
 ```
 
 Validation rules match embedding config expectations:

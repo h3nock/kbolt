@@ -10,9 +10,14 @@ use crate::models::artifacts::resolve_file_with_extension;
 use crate::models::chat::HttpChatClient;
 use crate::models::completion::CompletionClient;
 use crate::models::http::{HttpJsonClient, HttpOperation};
+use crate::models::local_expander::LocalLlamaExpander;
 use crate::models::local_gguf::build_local_gguf_embedder;
-use crate::models::local_llama::build_local_llama_completion_client;
+use crate::models::local_llama::{
+    build_local_llama_client_shared, build_local_llama_completion_client,
+    load_local_llama_model_and_template,
+};
 use crate::models::local_onnx::build_local_onnx_embedder;
+use crate::models::local_reranker::LocalCrossEncoderReranker;
 use crate::models::{resolve_model_artifact, Embedder, Expander, ModelRole, Reranker};
 use crate::Result;
 
@@ -239,36 +244,92 @@ fn build_reranker_inner(
     config: Option<&TextInferenceConfig>,
     local_runtime: Option<LocalRuntimeContext>,
 ) -> Result<Option<Arc<dyn Reranker>>> {
-    let reranker = match config {
-        Some(config) => Some(Arc::new(ChatBackedReranker {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+
+    let reranker: Arc<dyn Reranker> = match &config.provider {
+        TextInferenceProvider::LocalLlama {
+            model_file,
+            n_ctx,
+            n_gpu_layers,
+            ..
+        } => {
+            let runtime = local_runtime.ok_or_else(|| {
+                KboltError::Inference(
+                    "local_llama reranker requires local runtime context".to_string(),
+                )
+            })?;
+            let model_file = model_file.clone();
+            let n_ctx = *n_ctx;
+            let n_gpu_layers = *n_gpu_layers;
+            Arc::new(LazyArc::new("local cross-encoder reranker", move || {
+                build_local_cross_encoder_reranker(
+                    &runtime.model_config,
+                    &runtime.model_dir,
+                    model_file.as_deref(),
+                    n_ctx,
+                    n_gpu_layers,
+                )
+            }))
+        }
+        TextInferenceProvider::OpenAiCompatible { .. } => Arc::new(ChatBackedReranker {
             chat: build_completion_client_for_role(
                 &config.provider,
                 local_runtime,
                 ModelRole::Reranker,
                 "reranker",
             )?,
-        }) as Arc<dyn Reranker>),
-        None => None,
+        }),
     };
-    Ok(reranker)
+    Ok(Some(reranker))
 }
 
 fn build_expander_inner(
     config: Option<&TextInferenceConfig>,
     local_runtime: Option<LocalRuntimeContext>,
 ) -> Result<Option<Arc<dyn Expander>>> {
-    let expander = match config {
-        Some(config) => Some(Arc::new(ChatBackedExpander {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+
+    let expander: Arc<dyn Expander> = match &config.provider {
+        TextInferenceProvider::LocalLlama {
+            model_file,
+            max_tokens,
+            n_ctx,
+            n_gpu_layers,
+        } => {
+            let runtime = local_runtime.ok_or_else(|| {
+                KboltError::Inference(
+                    "local_llama expander requires local runtime context".to_string(),
+                )
+            })?;
+            let model_file = model_file.clone();
+            let max_tokens = *max_tokens;
+            let n_ctx = *n_ctx;
+            let n_gpu_layers = *n_gpu_layers;
+            Arc::new(LazyArc::new("local llama expander", move || {
+                build_local_llama_expander(
+                    &runtime.model_config,
+                    &runtime.model_dir,
+                    model_file.as_deref(),
+                    max_tokens,
+                    n_ctx,
+                    n_gpu_layers,
+                )
+            }))
+        }
+        TextInferenceProvider::OpenAiCompatible { .. } => Arc::new(ChatBackedExpander {
             chat: build_completion_client_for_role(
                 &config.provider,
                 local_runtime,
                 ModelRole::Expander,
                 "expander",
             )?,
-        }) as Arc<dyn Expander>),
-        None => None,
+        }),
     };
-    Ok(expander)
+    Ok(Some(expander))
 }
 
 fn build_completion_client_for_role(
@@ -341,6 +402,20 @@ impl CompletionClient for LazyArc<dyn CompletionClient> {
     fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
         let client = self.get()?;
         client.complete(system_prompt, user_prompt)
+    }
+}
+
+impl Reranker for LazyArc<dyn Reranker> {
+    fn rerank(&self, query: &str, docs: &[String]) -> Result<Vec<f32>> {
+        let reranker = self.get()?;
+        reranker.rerank(query, docs)
+    }
+}
+
+impl Expander for LazyArc<dyn Expander> {
+    fn expand(&self, query: &str) -> Result<Vec<String>> {
+        let expander = self.get()?;
+        expander.expand(query)
     }
 }
 
@@ -485,7 +560,7 @@ fn build_local_llama_client(
     model_file: Option<&str>,
     max_tokens: usize,
     n_ctx: u32,
-    n_gpu_layers: u32,
+    n_gpu_layers: Option<u32>,
 ) -> Result<Arc<dyn CompletionClient>> {
     let artifact = resolve_model_artifact(model_config, model_dir, role)?;
     let gguf_path = resolve_file_with_extension(
@@ -503,6 +578,52 @@ fn local_llama_model_field(role: ModelRole) -> &'static str {
         ModelRole::Expander => "inference.expander.model_file",
         ModelRole::Embedder => "inference.model_file",
     }
+}
+
+fn build_local_cross_encoder_reranker(
+    model_config: &ModelConfig,
+    model_dir: &Path,
+    model_file: Option<&str>,
+    n_ctx: u32,
+    n_gpu_layers: Option<u32>,
+) -> Result<Arc<dyn Reranker>> {
+    let artifact = resolve_model_artifact(model_config, model_dir, ModelRole::Reranker)?;
+    let gguf_path = resolve_file_with_extension(
+        &artifact.path,
+        model_file,
+        "gguf",
+        "inference.reranker.model_file",
+    )?;
+
+    let (model, chat_template) = load_local_llama_model_and_template(&gguf_path, n_gpu_layers)?;
+    let chat_template = chat_template.ok_or_else(|| {
+        KboltError::Inference("local reranker model has no embedded chat template".to_string())
+    })?;
+
+    Ok(Arc::new(LocalCrossEncoderReranker::new(
+        model,
+        chat_template,
+        n_ctx,
+    )))
+}
+
+fn build_local_llama_expander(
+    model_config: &ModelConfig,
+    model_dir: &Path,
+    model_file: Option<&str>,
+    max_tokens: usize,
+    n_ctx: u32,
+    n_gpu_layers: Option<u32>,
+) -> Result<Arc<dyn Expander>> {
+    let artifact = resolve_model_artifact(model_config, model_dir, ModelRole::Expander)?;
+    let gguf_path = resolve_file_with_extension(
+        &artifact.path,
+        model_file,
+        "gguf",
+        "inference.expander.model_file",
+    )?;
+    let client = build_local_llama_client_shared(&gguf_path, max_tokens, n_ctx, n_gpu_layers)?;
+    Ok(Arc::new(LocalLlamaExpander::new(client)))
 }
 
 fn parse_json_payload<T>(label: &str, content: &str) -> Result<T>
@@ -681,7 +802,7 @@ mod tests {
                 model_file: None,
                 max_tokens: 128,
                 n_ctx: 2048,
-                n_gpu_layers: 0,
+                n_gpu_layers: Some(0),
             },
         }
     }

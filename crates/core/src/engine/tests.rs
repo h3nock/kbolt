@@ -299,7 +299,7 @@ fn local_text_inference_config(model_file: &str) -> TextInferenceConfig {
             model_file: Some(model_file.to_string()),
             max_tokens: 256,
             n_ctx: 2048,
-            n_gpu_layers: 0,
+            n_gpu_layers: Some(0),
         },
     }
 }
@@ -344,7 +344,7 @@ fn test_engine_with_local_model_runtime() -> Engine {
                     model_file: None,
                     max_tokens: 256,
                     n_ctx: 2048,
-                    n_gpu_layers: 0,
+                    n_gpu_layers: Some(0),
                 },
             }),
             expander: Some(TextInferenceConfig {
@@ -352,7 +352,7 @@ fn test_engine_with_local_model_runtime() -> Engine {
                     model_file: None,
                     max_tokens: 256,
                     n_ctx: 2048,
-                    n_gpu_layers: 0,
+                    n_gpu_layers: Some(0),
                 },
             }),
         },

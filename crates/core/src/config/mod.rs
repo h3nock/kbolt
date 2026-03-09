@@ -34,8 +34,8 @@ const DEFAULT_LOCAL_GGUF_EMBEDDING_BATCH_SIZE: usize = 8;
 const DEFAULT_INFERENCE_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_INFERENCE_MAX_RETRIES: u32 = 2;
 const DEFAULT_LOCAL_INFERENCE_MAX_TOKENS: usize = 256;
+const DEFAULT_LOCAL_EXPANDER_MAX_TOKENS: usize = 64;
 const DEFAULT_LOCAL_INFERENCE_N_CTX: u32 = 2048;
-const DEFAULT_LOCAL_INFERENCE_N_GPU_LAYERS: u32 = 0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -134,7 +134,7 @@ pub enum TextInferenceProvider {
         #[serde(default = "default_local_inference_n_ctx")]
         n_ctx: u32,
         #[serde(default = "default_local_inference_n_gpu_layers")]
-        n_gpu_layers: u32,
+        n_gpu_layers: Option<u32>,
     },
 }
 
@@ -328,7 +328,8 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
     })?;
     validate_chunking(&file_config.chunking)?;
     validate_embeddings(file_config.embeddings.as_ref())?;
-    validate_inference(&file_config.inference)?;
+    let inference = InferenceConfig::from(file_config.inference.clone());
+    validate_inference(&inference)?;
 
     Ok(Config {
         config_dir: config_dir.to_path_buf(),
@@ -336,7 +337,7 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
         default_space: file_config.default_space,
         models: file_config.models,
         embeddings: file_config.embeddings,
-        inference: file_config.inference,
+        inference,
         reaping: ReapingConfig {
             days: file_config.reaping.days,
         },
@@ -616,11 +617,52 @@ struct FileConfig {
     #[serde(default)]
     embeddings: Option<EmbeddingConfig>,
     #[serde(default)]
-    inference: InferenceConfig,
+    inference: FileInferenceConfig,
     #[serde(default)]
     reaping: FileReapingConfig,
     #[serde(default)]
     chunking: ChunkingConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+struct FileInferenceConfig {
+    #[serde(default)]
+    reranker: Option<FileTextInferenceConfig>,
+    #[serde(default)]
+    expander: Option<FileTextInferenceConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FileTextInferenceConfig {
+    #[serde(flatten)]
+    provider: FileTextInferenceProvider,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "provider", rename_all = "snake_case")]
+enum FileTextInferenceProvider {
+    #[serde(rename = "openai_compatible")]
+    OpenAiCompatible {
+        output_mode: TextInferenceOutputMode,
+        model: String,
+        base_url: String,
+        #[serde(default)]
+        api_key_env: Option<String>,
+        #[serde(default = "default_inference_timeout_ms")]
+        timeout_ms: u64,
+        #[serde(default = "default_inference_max_retries")]
+        max_retries: u32,
+    },
+    LocalLlama {
+        #[serde(default)]
+        model_file: Option<String>,
+        #[serde(default)]
+        max_tokens: Option<usize>,
+        #[serde(default = "default_local_inference_n_ctx")]
+        n_ctx: u32,
+        #[serde(default = "default_local_inference_n_gpu_layers")]
+        n_gpu_layers: Option<u32>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -643,13 +685,108 @@ impl From<&Config> for FileConfig {
             default_space: value.default_space.clone(),
             models: value.models.clone(),
             embeddings: value.embeddings.clone(),
-            inference: value.inference.clone(),
+            inference: FileInferenceConfig::from(&value.inference),
             reaping: FileReapingConfig {
                 days: value.reaping.days,
             },
             chunking: value.chunking.clone(),
         }
     }
+}
+
+impl From<FileInferenceConfig> for InferenceConfig {
+    fn from(value: FileInferenceConfig) -> Self {
+        Self {
+            reranker: file_text_inference_to_runtime(
+                value.reranker,
+                default_local_inference_max_tokens(),
+            ),
+            expander: file_text_inference_to_runtime(
+                value.expander,
+                default_local_expander_max_tokens(),
+            ),
+        }
+    }
+}
+
+impl From<&InferenceConfig> for FileInferenceConfig {
+    fn from(value: &InferenceConfig) -> Self {
+        Self {
+            reranker: value.reranker.as_ref().map(FileTextInferenceConfig::from),
+            expander: value.expander.as_ref().map(FileTextInferenceConfig::from),
+        }
+    }
+}
+
+impl From<&TextInferenceConfig> for FileTextInferenceConfig {
+    fn from(value: &TextInferenceConfig) -> Self {
+        let provider = match &value.provider {
+            TextInferenceProvider::OpenAiCompatible {
+                output_mode,
+                model,
+                base_url,
+                api_key_env,
+                timeout_ms,
+                max_retries,
+            } => FileTextInferenceProvider::OpenAiCompatible {
+                output_mode: output_mode.clone(),
+                model: model.clone(),
+                base_url: base_url.clone(),
+                api_key_env: api_key_env.clone(),
+                timeout_ms: *timeout_ms,
+                max_retries: *max_retries,
+            },
+            TextInferenceProvider::LocalLlama {
+                model_file,
+                max_tokens,
+                n_ctx,
+                n_gpu_layers,
+            } => FileTextInferenceProvider::LocalLlama {
+                model_file: model_file.clone(),
+                max_tokens: Some(*max_tokens),
+                n_ctx: *n_ctx,
+                n_gpu_layers: *n_gpu_layers,
+            },
+        };
+
+        Self { provider }
+    }
+}
+
+fn file_text_inference_to_runtime(
+    config: Option<FileTextInferenceConfig>,
+    default_max_tokens: usize,
+) -> Option<TextInferenceConfig> {
+    config.map(|config| TextInferenceConfig {
+        provider: match config.provider {
+            FileTextInferenceProvider::OpenAiCompatible {
+                output_mode,
+                model,
+                base_url,
+                api_key_env,
+                timeout_ms,
+                max_retries,
+            } => TextInferenceProvider::OpenAiCompatible {
+                output_mode,
+                model,
+                base_url,
+                api_key_env,
+                timeout_ms,
+                max_retries,
+            },
+            FileTextInferenceProvider::LocalLlama {
+                model_file,
+                max_tokens,
+                n_ctx,
+                n_gpu_layers,
+            } => TextInferenceProvider::LocalLlama {
+                model_file,
+                max_tokens: max_tokens.unwrap_or(default_max_tokens),
+                n_ctx,
+                n_gpu_layers,
+            },
+        },
+    })
 }
 
 fn default_embedder_source() -> ModelSourceConfig {
@@ -749,20 +886,27 @@ fn default_local_gguf_embedding_config() -> EmbeddingConfig {
 
 fn default_local_inference_config() -> InferenceConfig {
     InferenceConfig {
-        reranker: Some(default_local_text_inference_config(
-            DEFAULT_LOCAL_RERANKER_MODEL_FILE,
-        )),
-        expander: Some(default_local_text_inference_config(
-            DEFAULT_LOCAL_EXPANDER_MODEL_FILE,
-        )),
+        reranker: Some(default_local_reranker_inference_config()),
+        expander: Some(default_local_expander_inference_config()),
     }
 }
 
-fn default_local_text_inference_config(model_file: &str) -> TextInferenceConfig {
+fn default_local_reranker_inference_config() -> TextInferenceConfig {
     TextInferenceConfig {
         provider: TextInferenceProvider::LocalLlama {
-            model_file: Some(model_file.to_string()),
+            model_file: Some(DEFAULT_LOCAL_RERANKER_MODEL_FILE.to_string()),
             max_tokens: default_local_inference_max_tokens(),
+            n_ctx: default_local_inference_n_ctx(),
+            n_gpu_layers: default_local_inference_n_gpu_layers(),
+        },
+    }
+}
+
+fn default_local_expander_inference_config() -> TextInferenceConfig {
+    TextInferenceConfig {
+        provider: TextInferenceProvider::LocalLlama {
+            model_file: Some(DEFAULT_LOCAL_EXPANDER_MODEL_FILE.to_string()),
+            max_tokens: default_local_expander_max_tokens(),
             n_ctx: default_local_inference_n_ctx(),
             n_gpu_layers: default_local_inference_n_gpu_layers(),
         },
@@ -781,12 +925,16 @@ fn default_local_inference_max_tokens() -> usize {
     DEFAULT_LOCAL_INFERENCE_MAX_TOKENS
 }
 
+fn default_local_expander_max_tokens() -> usize {
+    DEFAULT_LOCAL_EXPANDER_MAX_TOKENS
+}
+
 fn default_local_inference_n_ctx() -> u32 {
     DEFAULT_LOCAL_INFERENCE_N_CTX
 }
 
-fn default_local_inference_n_gpu_layers() -> u32 {
-    DEFAULT_LOCAL_INFERENCE_N_GPU_LAYERS
+fn default_local_inference_n_gpu_layers() -> Option<u32> {
+    None
 }
 
 #[cfg(test)]
