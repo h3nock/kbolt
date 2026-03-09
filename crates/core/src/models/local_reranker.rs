@@ -92,45 +92,6 @@ fn tokenize_rerank_prompt(
 }
 
 fn score_docs(model: &LlamaModel, n_ctx: u32, tokenized: &[Vec<LlamaToken>]) -> Result<Vec<f32>> {
-    let n_docs = tokenized.len();
-    let parallelism = reranker_parallelism(n_docs);
-
-    if parallelism <= 1 {
-        return score_docs_single(model, n_ctx, tokenized);
-    }
-
-    let chunk_size = (n_docs + parallelism - 1) / parallelism;
-    let chunks: Vec<&[Vec<LlamaToken>]> = tokenized.chunks(chunk_size).collect();
-
-    let results: Vec<Result<Vec<f32>>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = chunks
-            .into_iter()
-            .map(|chunk| scope.spawn(|| score_docs_single(model, n_ctx, chunk)))
-            .collect();
-
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle.join().unwrap_or_else(|_| {
-                    Err(KboltError::Inference("reranker worker panicked".to_string()).into())
-                })
-            })
-            .collect()
-    });
-
-    let mut scores = Vec::with_capacity(n_docs);
-    for result in results {
-        scores.extend(result?);
-    }
-
-    Ok(scores)
-}
-
-fn score_docs_single(
-    model: &LlamaModel,
-    n_ctx: u32,
-    tokenized: &[Vec<LlamaToken>],
-) -> Result<Vec<f32>> {
     if tokenized.is_empty() {
         return Ok(Vec::new());
     }
@@ -182,21 +143,6 @@ fn score_docs_single(
     Ok(scores)
 }
 
-/// Determine how many parallel reranker contexts to use.
-/// Each context allocates GPU/CPU memory, so we cap at a reasonable level.
-fn reranker_parallelism(n_docs: usize) -> usize {
-    if n_docs <= 2 {
-        return 1;
-    }
-    let cores = std::thread::available_parallelism()
-        .map(|p| p.get())
-        .unwrap_or(1);
-    // Use up to half of available cores, capped at 4 contexts max.
-    // Each context needs its own GPU memory allocation, so more isn't always better.
-    let max_contexts = cores.div_ceil(2).min(4);
-    max_contexts.min(n_docs)
-}
-
 fn resolve_reranker_context_size(configured_n_ctx: u32, required_tokens: u32) -> Result<u32> {
     if required_tokens > configured_n_ctx {
         return Err(KboltError::Inference(format!(
@@ -210,7 +156,7 @@ fn resolve_reranker_context_size(configured_n_ctx: u32, required_tokens: u32) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{reranker_parallelism, resolve_reranker_context_size};
+    use super::resolve_reranker_context_size;
 
     #[test]
     fn reranker_context_size_respects_configured_ceiling() {
@@ -218,17 +164,5 @@ mod tests {
 
         let err = resolve_reranker_context_size(128, 129).expect_err("must reject overflow");
         assert!(err.to_string().contains("requires 129 context tokens"));
-    }
-
-    #[test]
-    fn parallelism_scales_with_doc_count() {
-        assert_eq!(reranker_parallelism(0), 1);
-        assert_eq!(reranker_parallelism(1), 1);
-        assert_eq!(reranker_parallelism(2), 1);
-        // With 3+ docs, parallelism kicks in (exact value depends on available cores)
-        assert!(reranker_parallelism(3) >= 1);
-        assert!(reranker_parallelism(20) >= 1);
-        // Never exceeds 4
-        assert!(reranker_parallelism(100) <= 4);
     }
 }
