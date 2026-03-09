@@ -6,7 +6,7 @@ use tempfile::tempdir;
 
 use crate::config::{
     ChunkingConfig, Config, EmbeddingConfig, InferenceConfig, ModelConfig, ModelProvider,
-    ModelSourceConfig, ReapingConfig, TextInferenceConfig, TextInferenceProvider,
+    ModelSourceConfig, RankingConfig, ReapingConfig, TextInferenceConfig, TextInferenceProvider,
 };
 use crate::engine::{retrieval_text_with_prefix, Engine};
 use crate::ingest::chunk::FinalChunkKind;
@@ -95,6 +95,7 @@ fn test_engine() -> Engine {
         inference: InferenceConfig::default(),
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
+        ranking: RankingConfig::default(),
     };
     Engine::from_parts(storage, config)
 }
@@ -131,6 +132,7 @@ fn test_engine_with_embedder(embedder: Arc<dyn crate::models::Embedder>) -> Engi
         inference: InferenceConfig::default(),
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
+        ranking: RankingConfig::default(),
     };
     Engine::from_parts_with_embedder(storage, config, Some(embedder))
 }
@@ -171,6 +173,7 @@ fn test_engine_with_search_models(
         inference: InferenceConfig::default(),
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
+        ranking: RankingConfig::default(),
     };
     Engine::from_parts_with_models(storage, config, embedder, reranker, expander)
 }
@@ -217,6 +220,7 @@ fn test_engine_with_embedder_and_embedding_model(
         inference: InferenceConfig::default(),
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
+        ranking: RankingConfig::default(),
     };
     Engine::from_parts_with_embedder(storage, config, Some(embedder))
 }
@@ -253,6 +257,7 @@ fn test_engine_with_default_space(default_space: Option<&str>) -> Engine {
         inference: InferenceConfig::default(),
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
+        ranking: RankingConfig::default(),
     };
     Engine::from_parts(storage, config)
 }
@@ -289,6 +294,7 @@ fn test_engine_with_reaping_days(days: u32) -> Engine {
         inference: InferenceConfig::default(),
         reaping: ReapingConfig { days },
         chunking: ChunkingConfig::default(),
+        ranking: RankingConfig::default(),
     };
     Engine::from_parts(storage, config)
 }
@@ -358,6 +364,7 @@ fn test_engine_with_local_model_runtime() -> Engine {
         },
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
+        ranking: RankingConfig::default(),
     };
     Engine::from_parts(storage, config)
 }
@@ -399,6 +406,7 @@ fn test_engine_with_missing_embedder_model() -> Engine {
         inference: InferenceConfig::default(),
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
+        ranking: RankingConfig::default(),
     };
     let model_dir = config.cache_dir.join("models");
     let embedder = crate::models::build_embedder_with_local_runtime(
@@ -445,6 +453,7 @@ fn test_engine_with_missing_expander_model() -> Engine {
         },
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
+        ranking: RankingConfig::default(),
     };
     Engine::from_parts(storage, config)
 }
@@ -487,6 +496,7 @@ fn test_engine_with_embedder_and_expander_and_missing_reranker_model(
         },
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
+        ranking: RankingConfig::default(),
     };
     Engine::from_parts_with_models(storage, config, Some(embedder), None, Some(expander))
 }

@@ -422,7 +422,7 @@ mod tests {
     use super::Engine;
     use crate::config::{
         ChunkingConfig, Config, EmbeddingConfig, InferenceConfig, ModelConfig, ModelProvider,
-        ModelSourceConfig, ReapingConfig,
+        ModelSourceConfig, RankingConfig, ReapingConfig,
     };
     use crate::schedule_state_store::ScheduleRunStateStore;
     use crate::schedule_store::ScheduleCatalog;
@@ -552,6 +552,7 @@ mod tests {
             inference: InferenceConfig::default(),
             reaping: ReapingConfig { days: 7 },
             chunking: ChunkingConfig::default(),
+            ranking: RankingConfig::default(),
         };
         Engine::from_parts(storage, config)
     }

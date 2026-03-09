@@ -64,6 +64,7 @@ fn load_creates_default_config_and_directories() {
     assert_eq!(config.chunking.defaults.boundary_overlap_tokens, 48);
     assert_eq!(config.chunking.defaults.neighbor_window, 1);
     assert!(config.chunking.defaults.contextual_prefix);
+    assert_eq!(config.ranking, RankingConfig::default());
     assert_eq!(
         config.chunking.profiles.get("code"),
         Some(&ChunkPolicy {
@@ -208,6 +209,7 @@ contextual_prefix = true
     assert_eq!(config.chunking.defaults.boundary_overlap_tokens, 32);
     assert_eq!(config.chunking.defaults.neighbor_window, 2);
     assert!(!config.chunking.defaults.contextual_prefix);
+    assert_eq!(config.ranking, RankingConfig::default());
     assert_eq!(
         config.chunking.profiles.get("code"),
         Some(&ChunkPolicy {
@@ -333,6 +335,19 @@ fn save_writes_index_toml() {
             .into_iter()
             .collect(),
         },
+        ranking: RankingConfig {
+            rrf_k: 75,
+            deep_variants_max: 5,
+            initial_candidate_limit_min: 24,
+            rerank_candidates_min: 12,
+            rerank_candidates_max: 28,
+            bm25_boosts: Bm25BoostsConfig {
+                title: 2.5,
+                heading: 1.75,
+                body: 1.0,
+                filepath: 0.75,
+            },
+        },
     };
 
     save(&config).expect("save config");
@@ -392,6 +407,7 @@ fn save_writes_index_toml() {
     assert_eq!(parsed.chunking.defaults.boundary_overlap_tokens, 40);
     assert_eq!(parsed.chunking.defaults.neighbor_window, 2);
     assert!(!parsed.chunking.defaults.contextual_prefix);
+    assert_eq!(parsed.ranking, config.ranking);
     assert_eq!(
         parsed.chunking.profiles.get("md"),
         Some(&ChunkPolicy {
@@ -652,6 +668,32 @@ base_url = "api.openai.com/v1"
     let err = load_from_file(&config_file, &config_dir, &cache_dir)
         .expect_err("invalid inference config should fail");
     assert!(err.to_string().contains("inference.reranker.base_url"));
+}
+
+#[test]
+fn load_rejects_invalid_ranking_config() {
+    let tmp = tempdir().expect("create tempdir");
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    let config_file = config_dir.join(CONFIG_FILENAME);
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        &config_file,
+        r#"
+[ranking]
+rerank_candidates_min = 12
+rerank_candidates_max = 8
+"#,
+    )
+    .expect("write config file");
+
+    let err = load_from_file(&config_file, &config_dir, &cache_dir)
+        .expect_err("invalid ranking config should fail");
+    assert!(
+        err.to_string()
+            .contains("ranking.rerank_candidates_max (8) must be greater than or equal to ranking.rerank_candidates_min (12)"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

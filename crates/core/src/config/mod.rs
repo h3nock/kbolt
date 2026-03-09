@@ -36,8 +36,17 @@ const DEFAULT_INFERENCE_MAX_RETRIES: u32 = 2;
 const DEFAULT_LOCAL_INFERENCE_MAX_TOKENS: usize = 256;
 const DEFAULT_LOCAL_EXPANDER_MAX_TOKENS: usize = 64;
 const DEFAULT_LOCAL_INFERENCE_N_CTX: u32 = 2048;
+const DEFAULT_RANKING_RRF_K: usize = 60;
+const DEFAULT_RANKING_DEEP_VARIANTS_MAX: usize = 4;
+const DEFAULT_RANKING_INITIAL_CANDIDATE_LIMIT_MIN: usize = 20;
+const DEFAULT_RANKING_RERANK_CANDIDATES_MIN: usize = 10;
+const DEFAULT_RANKING_RERANK_CANDIDATES_MAX: usize = 20;
+const DEFAULT_RANKING_BM25_TITLE_BOOST: f32 = 2.0;
+const DEFAULT_RANKING_BM25_HEADING_BOOST: f32 = 1.5;
+const DEFAULT_RANKING_BM25_BODY_BOOST: f32 = 1.0;
+const DEFAULT_RANKING_BM25_FILEPATH_BOOST: f32 = 0.5;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub config_dir: PathBuf,
     pub cache_dir: PathBuf,
@@ -47,6 +56,7 @@ pub struct Config {
     pub inference: InferenceConfig,
     pub reaping: ReapingConfig,
     pub chunking: ChunkingConfig,
+    pub ranking: RankingConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,6 +197,58 @@ pub struct ReapingConfig {
     pub days: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RankingConfig {
+    #[serde(default = "default_ranking_rrf_k")]
+    pub rrf_k: usize,
+    #[serde(default = "default_ranking_deep_variants_max")]
+    pub deep_variants_max: usize,
+    #[serde(default = "default_ranking_initial_candidate_limit_min")]
+    pub initial_candidate_limit_min: usize,
+    #[serde(default = "default_ranking_rerank_candidates_min")]
+    pub rerank_candidates_min: usize,
+    #[serde(default = "default_ranking_rerank_candidates_max")]
+    pub rerank_candidates_max: usize,
+    #[serde(default)]
+    pub bm25_boosts: Bm25BoostsConfig,
+}
+
+impl Default for RankingConfig {
+    fn default() -> Self {
+        Self {
+            rrf_k: default_ranking_rrf_k(),
+            deep_variants_max: default_ranking_deep_variants_max(),
+            initial_candidate_limit_min: default_ranking_initial_candidate_limit_min(),
+            rerank_candidates_min: default_ranking_rerank_candidates_min(),
+            rerank_candidates_max: default_ranking_rerank_candidates_max(),
+            bm25_boosts: Bm25BoostsConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Bm25BoostsConfig {
+    #[serde(default = "default_ranking_bm25_title_boost")]
+    pub title: f32,
+    #[serde(default = "default_ranking_bm25_heading_boost")]
+    pub heading: f32,
+    #[serde(default = "default_ranking_bm25_body_boost")]
+    pub body: f32,
+    #[serde(default = "default_ranking_bm25_filepath_boost")]
+    pub filepath: f32,
+}
+
+impl Default for Bm25BoostsConfig {
+    fn default() -> Self {
+        Self {
+            title: default_ranking_bm25_title_boost(),
+            heading: default_ranking_bm25_heading_boost(),
+            body: default_ranking_bm25_body_boost(),
+            filepath: default_ranking_bm25_filepath_boost(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkingConfig {
     pub defaults: ChunkPolicy,
@@ -249,6 +311,7 @@ pub fn save(config: &Config) -> Result<()> {
     validate_chunking(&config.chunking)?;
     validate_embeddings(config.embeddings.as_ref())?;
     validate_inference(&config.inference)?;
+    validate_ranking(&config.ranking)?;
 
     let file_config = FileConfig::from(config);
     let serialized = toml::to_string_pretty(&file_config)?;
@@ -315,6 +378,7 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
                 days: DEFAULT_REAP_DAYS,
             },
             chunking: ChunkingConfig::default(),
+            ranking: RankingConfig::default(),
         };
         save(&default_config)?;
     }
@@ -330,6 +394,7 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
     validate_embeddings(file_config.embeddings.as_ref())?;
     let inference = InferenceConfig::from(file_config.inference.clone());
     validate_inference(&inference)?;
+    validate_ranking(&file_config.ranking)?;
 
     Ok(Config {
         config_dir: config_dir.to_path_buf(),
@@ -342,6 +407,7 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
             days: file_config.reaping.days,
         },
         chunking: file_config.chunking,
+        ranking: file_config.ranking,
     })
 }
 
@@ -608,7 +674,61 @@ fn validate_chunk_policy(scope: &str, policy: &ChunkPolicy) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+fn validate_ranking(ranking: &RankingConfig) -> Result<()> {
+    if ranking.rrf_k == 0 {
+        return Err(
+            KboltError::Config("ranking.rrf_k must be greater than zero".to_string()).into(),
+        );
+    }
+
+    if ranking.deep_variants_max == 0 {
+        return Err(KboltError::Config(
+            "ranking.deep_variants_max must be greater than zero".to_string(),
+        )
+        .into());
+    }
+
+    if ranking.initial_candidate_limit_min == 0 {
+        return Err(KboltError::Config(
+            "ranking.initial_candidate_limit_min must be greater than zero".to_string(),
+        )
+        .into());
+    }
+
+    if ranking.rerank_candidates_min == 0 {
+        return Err(KboltError::Config(
+            "ranking.rerank_candidates_min must be greater than zero".to_string(),
+        )
+        .into());
+    }
+
+    if ranking.rerank_candidates_max < ranking.rerank_candidates_min {
+        return Err(KboltError::Config(format!(
+            "ranking.rerank_candidates_max ({}) must be greater than or equal to ranking.rerank_candidates_min ({})",
+            ranking.rerank_candidates_max, ranking.rerank_candidates_min
+        ))
+        .into());
+    }
+
+    validate_positive_finite_boost("ranking.bm25_boosts.title", ranking.bm25_boosts.title)?;
+    validate_positive_finite_boost("ranking.bm25_boosts.heading", ranking.bm25_boosts.heading)?;
+    validate_positive_finite_boost("ranking.bm25_boosts.body", ranking.bm25_boosts.body)?;
+    validate_positive_finite_boost("ranking.bm25_boosts.filepath", ranking.bm25_boosts.filepath)?;
+
+    Ok(())
+}
+
+fn validate_positive_finite_boost(scope: &str, value: f32) -> Result<()> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(
+            KboltError::Config(format!("{scope} must be finite and greater than zero")).into(),
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 struct FileConfig {
     #[serde(default)]
     default_space: Option<String>,
@@ -622,6 +742,8 @@ struct FileConfig {
     reaping: FileReapingConfig,
     #[serde(default)]
     chunking: ChunkingConfig,
+    #[serde(default)]
+    ranking: RankingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -690,6 +812,7 @@ impl From<&Config> for FileConfig {
                 days: value.reaping.days,
             },
             chunking: value.chunking.clone(),
+            ranking: value.ranking.clone(),
         }
     }
 }
@@ -935,6 +1058,42 @@ fn default_local_inference_n_ctx() -> u32 {
 
 fn default_local_inference_n_gpu_layers() -> Option<u32> {
     None
+}
+
+fn default_ranking_rrf_k() -> usize {
+    DEFAULT_RANKING_RRF_K
+}
+
+fn default_ranking_deep_variants_max() -> usize {
+    DEFAULT_RANKING_DEEP_VARIANTS_MAX
+}
+
+fn default_ranking_initial_candidate_limit_min() -> usize {
+    DEFAULT_RANKING_INITIAL_CANDIDATE_LIMIT_MIN
+}
+
+fn default_ranking_rerank_candidates_min() -> usize {
+    DEFAULT_RANKING_RERANK_CANDIDATES_MIN
+}
+
+fn default_ranking_rerank_candidates_max() -> usize {
+    DEFAULT_RANKING_RERANK_CANDIDATES_MAX
+}
+
+fn default_ranking_bm25_title_boost() -> f32 {
+    DEFAULT_RANKING_BM25_TITLE_BOOST
+}
+
+fn default_ranking_bm25_heading_boost() -> f32 {
+    DEFAULT_RANKING_BM25_HEADING_BOOST
+}
+
+fn default_ranking_bm25_body_boost() -> f32 {
+    DEFAULT_RANKING_BM25_BODY_BOOST
+}
+
+fn default_ranking_bm25_filepath_boost() -> f32 {
+    DEFAULT_RANKING_BM25_FILEPATH_BOOST
 }
 
 #[cfg(test)]

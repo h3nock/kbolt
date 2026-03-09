@@ -843,6 +843,7 @@ pub struct Config {
     pub models: ModelConfig,
     pub reaping: ReapingConfig,
     pub chunking: ChunkingConfig,
+    pub ranking: RankingConfig,
 }
 
 pub struct ModelConfig {
@@ -868,6 +869,15 @@ pub struct ReapingConfig {
 pub struct ChunkingConfig {
     pub defaults: ChunkPolicy,
     pub profiles: HashMap<String, ChunkPolicy>,   // md, code, txt
+}
+
+pub struct RankingConfig {
+    pub rrf_k: usize,
+    pub deep_variants_max: usize,
+    pub initial_candidate_limit_min: usize,
+    pub rerank_candidates_min: usize,
+    pub rerank_candidates_max: usize,
+    pub bm25_boosts: Bm25BoostsConfig,
 }
 
 pub fn load(config_path: Option<&Path>) -> Result<Config>;
@@ -1599,12 +1609,25 @@ n_ctx = 2048
 [inference.expander]
 provider = "local_llama"
 model_file = "qmd-query-expansion-1.7B-q4_k_m.gguf"
-max_tokens = 256
+max_tokens = 64
 n_ctx = 2048
 # omit n_gpu_layers to auto-detect acceleration
 
 [reaping]
 days = 7    # hard-delete documents deactivated longer than this
+
+[ranking]
+rrf_k = 60
+deep_variants_max = 4
+initial_candidate_limit_min = 20
+rerank_candidates_min = 10
+rerank_candidates_max = 20
+
+[ranking.bm25_boosts]
+title = 2.0
+heading = 1.5
+body = 1.0
+filepath = 0.5
 
 [chunking.defaults]
 # Defaults are tuned for markdown-heavy collections.

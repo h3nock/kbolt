@@ -138,7 +138,7 @@ mod tests {
 
     use crate::config::{
         ChunkingConfig, Config, EmbeddingConfig, InferenceConfig, ModelConfig, ModelProvider,
-        ModelSourceConfig, ReapingConfig,
+        ModelSourceConfig, RankingConfig, ReapingConfig,
     };
     use crate::models::{Embedder, Expander};
     use crate::storage::Storage;
@@ -325,6 +325,7 @@ expected_paths = ["rust/guides/traits.md"]
             inference: InferenceConfig::default(),
             reaping: ReapingConfig { days: 7 },
             chunking: ChunkingConfig::default(),
+            ranking: RankingConfig::default(),
         };
         Engine::from_parts_with_models(storage, config, embedder, None, expander)
     }
