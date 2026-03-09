@@ -448,19 +448,27 @@ impl Engine {
             .map(|chunk| (chunk.id, chunk))
             .collect::<HashMap<_, _>>();
 
-        let mut docs_by_id: HashMap<i64, DocumentRow> = HashMap::new();
+        let unique_doc_ids = chunk_by_id
+            .values()
+            .map(|chunk| chunk.doc_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let docs_by_id: HashMap<i64, DocumentRow> = self
+            .storage
+            .get_documents_by_ids(&unique_doc_ids)?
+            .into_iter()
+            .map(|doc| (doc.id, doc))
+            .collect();
+
         let mut candidates = Vec::new();
         for ranked in ranked_chunks {
             let Some(chunk) = chunk_by_id.get(&ranked.chunk_id) else {
                 continue;
             };
 
-            let document = if let Some(existing) = docs_by_id.get(&chunk.doc_id) {
-                existing.clone()
-            } else {
-                let loaded = self.storage.get_document_by_id(chunk.doc_id)?;
-                docs_by_id.insert(chunk.doc_id, loaded.clone());
-                loaded
+            let Some(document) = docs_by_id.get(&chunk.doc_id) else {
+                continue;
             };
             if !document.active {
                 continue;
@@ -475,7 +483,7 @@ impl Engine {
                 doc_id: chunk.doc_id,
                 docid: short_docid(&document.hash),
                 path: format!("{}/{}", collection.collection, document.path),
-                title: document.title,
+                title: document.title.clone(),
                 space: collection.space.clone(),
                 collection: collection.collection.clone(),
                 heading: chunk.heading.clone(),
@@ -490,9 +498,22 @@ impl Engine {
         }
 
         let mut bytes_by_doc: HashMap<i64, Vec<u8>> = HashMap::new();
-        let mut chunks_by_doc: HashMap<i64, Vec<ChunkRow>> = HashMap::new();
         let neighbor_window = self.config.chunking.defaults.neighbor_window;
         let contextual_prefix = self.config.chunking.defaults.contextual_prefix;
+
+        let mut chunks_by_doc: HashMap<i64, Vec<ChunkRow>> = HashMap::new();
+        if neighbor_window > 0 {
+            let candidate_doc_ids = candidates
+                .iter()
+                .map(|c| c.doc_id)
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let all_chunks = self.storage.get_chunks_for_documents(&candidate_doc_ids)?;
+            for chunk in all_chunks {
+                chunks_by_doc.entry(chunk.doc_id).or_default().push(chunk);
+            }
+        }
 
         if apply_rerank && !candidates.is_empty() {
             let rerank_count = rerank_candidate_count(limit, candidates.len());

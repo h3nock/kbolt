@@ -869,6 +869,51 @@ CREATE TABLE IF NOT EXISTS embeddings (
         }
     }
 
+    pub fn get_documents_by_ids(&self, ids: &[i64]) -> Result<Vec<DocumentRow>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let sql = format!(
+            "SELECT id, collection_id, path, title, hash, modified, active, deactivated_at, fts_dirty
+             FROM documents
+             WHERE id IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(ids.iter()), decode_document_row)?;
+        let docs = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(docs)
+    }
+
+    pub fn get_chunks_for_documents(&self, doc_ids: &[i64]) -> Result<Vec<ChunkRow>> {
+        if doc_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let placeholders = vec!["?"; doc_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT id, doc_id, seq, offset, length, heading, kind
+             FROM chunks
+             WHERE doc_id IN ({placeholders})
+             ORDER BY doc_id ASC, seq ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(doc_ids.iter()), decode_chunk_row)?;
+        let chunks = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(chunks)
+    }
+
     pub fn update_document_metadata(&self, doc_id: i64, title: &str, modified: &str) -> Result<()> {
         let conn = self
             .db
