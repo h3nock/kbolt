@@ -4027,21 +4027,9 @@ fn status_reports_space_collection_and_model_counts() {
         assert_eq!(status.models.embedder.size_bytes, None);
         assert_eq!(status.models.reranker.size_bytes, None);
         assert_eq!(status.models.expander.size_bytes, None);
-        let expected_embedder = engine.config().cache_dir.join("models/embedder");
-        let expected_reranker = engine.config().cache_dir.join("models/reranker");
-        let expected_expander = engine.config().cache_dir.join("models/expander");
-        assert_eq!(
-            status.models.embedder.path.as_deref(),
-            Some(expected_embedder.as_path())
-        );
-        assert_eq!(
-            status.models.reranker.path.as_deref(),
-            Some(expected_reranker.as_path())
-        );
-        assert_eq!(
-            status.models.expander.path.as_deref(),
-            Some(expected_expander.as_path())
-        );
+        assert_eq!(status.models.embedder.path, None);
+        assert_eq!(status.models.reranker.path, None);
+        assert_eq!(status.models.expander.path, None);
 
         let default_status = status
             .spaces
@@ -4223,21 +4211,9 @@ fn model_status_reflects_configured_model_names() {
     assert_eq!(status.embedder.size_bytes, None);
     assert_eq!(status.reranker.size_bytes, None);
     assert_eq!(status.expander.size_bytes, None);
-    let expected_embedder = engine.config().cache_dir.join("models/embedder");
-    let expected_reranker = engine.config().cache_dir.join("models/reranker");
-    let expected_expander = engine.config().cache_dir.join("models/expander");
-    assert_eq!(
-        status.embedder.path.as_deref(),
-        Some(expected_embedder.as_path())
-    );
-    assert_eq!(
-        status.reranker.path.as_deref(),
-        Some(expected_reranker.as_path())
-    );
-    assert_eq!(
-        status.expander.path.as_deref(),
-        Some(expected_expander.as_path())
-    );
+    assert_eq!(status.embedder.path, None);
+    assert_eq!(status.reranker.path, None);
+    assert_eq!(status.expander.path, None);
 }
 
 #[test]
