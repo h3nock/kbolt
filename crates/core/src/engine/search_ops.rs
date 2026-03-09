@@ -1,5 +1,9 @@
 use super::*;
 
+const MAX_DEEP_VARIANTS: usize = 4;
+const MIN_RERANK_CANDIDATES: usize = 10;
+const MAX_RERANK_CANDIDATES: usize = 20;
+
 impl Engine {
     pub(super) fn initial_search_pipeline(&self, requested_mode: &SearchMode) -> SearchPipeline {
         let mut pipeline = SearchPipeline {
@@ -181,7 +185,22 @@ impl Engine {
             )
             .into());
         }
-        let query_vector = &vectors[0];
+
+        self.rank_semantic_chunks_with_embedding(targets, &vectors[0], limit, min_score)
+    }
+
+    fn rank_semantic_chunks_with_embedding(
+        &self,
+        targets: &[UpdateTarget],
+        query_vector: &[f32],
+        limit: usize,
+        min_score: f32,
+    ) -> Result<Vec<RankedChunk>> {
+        if query_vector.is_empty() {
+            return Err(
+                KboltError::Inference("query embedding must not be empty".to_string()).into(),
+            );
+        }
 
         let mut candidates = Vec::new();
         for target in targets {
@@ -230,14 +249,29 @@ impl Engine {
         min_score: f32,
         pipeline: &mut SearchPipeline,
     ) -> Result<Vec<RankedChunk>> {
-        let keyword = self.rank_keyword_chunks(targets, query, limit, 0.0)?;
-        let semantic = if self.embedder.is_some() {
-            match self.rank_semantic_chunks(targets, query, limit, 0.0) {
-                Ok(ranked) => {
+        let keyword = if self.embedder.is_some() {
+            let (keyword_result, semantic_result) = std::thread::scope(|scope| {
+                let keyword_handle =
+                    scope.spawn(|| self.rank_keyword_chunks(targets, query, limit, 0.0));
+                let semantic_handle =
+                    scope.spawn(|| self.rank_semantic_chunks(targets, query, limit, 0.0));
+                (keyword_handle.join(), semantic_handle.join())
+            });
+
+            let keyword = match keyword_result {
+                Ok(result) => result?,
+                Err(_) => {
+                    return Err(
+                        KboltError::Internal("keyword search worker panicked".to_string()).into(),
+                    )
+                }
+            };
+            let semantic = match semantic_result {
+                Ok(Ok(ranked)) => {
                     pipeline.dense = true;
                     ranked
                 }
-                Err(err) if is_model_not_available_error(&err) => {
+                Ok(Err(err)) if is_model_not_available_error(&err) => {
                     pipeline.dense = false;
                     add_search_pipeline_notice(
                         pipeline,
@@ -246,85 +280,20 @@ impl Engine {
                     );
                     Vec::new()
                 }
-                Err(err) => return Err(err),
-            }
+                Ok(Err(err)) => return Err(err),
+                Err(_) => {
+                    return Err(
+                        KboltError::Internal("semantic search worker panicked".to_string()).into(),
+                    )
+                }
+            };
+
+            return Ok(fuse_ranked_chunks(keyword, semantic, limit, min_score));
         } else {
-            Vec::new()
+            self.rank_keyword_chunks(targets, query, limit, min_score)?
         };
 
-        if semantic.is_empty() {
-            return Ok(keyword
-                .into_iter()
-                .filter(|item| item.score >= min_score)
-                .take(limit)
-                .collect());
-        }
-
-        let mut bm25_rank = HashMap::new();
-        let mut bm25_score = HashMap::new();
-        for (index, item) in keyword.iter().enumerate() {
-            bm25_rank.insert(item.chunk_id, index + 1);
-            bm25_score.insert(item.chunk_id, item.score);
-        }
-
-        let mut dense_rank = HashMap::new();
-        let mut dense_score = HashMap::new();
-        for (index, item) in semantic.iter().enumerate() {
-            dense_rank.insert(item.chunk_id, index + 1);
-            dense_score.insert(item.chunk_id, item.score);
-        }
-
-        let mut all_chunk_ids = HashSet::new();
-        for item in &keyword {
-            all_chunk_ids.insert(item.chunk_id);
-        }
-        for item in &semantic {
-            all_chunk_ids.insert(item.chunk_id);
-        }
-
-        let mut fused = Vec::new();
-        for chunk_id in all_chunk_ids {
-            let mut rrf = 0.0_f32;
-            let has_bm25 = if let Some(rank) = bm25_rank.get(&chunk_id) {
-                rrf += 1.0 / (60.0 + *rank as f32);
-                true
-            } else {
-                false
-            };
-            let has_dense = if let Some(rank) = dense_rank.get(&chunk_id) {
-                rrf += 1.0 / (60.0 + *rank as f32);
-                true
-            } else {
-                false
-            };
-            if has_bm25 && has_dense {
-                rrf *= 1.2;
-            }
-
-            fused.push(RankedChunk {
-                chunk_id,
-                score: rrf,
-                rrf,
-                reranker: None,
-                bm25: bm25_score.get(&chunk_id).copied(),
-                dense: dense_score.get(&chunk_id).copied(),
-            });
-        }
-        fused.sort_by(|left, right| right.score.total_cmp(&left.score));
-
-        let max_score = fused.iter().map(|item| item.score).fold(0.0_f32, f32::max);
-        if max_score > 0.0 {
-            for item in &mut fused {
-                item.score /= max_score;
-                item.rrf = item.score;
-            }
-        }
-
-        Ok(fused
-            .into_iter()
-            .filter(|item| item.score >= min_score)
-            .take(limit)
-            .collect())
+        Ok(keyword)
     }
 
     pub(super) fn rank_deep_chunks(
@@ -342,13 +311,88 @@ impl Engine {
             .into());
         };
 
-        let variants = expander.expand(query)?;
+        let mut variants = expander.expand(query)?;
+        if variants.len() > MAX_DEEP_VARIANTS {
+            variants.truncate(MAX_DEEP_VARIANTS);
+        }
         pipeline.expansion = true;
-        let mut aggregates: HashMap<i64, RankedChunk> = HashMap::new();
+        let variant_vectors = if let Some(embedder) = self.embedder.as_ref() {
+            match embedder.embed_batch(&variants) {
+                Ok(vectors) => {
+                    if vectors.len() != variants.len() {
+                        return Err(KboltError::Inference(format!(
+                            "embedder returned {} vectors for {} deep variants",
+                            vectors.len(),
+                            variants.len()
+                        ))
+                        .into());
+                    }
+                    if let Some((index, _)) = vectors
+                        .iter()
+                        .enumerate()
+                        .find(|(_, vector)| vector.is_empty())
+                    {
+                        return Err(KboltError::Inference(format!(
+                            "embedder returned an empty vector for deep variant {index}"
+                        ))
+                        .into());
+                    }
+                    pipeline.dense = true;
+                    Some(vectors)
+                }
+                Err(err) if is_model_not_available_error(&err) => {
+                    pipeline.dense = false;
+                    add_search_pipeline_notice(
+                        pipeline,
+                        SearchPipelineStep::Dense,
+                        SearchPipelineUnavailableReason::ModelNotAvailable,
+                    );
+                    None
+                }
+                Err(err) => return Err(err),
+            }
+        } else {
+            None
+        };
+        let variant_results: Vec<Result<Vec<RankedChunk>>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = variants
+                .iter()
+                .enumerate()
+                .map(|(index, variant)| {
+                    let vv = &variant_vectors;
+                    scope.spawn(move || {
+                        let keyword = self.rank_keyword_chunks(targets, variant, limit, 0.0)?;
+                        let semantic = vv
+                            .as_ref()
+                            .and_then(|vectors| vectors.get(index))
+                            .map(|vector| {
+                                self.rank_semantic_chunks_with_embedding(
+                                    targets, vector, limit, 0.0,
+                                )
+                            })
+                            .transpose()?
+                            .unwrap_or_default();
+                        Ok(fuse_ranked_chunks(keyword, semantic, limit, 0.0))
+                    })
+                })
+                .collect();
 
-        for variant in variants {
-            let ranked = self.rank_auto_chunks(targets, &variant, limit, 0.0, pipeline)?;
-            for (index, item) in ranked.into_iter().enumerate() {
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().unwrap_or_else(|_| {
+                        Err(
+                            KboltError::Internal("deep variant search worker panicked".to_string())
+                                .into(),
+                        )
+                    })
+                })
+                .collect()
+        });
+
+        let mut aggregates: HashMap<i64, RankedChunk> = HashMap::new();
+        for ranked in variant_results {
+            for (index, item) in ranked?.into_iter().enumerate() {
                 let variant_rrf = 1.0 / (40.0 + (index + 1) as f32);
                 let entry = aggregates
                     .entry(item.chunk_id)
@@ -451,7 +495,7 @@ impl Engine {
         let contextual_prefix = self.config.chunking.defaults.contextual_prefix;
 
         if apply_rerank && !candidates.is_empty() {
-            let rerank_count = candidates.len().min(20);
+            let rerank_count = rerank_candidate_count(limit, candidates.len());
             let mut rerank_chunk_ids = Vec::new();
             let mut rerank_inputs = Vec::new();
             let mut invalid_chunk_ids = HashSet::new();
@@ -684,6 +728,94 @@ fn load_candidate_bytes<'a>(
     }
 
     Ok(bytes_by_doc.get(&candidate.doc_id).map(Vec::as_slice))
+}
+
+fn fuse_ranked_chunks(
+    keyword: Vec<RankedChunk>,
+    semantic: Vec<RankedChunk>,
+    limit: usize,
+    min_score: f32,
+) -> Vec<RankedChunk> {
+    if semantic.is_empty() {
+        return keyword
+            .into_iter()
+            .filter(|item| item.score >= min_score)
+            .take(limit)
+            .collect();
+    }
+
+    let mut bm25_rank = HashMap::new();
+    let mut bm25_score = HashMap::new();
+    for (index, item) in keyword.iter().enumerate() {
+        bm25_rank.insert(item.chunk_id, index + 1);
+        bm25_score.insert(item.chunk_id, item.score);
+    }
+
+    let mut dense_rank = HashMap::new();
+    let mut dense_score = HashMap::new();
+    for (index, item) in semantic.iter().enumerate() {
+        dense_rank.insert(item.chunk_id, index + 1);
+        dense_score.insert(item.chunk_id, item.score);
+    }
+
+    let mut all_chunk_ids = HashSet::new();
+    for item in &keyword {
+        all_chunk_ids.insert(item.chunk_id);
+    }
+    for item in &semantic {
+        all_chunk_ids.insert(item.chunk_id);
+    }
+
+    let mut fused = Vec::new();
+    for chunk_id in all_chunk_ids {
+        let mut rrf = 0.0_f32;
+        let has_bm25 = if let Some(rank) = bm25_rank.get(&chunk_id) {
+            rrf += 1.0 / (60.0 + *rank as f32);
+            true
+        } else {
+            false
+        };
+        let has_dense = if let Some(rank) = dense_rank.get(&chunk_id) {
+            rrf += 1.0 / (60.0 + *rank as f32);
+            true
+        } else {
+            false
+        };
+        if has_bm25 && has_dense {
+            rrf *= 1.2;
+        }
+
+        fused.push(RankedChunk {
+            chunk_id,
+            score: rrf,
+            rrf,
+            reranker: None,
+            bm25: bm25_score.get(&chunk_id).copied(),
+            dense: dense_score.get(&chunk_id).copied(),
+        });
+    }
+    fused.sort_by(|left, right| right.score.total_cmp(&left.score));
+
+    let max_score = fused.iter().map(|item| item.score).fold(0.0_f32, f32::max);
+    if max_score > 0.0 {
+        for item in &mut fused {
+            item.score /= max_score;
+            item.rrf = item.score;
+        }
+    }
+
+    fused
+        .into_iter()
+        .filter(|item| item.score >= min_score)
+        .take(limit)
+        .collect()
+}
+
+fn rerank_candidate_count(requested_limit: usize, candidate_count: usize) -> usize {
+    let target = requested_limit
+        .max(MIN_RERANK_CANDIDATES)
+        .min(MAX_RERANK_CANDIDATES);
+    candidate_count.min(target)
 }
 
 fn add_search_pipeline_notice(
