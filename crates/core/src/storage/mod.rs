@@ -362,14 +362,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
         let mut stmt =
             conn.prepare("SELECT id, name, description, created FROM spaces WHERE name = ?1")?;
 
-        let row = stmt.query_row(params![name], |row| {
-            Ok(SpaceRow {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                description: row.get(2)?,
-                created: row.get(3)?,
-            })
-        });
+        let row = stmt.query_row(params![name], decode_space_row);
 
         match row {
             Ok(space) => Ok(space),
@@ -389,14 +382,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
         let mut stmt =
             conn.prepare("SELECT id, name, description, created FROM spaces WHERE id = ?1")?;
 
-        let row = stmt.query_row(params![id], |row| {
-            Ok(SpaceRow {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                description: row.get(2)?,
-                created: row.get(3)?,
-            })
-        });
+        let row = stmt.query_row(params![id], decode_space_row);
 
         match row {
             Ok(space) => Ok(space),
@@ -419,14 +405,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
              ORDER BY name ASC",
         )?;
 
-        let rows = stmt.query_map([], |row| {
-            Ok(SpaceRow {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                description: row.get(2)?,
-                created: row.get(3)?,
-            })
-        })?;
+        let rows = stmt.query_map([], decode_space_row)?;
 
         let spaces = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(spaces)
@@ -444,14 +423,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
              WHERE c.name = ?1
              ORDER BY s.name ASC",
         )?;
-        let rows = stmt.query_map(params![collection], |row| {
-            Ok(SpaceRow {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                description: row.get(2)?,
-                created: row.get(3)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![collection], decode_space_row)?;
         let matches = rows.collect::<std::result::Result<Vec<_>, _>>()?;
 
         if matches.is_empty() {
@@ -2155,6 +2127,15 @@ fn deserialize_extensions(raw: Option<String>) -> Result<Option<Vec<String>>> {
             .map(Some)
             .map_err(Into::into),
     }
+}
+
+fn decode_space_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SpaceRow> {
+    Ok(SpaceRow {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        created: row.get(3)?,
+    })
 }
 
 fn decode_collection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CollectionRow> {
