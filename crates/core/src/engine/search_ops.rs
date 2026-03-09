@@ -1,9 +1,5 @@
 use super::*;
 
-const MAX_DEEP_VARIANTS: usize = 4;
-const MIN_RERANK_CANDIDATES: usize = 10;
-const MAX_RERANK_CANDIDATES: usize = 20;
-
 impl Engine {
     pub(super) fn initial_search_pipeline(&self, requested_mode: &SearchMode) -> SearchPipeline {
         let mut pipeline = SearchPipeline {
@@ -61,12 +57,14 @@ impl Engine {
             SearchMode::Keyword | SearchMode::Semantic => requested_limit,
             SearchMode::Auto => {
                 if rerank_enabled {
-                    requested_limit.max(20)
+                    requested_limit.max(self.config.ranking.initial_candidate_limit_min)
                 } else {
                     requested_limit
                 }
             }
-            SearchMode::Deep => requested_limit.max(20),
+            SearchMode::Deep => {
+                requested_limit.max(self.config.ranking.initial_candidate_limit_min)
+            }
         }
     }
 
@@ -105,16 +103,17 @@ impl Engine {
         limit: usize,
         min_score: f32,
     ) -> Result<Vec<RankedChunk>> {
+        let boosts = &self.config.ranking.bm25_boosts;
         let mut candidates = Vec::new();
         for target in targets {
             let hits = self.storage.query_bm25(
                 &target.space,
                 query,
                 &[
-                    ("title", 2.0),
-                    ("heading", 1.5),
-                    ("body", 1.0),
-                    ("filepath", 0.5),
+                    ("title", boosts.title),
+                    ("heading", boosts.heading),
+                    ("body", boosts.body),
+                    ("filepath", boosts.filepath),
                 ],
                 limit,
             )?;
@@ -288,7 +287,13 @@ impl Engine {
                 }
             };
 
-            return Ok(fuse_ranked_chunks(keyword, semantic, limit, min_score));
+            return Ok(fuse_ranked_chunks(
+                keyword,
+                semantic,
+                self.config.ranking.rrf_k,
+                limit,
+                min_score,
+            ));
         } else {
             self.rank_keyword_chunks(targets, query, limit, min_score)?
         };
@@ -312,8 +317,8 @@ impl Engine {
         };
 
         let mut variants = expander.expand(query)?;
-        if variants.len() > MAX_DEEP_VARIANTS {
-            variants.truncate(MAX_DEEP_VARIANTS);
+        if variants.len() > self.config.ranking.deep_variants_max {
+            variants.truncate(self.config.ranking.deep_variants_max);
         }
         pipeline.expansion = true;
         let variant_vectors = if let Some(embedder) = self.embedder.as_ref() {
@@ -372,7 +377,13 @@ impl Engine {
                             })
                             .transpose()?
                             .unwrap_or_default();
-                        Ok(fuse_ranked_chunks(keyword, semantic, limit, 0.0))
+                        Ok(fuse_ranked_chunks(
+                            keyword,
+                            semantic,
+                            self.config.ranking.rrf_k,
+                            limit,
+                            0.0,
+                        ))
                     })
                 })
                 .collect();
@@ -393,7 +404,7 @@ impl Engine {
         let mut aggregates: HashMap<i64, RankedChunk> = HashMap::new();
         for ranked in variant_results {
             for (index, item) in ranked?.into_iter().enumerate() {
-                let variant_rrf = 1.0 / (60.0 + (index + 1) as f32);
+                let variant_rrf = 1.0 / (self.config.ranking.rrf_k as f32 + (index + 1) as f32);
                 let entry = aggregates
                     .entry(item.chunk_id)
                     .or_insert_with(|| RankedChunk {
@@ -504,7 +515,12 @@ impl Engine {
         let mut chunks_by_doc: HashMap<i64, Vec<ChunkRow>> = HashMap::new();
 
         if apply_rerank && !candidates.is_empty() {
-            let rerank_count = rerank_candidate_count(limit, candidates.len());
+            let rerank_count = rerank_candidate_count(
+                limit,
+                candidates.len(),
+                self.config.ranking.rerank_candidates_min,
+                self.config.ranking.rerank_candidates_max,
+            );
             let mut rerank_chunk_ids = Vec::new();
             let mut rerank_inputs = Vec::new();
             let mut invalid_chunk_ids = HashSet::new();
@@ -741,6 +757,7 @@ fn load_candidate_bytes<'a>(
 fn fuse_ranked_chunks(
     keyword: Vec<RankedChunk>,
     semantic: Vec<RankedChunk>,
+    rrf_k: usize,
     limit: usize,
     min_score: f32,
 ) -> Vec<RankedChunk> {
@@ -778,10 +795,10 @@ fn fuse_ranked_chunks(
     for chunk_id in all_chunk_ids {
         let mut rrf = 0.0_f32;
         if let Some(rank) = bm25_rank.get(&chunk_id) {
-            rrf += 1.0 / (60.0 + *rank as f32);
+            rrf += 1.0 / (rrf_k as f32 + *rank as f32);
         }
         if let Some(rank) = dense_rank.get(&chunk_id) {
-            rrf += 1.0 / (60.0 + *rank as f32);
+            rrf += 1.0 / (rrf_k as f32 + *rank as f32);
         }
         fused.push(RankedChunk {
             chunk_id,
@@ -809,10 +826,13 @@ fn fuse_ranked_chunks(
         .collect()
 }
 
-fn rerank_candidate_count(requested_limit: usize, candidate_count: usize) -> usize {
-    let target = requested_limit
-        .max(MIN_RERANK_CANDIDATES)
-        .min(MAX_RERANK_CANDIDATES);
+fn rerank_candidate_count(
+    requested_limit: usize,
+    candidate_count: usize,
+    min_candidates: usize,
+    max_candidates: usize,
+) -> usize {
+    let target = requested_limit.max(min_candidates).min(max_candidates);
     candidate_count.min(target)
 }
 
