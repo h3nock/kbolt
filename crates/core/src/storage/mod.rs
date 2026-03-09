@@ -905,21 +905,15 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .lock()
             .map_err(|_| CoreError::poisoned("database"))?;
         let _collection_name = lookup_collection_name(&conn, collection_id)?;
-
-        let sql = if active_only {
-            "SELECT id, collection_id, path, title, hash, modified, active, deactivated_at, fts_dirty
-             FROM documents
-             WHERE collection_id = ?1 AND active = 1
-             ORDER BY path ASC"
-        } else {
+        let active_only = i64::from(active_only);
+        let mut stmt = conn.prepare(
             "SELECT id, collection_id, path, title, hash, modified, active, deactivated_at, fts_dirty
              FROM documents
              WHERE collection_id = ?1
-             ORDER BY path ASC"
-        };
-
-        let mut stmt = conn.prepare(sql)?;
-        let rows = stmt.query_map(params![collection_id], decode_document_row)?;
+               AND (?2 = 0 OR active = 1)
+             ORDER BY path ASC",
+        )?;
+        let rows = stmt.query_map(params![collection_id, active_only], decode_document_row)?;
         let docs = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(docs)
     }
@@ -934,18 +928,8 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .lock()
             .map_err(|_| CoreError::poisoned("database"))?;
         let _collection_name = lookup_collection_name(&conn, collection_id)?;
-
-        let sql = if active_only {
-            "SELECT d.id, d.path, d.title, d.hash, d.active,
-                    COUNT(DISTINCT c.id) AS chunk_count,
-                    COUNT(DISTINCT e.chunk_id) AS embedded_chunk_count
-             FROM documents d
-             LEFT JOIN chunks c ON c.doc_id = d.id
-             LEFT JOIN embeddings e ON e.chunk_id = c.id
-             WHERE d.collection_id = ?1 AND d.active = 1
-             GROUP BY d.id, d.path, d.title, d.hash, d.active
-             ORDER BY d.path ASC"
-        } else {
+        let active_only = i64::from(active_only);
+        let mut stmt = conn.prepare(
             "SELECT d.id, d.path, d.title, d.hash, d.active,
                     COUNT(DISTINCT c.id) AS chunk_count,
                     COUNT(DISTINCT e.chunk_id) AS embedded_chunk_count
@@ -953,12 +937,11 @@ CREATE TABLE IF NOT EXISTS embeddings (
              LEFT JOIN chunks c ON c.doc_id = d.id
              LEFT JOIN embeddings e ON e.chunk_id = c.id
              WHERE d.collection_id = ?1
+               AND (?2 = 0 OR d.active = 1)
              GROUP BY d.id, d.path, d.title, d.hash, d.active
-             ORDER BY d.path ASC"
-        };
-
-        let mut stmt = conn.prepare(sql)?;
-        let rows = stmt.query_map(params![collection_id], |row| {
+             ORDER BY d.path ASC",
+        )?;
+        let rows = stmt.query_map(params![collection_id, active_only], |row| {
             let chunk_count: i64 = row.get(5)?;
             let embedded_chunk_count: i64 = row.get(6)?;
             Ok(FileListRow {
@@ -1672,18 +1655,15 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .lock()
             .map_err(|_| CoreError::poisoned("database"))?;
         let _collection_name = lookup_collection_name(&conn, collection_id)?;
-
-        let sql = if active_only {
+        let active_only = i64::from(active_only);
+        let count: i64 = conn.query_row(
             "SELECT COUNT(*)
              FROM documents
-             WHERE collection_id = ?1 AND active = 1"
-        } else {
-            "SELECT COUNT(*)
-             FROM documents
-             WHERE collection_id = ?1"
-        };
-
-        let count: i64 = conn.query_row(sql, params![collection_id], |row| row.get(0))?;
+             WHERE collection_id = ?1
+               AND (?2 = 0 OR active = 1)",
+            params![collection_id, active_only],
+            |row| row.get(0),
+        )?;
         Ok(count as usize)
     }
 
