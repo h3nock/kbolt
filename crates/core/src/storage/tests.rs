@@ -6,91 +6,6 @@ use kbolt_types::KboltError;
 use rusqlite::Connection;
 
 #[test]
-fn new_creates_db_and_default_space() {
-    let tmp = tempdir().expect("create tempdir");
-    let cache_dir = tmp.path().join("cache");
-
-    let storage = Storage::new(&cache_dir).expect("create storage");
-
-    assert!(cache_dir.join("meta.sqlite").exists());
-
-    let default_space = storage
-        .get_space("default")
-        .expect("default space should exist");
-    assert_eq!(default_space.name, "default");
-}
-
-#[test]
-fn new_preloads_default_space_index_paths() {
-    let tmp = tempdir().expect("create tempdir");
-    let cache_dir = tmp.path().join("cache");
-    let storage = Storage::new(&cache_dir).expect("create storage");
-
-    assert!(cache_dir.join("spaces/default/tantivy").is_dir());
-    assert!(cache_dir.join("spaces/default/tantivy/meta.json").is_file());
-    assert!(cache_dir.join("spaces/default/vectors.usearch").is_file());
-
-    let spaces = storage.spaces.read().expect("lock spaces map");
-    assert!(spaces.contains_key("default"));
-}
-
-#[test]
-fn open_space_registers_paths_for_existing_space() {
-    let tmp = tempdir().expect("create tempdir");
-    let cache_dir = tmp.path().join("cache");
-    let storage = Storage::new(&cache_dir).expect("create storage");
-    storage.create_space("work", None).expect("create work");
-
-    storage.open_space("work").expect("open work space");
-    assert!(cache_dir.join("spaces/work/tantivy").is_dir());
-    assert!(cache_dir.join("spaces/work/tantivy/meta.json").is_file());
-    assert!(cache_dir.join("spaces/work/vectors.usearch").is_file());
-
-    let spaces = storage.spaces.read().expect("lock spaces map");
-    assert!(spaces.contains_key("work"));
-}
-
-#[test]
-fn open_space_missing_space_returns_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let err = storage
-        .open_space("missing")
-        .expect_err("missing space should fail");
-    match KboltError::from(err) {
-        KboltError::SpaceNotFound { name } => assert_eq!(name, "missing"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
-fn close_space_removes_loaded_space_entry() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-    storage.create_space("work", None).expect("create work");
-    storage.open_space("work").expect("open work");
-
-    storage.close_space("work").expect("close work");
-    let spaces = storage.spaces.read().expect("lock spaces map");
-    assert!(!spaces.contains_key("work"));
-}
-
-#[test]
-fn close_space_missing_space_returns_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let err = storage
-        .close_space("missing")
-        .expect_err("missing space should fail");
-    match KboltError::from(err) {
-        KboltError::SpaceNotFound { name } => assert_eq!(name, "missing"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
 fn create_and_list_spaces() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
@@ -108,23 +23,6 @@ fn create_and_list_spaces() {
         .collect();
 
     assert_eq!(names, vec!["default".to_string(), "work".to_string()]);
-}
-
-#[test]
-fn create_space_provisions_index_paths() {
-    let tmp = tempdir().expect("create tempdir");
-    let cache_dir = tmp.path().join("cache");
-    let storage = Storage::new(&cache_dir).expect("create storage");
-
-    storage
-        .create_space("work", None)
-        .expect("create work space");
-    assert!(cache_dir.join("spaces/work/tantivy").is_dir());
-    assert!(cache_dir.join("spaces/work/tantivy/meta.json").is_file());
-    assert!(cache_dir.join("spaces/work/vectors.usearch").is_file());
-
-    let spaces = storage.spaces.read().expect("lock spaces map");
-    assert!(spaces.contains_key("work"));
 }
 
 #[test]
@@ -483,61 +381,6 @@ fn find_space_for_collection_returns_ambiguous_with_sorted_space_names() {
 }
 
 #[test]
-fn create_space_duplicate_returns_space_already_exists() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    storage
-        .create_space("work", None)
-        .expect("first create succeeds");
-    let err = storage
-        .create_space("work", None)
-        .expect_err("duplicate create should fail");
-
-    match KboltError::from(err) {
-        KboltError::SpaceAlreadyExists { name } => assert_eq!(name, "work"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
-fn get_space_returns_not_found_for_missing_name() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let err = storage
-        .get_space("missing")
-        .expect_err("missing space should fail");
-
-    match KboltError::from(err) {
-        KboltError::SpaceNotFound { name } => assert_eq!(name, "missing"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
-fn get_space_by_id_returns_row_or_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-    let work_id = storage
-        .create_space("work", Some("work docs"))
-        .expect("create work space");
-
-    let work = storage.get_space_by_id(work_id).expect("fetch work by id");
-    assert_eq!(work.id, work_id);
-    assert_eq!(work.name, "work");
-    assert_eq!(work.description.as_deref(), Some("work docs"));
-
-    let err = storage
-        .get_space_by_id(99999)
-        .expect_err("missing space id should fail");
-    match KboltError::from(err) {
-        KboltError::SpaceNotFound { name } => assert_eq!(name, "id=99999"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
 fn new_creates_expected_schema_objects() {
     let tmp = tempdir().expect("create tempdir");
     let cache_dir = tmp.path().join("cache");
@@ -573,31 +416,6 @@ fn new_creates_expected_schema_objects() {
             .expect("query sqlite_master for index");
         assert_eq!(exists, 1, "missing expected index: {index}");
     }
-}
-
-#[test]
-fn delete_space_removes_non_default_space() {
-    let tmp = tempdir().expect("create tempdir");
-    let cache_dir = tmp.path().join("cache");
-    let storage = Storage::new(&cache_dir).expect("create storage");
-    storage
-        .create_space("work", Some("work docs"))
-        .expect("create space");
-    assert!(cache_dir.join("spaces/work/tantivy").is_dir());
-
-    storage.delete_space("work").expect("delete space");
-    let err = storage
-        .get_space("work")
-        .expect_err("deleted space should not exist");
-
-    match KboltError::from(err) {
-        KboltError::SpaceNotFound { name } => assert_eq!(name, "work"),
-        other => panic!("unexpected error: {other}"),
-    }
-
-    assert!(!cache_dir.join("spaces/work").exists());
-    let spaces = storage.spaces.read().expect("lock spaces map");
-    assert!(!spaces.contains_key("work"));
 }
 
 #[test]
@@ -652,57 +470,6 @@ fn delete_default_space_clears_contents_but_keeps_space() {
 }
 
 #[test]
-fn rename_space_rejects_default_space() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let err = storage
-        .rename_space("default", "renamed")
-        .expect_err("renaming default should fail");
-    assert!(
-        err.to_string().contains("cannot rename reserved space"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn rename_space_updates_name_for_non_default_space() {
-    let tmp = tempdir().expect("create tempdir");
-    let cache_dir = tmp.path().join("cache");
-    let storage = Storage::new(&cache_dir).expect("create storage");
-    storage.create_space("work", None).expect("create work");
-    std::fs::write(
-        cache_dir.join("spaces/work/tantivy/marker.bin"),
-        vec![b'm'; 8],
-    )
-    .expect("write marker");
-
-    storage
-        .rename_space("work", "team")
-        .expect("rename work to team");
-
-    let renamed = storage.get_space("team").expect("get renamed space");
-    assert_eq!(renamed.name, "team");
-
-    let err = storage
-        .get_space("work")
-        .expect_err("old name should not resolve");
-    match KboltError::from(err) {
-        KboltError::SpaceNotFound { name } => assert_eq!(name, "work"),
-        other => panic!("unexpected error: {other}"),
-    }
-
-    assert!(!cache_dir.join("spaces/work").exists());
-    assert!(cache_dir.join("spaces/team/tantivy").is_dir());
-    assert!(cache_dir.join("spaces/team/vectors.usearch").is_file());
-    assert!(cache_dir.join("spaces/team/tantivy/marker.bin").is_file());
-
-    let spaces = storage.spaces.read().expect("lock spaces map");
-    assert!(!spaces.contains_key("work"));
-    assert!(spaces.contains_key("team"));
-}
-
-#[test]
 fn rename_space_to_existing_name_returns_space_already_exists() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
@@ -742,34 +509,6 @@ fn rename_space_rolls_back_when_destination_artifacts_exist() {
 
     let spaces = storage.spaces.read().expect("lock spaces map");
     assert!(spaces.contains_key("work"));
-}
-
-#[test]
-fn update_space_description_persists_new_value() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-    storage.create_space("work", None).expect("create work");
-
-    storage
-        .update_space_description("work", "updated description")
-        .expect("update description");
-
-    let space = storage.get_space("work").expect("get work");
-    assert_eq!(space.description.as_deref(), Some("updated description"));
-}
-
-#[test]
-fn update_space_description_missing_space_returns_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let err = storage
-        .update_space_description("missing", "desc")
-        .expect_err("missing space should fail");
-    match KboltError::from(err) {
-        KboltError::SpaceNotFound { name } => assert_eq!(name, "missing"),
-        other => panic!("unexpected error: {other}"),
-    }
 }
 
 #[test]
@@ -851,154 +590,6 @@ fn create_collection_duplicate_name_in_space_returns_collection_already_exists()
 }
 
 #[test]
-fn create_collection_in_missing_space_returns_space_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let err = storage
-        .create_collection(99999, "api", std::path::Path::new("/tmp/api"), None, None)
-        .expect_err("missing space should fail");
-
-    match KboltError::from(err) {
-        KboltError::SpaceNotFound { name } => assert_eq!(name, "id=99999"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
-fn get_collection_missing_name_returns_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-    let work_space_id = storage
-        .create_space("work", None)
-        .expect("create work space");
-
-    let err = storage
-        .get_collection(work_space_id, "missing")
-        .expect_err("missing collection should fail");
-    match KboltError::from(err) {
-        KboltError::CollectionNotFound { name } => assert_eq!(name, "missing"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
-fn get_collection_by_id_returns_row_or_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-    let work_space_id = storage
-        .create_space("work", None)
-        .expect("create work space");
-    let collection_id = storage
-        .create_collection(
-            work_space_id,
-            "api",
-            std::path::Path::new("/tmp/api"),
-            Some("api docs"),
-            None,
-        )
-        .expect("create collection");
-
-    let collection = storage
-        .get_collection_by_id(collection_id)
-        .expect("fetch collection by id");
-    assert_eq!(collection.id, collection_id);
-    assert_eq!(collection.space_id, work_space_id);
-    assert_eq!(collection.name, "api");
-    assert_eq!(collection.path, std::path::PathBuf::from("/tmp/api"));
-    assert_eq!(collection.description.as_deref(), Some("api docs"));
-
-    let err = storage
-        .get_collection_by_id(99999)
-        .expect_err("missing collection id should fail");
-    match KboltError::from(err) {
-        KboltError::CollectionNotFound { name } => assert_eq!(name, "id=99999"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
-fn delete_collection_removes_entry() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-    let space_id = storage
-        .create_space("work", None)
-        .expect("create work space");
-    storage
-        .create_collection(
-            space_id,
-            "api",
-            std::path::Path::new("/tmp/api"),
-            None,
-            None,
-        )
-        .expect("create collection");
-
-    storage
-        .delete_collection(space_id, "api")
-        .expect("delete collection");
-
-    let err = storage
-        .get_collection(space_id, "api")
-        .expect_err("collection should not exist");
-    match KboltError::from(err) {
-        KboltError::CollectionNotFound { name } => assert_eq!(name, "api"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
-fn delete_collection_missing_name_returns_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-    let space_id = storage
-        .create_space("work", None)
-        .expect("create work space");
-
-    let err = storage
-        .delete_collection(space_id, "missing")
-        .expect_err("missing collection should fail");
-    match KboltError::from(err) {
-        KboltError::CollectionNotFound { name } => assert_eq!(name, "missing"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
-fn rename_collection_updates_name() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-    let space_id = storage
-        .create_space("work", None)
-        .expect("create work space");
-    storage
-        .create_collection(
-            space_id,
-            "api",
-            std::path::Path::new("/tmp/api"),
-            None,
-            None,
-        )
-        .expect("create collection");
-
-    storage
-        .rename_collection(space_id, "api", "backend")
-        .expect("rename collection");
-
-    let renamed = storage
-        .get_collection(space_id, "backend")
-        .expect("get renamed collection");
-    assert_eq!(renamed.name, "backend");
-    let err = storage
-        .get_collection(space_id, "api")
-        .expect_err("old name should not exist");
-    match KboltError::from(err) {
-        KboltError::CollectionNotFound { name } => assert_eq!(name, "api"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
 fn rename_collection_to_existing_name_returns_already_exists() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
@@ -1032,100 +623,6 @@ fn rename_collection_to_existing_name_returns_already_exists() {
             assert_eq!(name, "backend");
             assert_eq!(space, "work");
         }
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
-fn update_collection_description_persists_value() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-    let space_id = storage
-        .create_space("work", None)
-        .expect("create work space");
-    storage
-        .create_collection(
-            space_id,
-            "api",
-            std::path::Path::new("/tmp/api"),
-            None,
-            None,
-        )
-        .expect("create collection");
-
-    storage
-        .update_collection_description(space_id, "api", "API docs")
-        .expect("update description");
-
-    let updated = storage
-        .get_collection(space_id, "api")
-        .expect("get updated collection");
-    assert_eq!(updated.description.as_deref(), Some("API docs"));
-}
-
-#[test]
-fn update_collection_description_missing_name_returns_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-    let space_id = storage
-        .create_space("work", None)
-        .expect("create work space");
-
-    let err = storage
-        .update_collection_description(space_id, "missing", "desc")
-        .expect_err("missing collection should fail");
-    match KboltError::from(err) {
-        KboltError::CollectionNotFound { name } => assert_eq!(name, "missing"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
-fn update_collection_timestamp_refreshes_updated_column() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-    let space_id = storage
-        .create_space("work", None)
-        .expect("create work space");
-    let collection_id = storage
-        .create_collection(
-            space_id,
-            "api",
-            std::path::Path::new("/tmp/api"),
-            None,
-            None,
-        )
-        .expect("create collection");
-
-    {
-        let conn = storage.db.lock().expect("lock db");
-        conn.execute(
-            "UPDATE collections SET updated = '2000-01-01T00:00:00Z' WHERE id = ?1",
-            [collection_id],
-        )
-        .expect("set old timestamp");
-    }
-
-    storage
-        .update_collection_timestamp(collection_id)
-        .expect("update timestamp");
-
-    let refreshed = storage
-        .get_collection(space_id, "api")
-        .expect("get collection");
-    assert_ne!(refreshed.updated, "2000-01-01T00:00:00Z");
-}
-
-#[test]
-fn update_collection_timestamp_missing_collection_returns_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let err = storage
-        .update_collection_timestamp(99999)
-        .expect_err("missing collection should fail");
-    match KboltError::from(err) {
-        KboltError::CollectionNotFound { name } => assert_eq!(name, "id=99999"),
         other => panic!("unexpected error: {other}"),
     }
 }
@@ -1233,20 +730,6 @@ fn upsert_document_updates_existing_row_and_reactivates() {
 }
 
 #[test]
-fn upsert_document_missing_collection_returns_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let err = storage
-        .upsert_document(99999, "src/lib.rs", "lib", "hash", "2026-03-01T10:00:00Z")
-        .expect_err("missing collection should fail");
-    match KboltError::from(err) {
-        KboltError::CollectionNotFound { name } => assert_eq!(name, "id=99999"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
 fn update_document_metadata_updates_title_modified_and_reactivates_without_dirtying() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
@@ -1303,20 +786,6 @@ fn update_document_metadata_updates_title_modified_and_reactivates_without_dirty
 }
 
 #[test]
-fn update_document_metadata_missing_id_returns_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let err = storage
-        .update_document_metadata(99999, "lib", "2026-03-01T12:00:00Z")
-        .expect_err("missing document id should fail");
-    match KboltError::from(err) {
-        KboltError::DocumentNotFound { path } => assert_eq!(path, "id=99999"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
 fn get_document_by_path_missing_path_returns_none() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
@@ -1337,65 +806,6 @@ fn get_document_by_path_missing_path_returns_none() {
         .get_document_by_path(collection_id, "missing.rs")
         .expect("query missing path");
     assert!(missing.is_none());
-}
-
-#[test]
-fn get_document_by_path_missing_collection_returns_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let err = storage
-        .get_document_by_path(99999, "src/lib.rs")
-        .expect_err("missing collection should fail");
-    match KboltError::from(err) {
-        KboltError::CollectionNotFound { name } => assert_eq!(name, "id=99999"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
-fn get_document_by_id_returns_row_or_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-    let space_id = storage
-        .create_space("work", None)
-        .expect("create work space");
-    let collection_id = storage
-        .create_collection(
-            space_id,
-            "api",
-            std::path::Path::new("/tmp/api"),
-            None,
-            None,
-        )
-        .expect("create collection");
-    let doc_id = storage
-        .upsert_document(
-            collection_id,
-            "src/lib.rs",
-            "lib.rs",
-            "hash-abc",
-            "2026-03-01T10:00:00Z",
-        )
-        .expect("insert document");
-
-    let doc = storage
-        .get_document_by_id(doc_id)
-        .expect("get document by id");
-    assert_eq!(doc.id, doc_id);
-    assert_eq!(doc.collection_id, collection_id);
-    assert_eq!(doc.path, "src/lib.rs");
-    assert_eq!(doc.title, "lib.rs");
-    assert_eq!(doc.hash, "hash-abc");
-    assert!(doc.active);
-
-    let err = storage
-        .get_document_by_id(99999)
-        .expect_err("missing id should fail");
-    match KboltError::from(err) {
-        KboltError::DocumentNotFound { path } => assert_eq!(path, "id=99999"),
-        other => panic!("unexpected error: {other}"),
-    }
 }
 
 #[test]
@@ -1444,20 +854,6 @@ fn list_documents_respects_active_only_filter() {
     assert_eq!(all_docs.len(), 2);
     assert_eq!(active_docs.len(), 1);
     assert_eq!(active_docs[0].path, "a.rs");
-}
-
-#[test]
-fn list_documents_missing_collection_returns_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let err = storage
-        .list_documents(99999, true)
-        .expect_err("missing collection should fail");
-    match KboltError::from(err) {
-        KboltError::CollectionNotFound { name } => assert_eq!(name, "id=99999"),
-        other => panic!("unexpected error: {other}"),
-    }
 }
 
 #[test]
@@ -1558,20 +954,6 @@ fn list_collection_file_rows_reports_counts_and_active_filter() {
 }
 
 #[test]
-fn list_collection_file_rows_missing_collection_returns_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let err = storage
-        .list_collection_file_rows(99999, false)
-        .expect_err("missing collection should fail");
-    match KboltError::from(err) {
-        KboltError::CollectionNotFound { name } => assert_eq!(name, "id=99999"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
 fn get_document_by_hash_prefix_returns_matching_rows() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
@@ -1622,115 +1004,6 @@ fn get_document_by_hash_prefix_returns_matching_rows() {
     assert_eq!(matches.len(), 2);
     assert_eq!(matches[0].hash, "abcd0001");
     assert_eq!(matches[1].hash, "abcd0002");
-}
-
-#[test]
-fn deactivate_document_marks_document_inactive() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-    let space_id = storage
-        .create_space("work", None)
-        .expect("create work space");
-    let collection_id = storage
-        .create_collection(
-            space_id,
-            "api",
-            std::path::Path::new("/tmp/api"),
-            None,
-            None,
-        )
-        .expect("create collection");
-
-    let doc_id = storage
-        .upsert_document(
-            collection_id,
-            "src/lib.rs",
-            "lib",
-            "hash-1",
-            "2026-03-01T10:00:00Z",
-        )
-        .expect("insert doc");
-
-    storage
-        .deactivate_document(doc_id)
-        .expect("deactivate document");
-
-    let stored = storage
-        .get_document_by_path(collection_id, "src/lib.rs")
-        .expect("get document")
-        .expect("document exists");
-    assert!(!stored.active);
-    assert!(stored.deactivated_at.is_some());
-}
-
-#[test]
-fn deactivate_document_missing_id_returns_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let err = storage
-        .deactivate_document(99999)
-        .expect_err("missing document should fail");
-    match KboltError::from(err) {
-        KboltError::DocumentNotFound { path } => assert_eq!(path, "id=99999"),
-        other => panic!("unexpected error: {other}"),
-    }
-}
-
-#[test]
-fn reactivate_document_marks_document_active_and_clears_deactivated_at() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-    let space_id = storage
-        .create_space("work", None)
-        .expect("create work space");
-    let collection_id = storage
-        .create_collection(
-            space_id,
-            "api",
-            std::path::Path::new("/tmp/api"),
-            None,
-            None,
-        )
-        .expect("create collection");
-
-    let doc_id = storage
-        .upsert_document(
-            collection_id,
-            "src/lib.rs",
-            "lib",
-            "hash-1",
-            "2026-03-01T10:00:00Z",
-        )
-        .expect("insert doc");
-    storage
-        .deactivate_document(doc_id)
-        .expect("deactivate document");
-
-    storage
-        .reactivate_document(doc_id)
-        .expect("reactivate document");
-
-    let stored = storage
-        .get_document_by_path(collection_id, "src/lib.rs")
-        .expect("get document")
-        .expect("document exists");
-    assert!(stored.active);
-    assert_eq!(stored.deactivated_at, None);
-}
-
-#[test]
-fn reactivate_document_missing_id_returns_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let err = storage
-        .reactivate_document(99999)
-        .expect_err("missing document should fail");
-    match KboltError::from(err) {
-        KboltError::DocumentNotFound { path } => assert_eq!(path, "id=99999"),
-        other => panic!("unexpected error: {other}"),
-    }
 }
 
 #[test]
@@ -1816,31 +1089,6 @@ fn reap_documents_deletes_only_old_deactivated_rows() {
         .expect("active document should remain");
     assert!(active_doc.active);
     assert!(active_doc_id > 0);
-}
-
-#[test]
-fn reap_documents_returns_empty_when_no_documents_qualify() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-    let space_id = storage
-        .create_space("work", None)
-        .expect("create work space");
-    let collection_id = storage
-        .create_collection(
-            space_id,
-            "api",
-            std::path::Path::new("/tmp/api"),
-            None,
-            None,
-        )
-        .expect("create collection");
-
-    storage
-        .upsert_document(collection_id, "a.rs", "a", "hash-a", "2026-03-01T10:00:00Z")
-        .expect("insert doc");
-
-    let reaped = storage.reap_documents(7).expect("reap docs");
-    assert!(reaped.is_empty());
 }
 
 #[test]
@@ -2001,98 +1249,6 @@ fn delete_chunks_for_document_returns_deleted_ids() {
         .get_chunks_for_document(doc_id)
         .expect("get chunks for doc");
     assert!(remaining.is_empty());
-}
-
-#[test]
-fn get_chunks_by_id_returns_requested_chunks() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-    let space_id = storage
-        .create_space("work", None)
-        .expect("create work space");
-    let collection_id = storage
-        .create_collection(
-            space_id,
-            "api",
-            std::path::Path::new("/tmp/api"),
-            None,
-            None,
-        )
-        .expect("create collection");
-    let doc_id = storage
-        .upsert_document(
-            collection_id,
-            "src/lib.rs",
-            "lib",
-            "hash-1",
-            "2026-03-01T10:00:00Z",
-        )
-        .expect("insert doc");
-
-    let inserts = vec![
-        super::ChunkInsert {
-            seq: 0,
-            offset: 0,
-            length: 100,
-            heading: None,
-            kind: FinalChunkKind::Section,
-        },
-        super::ChunkInsert {
-            seq: 1,
-            offset: 100,
-            length: 50,
-            heading: None,
-            kind: FinalChunkKind::Section,
-        },
-    ];
-    let inserted_ids = storage
-        .insert_chunks(doc_id, &inserts)
-        .expect("insert chunks");
-
-    let fetched = storage
-        .get_chunks(&[inserted_ids[1], inserted_ids[0]])
-        .expect("get chunks by id");
-    assert_eq!(fetched.len(), 2);
-    assert_eq!(fetched[0].id, inserted_ids[0]);
-    assert_eq!(fetched[1].id, inserted_ids[1]);
-}
-
-#[test]
-fn chunk_methods_missing_document_return_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let inserts = vec![super::ChunkInsert {
-        seq: 0,
-        offset: 0,
-        length: 10,
-        heading: None,
-        kind: FinalChunkKind::Section,
-    }];
-
-    let insert_err = storage
-        .insert_chunks(99999, &inserts)
-        .expect_err("insert missing doc should fail");
-    match KboltError::from(insert_err) {
-        KboltError::DocumentNotFound { path } => assert_eq!(path, "id=99999"),
-        other => panic!("unexpected insert error: {other}"),
-    }
-
-    let list_err = storage
-        .get_chunks_for_document(99999)
-        .expect_err("list missing doc should fail");
-    match KboltError::from(list_err) {
-        KboltError::DocumentNotFound { path } => assert_eq!(path, "id=99999"),
-        other => panic!("unexpected list error: {other}"),
-    }
-
-    let delete_err = storage
-        .delete_chunks_for_document(99999)
-        .expect_err("delete missing doc should fail");
-    match KboltError::from(delete_err) {
-        KboltError::DocumentNotFound { path } => assert_eq!(path, "id=99999"),
-        other => panic!("unexpected delete error: {other}"),
-    }
 }
 
 #[test]
@@ -2274,20 +1430,6 @@ fn list_embedding_models_in_space_returns_distinct_sorted_models() {
         .list_embedding_models_in_space(notes_space_id)
         .expect("list notes models");
     assert_eq!(notes_models, vec!["model-z".to_string()]);
-}
-
-#[test]
-fn list_embedding_models_in_space_missing_space_returns_not_found() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let err = storage
-        .list_embedding_models_in_space(99999)
-        .expect_err("missing space should fail");
-    match KboltError::from(err) {
-        KboltError::SpaceNotFound { name } => assert_eq!(name, "id=99999"),
-        other => panic!("unexpected error: {other}"),
-    }
 }
 
 #[test]
@@ -2889,36 +2031,6 @@ fn per_collection_count_methods_return_expected_values() {
             .expect("count embedded chunks"),
         1
     );
-}
-
-#[test]
-fn per_collection_count_methods_return_collection_not_found_for_missing_id() {
-    let tmp = tempdir().expect("create tempdir");
-    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
-
-    let err_docs = storage
-        .count_documents_in_collection(99999, false)
-        .expect_err("missing collection should fail");
-    match KboltError::from(err_docs) {
-        KboltError::CollectionNotFound { name } => assert_eq!(name, "id=99999"),
-        other => panic!("unexpected error: {other}"),
-    }
-
-    let err_chunks = storage
-        .count_chunks_in_collection(99999)
-        .expect_err("missing collection should fail");
-    match KboltError::from(err_chunks) {
-        KboltError::CollectionNotFound { name } => assert_eq!(name, "id=99999"),
-        other => panic!("unexpected error: {other}"),
-    }
-
-    let err_embedded = storage
-        .count_embedded_chunks_in_collection(99999)
-        .expect_err("missing collection should fail");
-    match KboltError::from(err_embedded) {
-        KboltError::CollectionNotFound { name } => assert_eq!(name, "id=99999"),
-        other => panic!("unexpected error: {other}"),
-    }
 }
 
 #[test]
