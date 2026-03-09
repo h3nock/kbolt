@@ -1656,15 +1656,14 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .map_err(|_| CoreError::poisoned("database"))?;
         let _collection_name = lookup_collection_name(&conn, collection_id)?;
         let active_only = i64::from(active_only);
-        let count: i64 = conn.query_row(
+        query_count(
+            &conn,
             "SELECT COUNT(*)
              FROM documents
              WHERE collection_id = ?1
                AND (?2 = 0 OR active = 1)",
             params![collection_id, active_only],
-            |row| row.get(0),
-        )?;
-        Ok(count as usize)
+        )
     }
 
     pub fn count_chunks_in_collection(&self, collection_id: i64) -> Result<usize> {
@@ -1674,15 +1673,14 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .map_err(|_| CoreError::poisoned("database"))?;
         let _collection_name = lookup_collection_name(&conn, collection_id)?;
 
-        let count: i64 = conn.query_row(
+        query_count(
+            &conn,
             "SELECT COUNT(*)
              FROM chunks c
              JOIN documents d ON d.id = c.doc_id
              WHERE d.collection_id = ?1",
             params![collection_id],
-            |row| row.get(0),
-        )?;
-        Ok(count as usize)
+        )
     }
 
     pub fn count_embedded_chunks_in_collection(&self, collection_id: i64) -> Result<usize> {
@@ -1692,16 +1690,15 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .map_err(|_| CoreError::poisoned("database"))?;
         let _collection_name = lookup_collection_name(&conn, collection_id)?;
 
-        let count: i64 = conn.query_row(
+        query_count(
+            &conn,
             "SELECT COUNT(DISTINCT e.chunk_id)
              FROM embeddings e
              JOIN chunks c ON c.id = e.chunk_id
              JOIN documents d ON d.id = c.doc_id
              WHERE d.collection_id = ?1",
             params![collection_id],
-            |row| row.get(0),
-        )?;
-        Ok(count as usize)
+        )
     }
 
     pub fn count_documents(&self, space_id: Option<i64>) -> Result<usize> {
@@ -1710,22 +1707,20 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .lock()
             .map_err(|_| CoreError::poisoned("database"))?;
 
-        let count: i64 = match space_id {
+        match space_id {
             Some(space_id) => {
                 let _space_name = lookup_space_name(&conn, space_id)?;
-                conn.query_row(
+                query_count(
+                    &conn,
                     "SELECT COUNT(*)
                      FROM documents d
                      JOIN collections c ON c.id = d.collection_id
                      WHERE c.space_id = ?1",
                     params![space_id],
-                    |row| row.get(0),
-                )?
+                )
             }
-            None => conn.query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))?,
-        };
-
-        Ok(count as usize)
+            None => query_count(&conn, "SELECT COUNT(*) FROM documents", []),
+        }
     }
 
     pub fn count_chunks(&self, space_id: Option<i64>) -> Result<usize> {
@@ -1734,23 +1729,21 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .lock()
             .map_err(|_| CoreError::poisoned("database"))?;
 
-        let count: i64 = match space_id {
+        match space_id {
             Some(space_id) => {
                 let _space_name = lookup_space_name(&conn, space_id)?;
-                conn.query_row(
+                query_count(
+                    &conn,
                     "SELECT COUNT(*)
                      FROM chunks c
                      JOIN documents d ON d.id = c.doc_id
                      JOIN collections col ON col.id = d.collection_id
                      WHERE col.space_id = ?1",
                     params![space_id],
-                    |row| row.get(0),
-                )?
+                )
             }
-            None => conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?,
-        };
-
-        Ok(count as usize)
+            None => query_count(&conn, "SELECT COUNT(*) FROM chunks", []),
+        }
     }
 
     pub fn count_embedded_chunks(&self, space_id: Option<i64>) -> Result<usize> {
@@ -1759,10 +1752,11 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .lock()
             .map_err(|_| CoreError::poisoned("database"))?;
 
-        let count: i64 = match space_id {
+        match space_id {
             Some(space_id) => {
                 let _space_name = lookup_space_name(&conn, space_id)?;
-                conn.query_row(
+                query_count(
+                    &conn,
                     "SELECT COUNT(DISTINCT e.chunk_id)
                      FROM embeddings e
                      JOIN chunks c ON c.id = e.chunk_id
@@ -1770,17 +1764,10 @@ CREATE TABLE IF NOT EXISTS embeddings (
                      JOIN collections col ON col.id = d.collection_id
                      WHERE col.space_id = ?1",
                     params![space_id],
-                    |row| row.get(0),
-                )?
+                )
             }
-            None => conn.query_row(
-                "SELECT COUNT(DISTINCT chunk_id) FROM embeddings",
-                [],
-                |row| row.get(0),
-            )?,
-        };
-
-        Ok(count as usize)
+            None => query_count(&conn, "SELECT COUNT(DISTINCT chunk_id) FROM embeddings", []),
+        }
     }
 
     pub fn disk_usage(&self) -> Result<DiskUsage> {
@@ -1942,6 +1929,11 @@ fn load_chunk_ids_for_doc(conn: &Connection, doc_id: i64) -> Result<Vec<i64>> {
     let rows = stmt.query_map(params![doc_id], |row| row.get::<_, i64>(0))?;
     let chunk_ids = rows.collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(chunk_ids)
+}
+
+fn query_count<P: rusqlite::Params>(conn: &Connection, sql: &str, params: P) -> Result<usize> {
+    let count: i64 = conn.query_row(sql, params, |row| row.get(0))?;
+    Ok(count as usize)
 }
 
 fn file_size_or_zero(path: &Path) -> Result<u64> {
