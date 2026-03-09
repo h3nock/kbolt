@@ -891,29 +891,6 @@ CREATE TABLE IF NOT EXISTS embeddings (
         Ok(docs)
     }
 
-    pub fn get_chunks_for_documents(&self, doc_ids: &[i64]) -> Result<Vec<ChunkRow>> {
-        if doc_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let conn = self
-            .db
-            .lock()
-            .map_err(|_| CoreError::poisoned("database"))?;
-
-        let placeholders = vec!["?"; doc_ids.len()].join(", ");
-        let sql = format!(
-            "SELECT id, doc_id, seq, offset, length, heading, kind
-             FROM chunks
-             WHERE doc_id IN ({placeholders})
-             ORDER BY doc_id ASC, seq ASC"
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(doc_ids.iter()), decode_chunk_row)?;
-        let chunks = rows.collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(chunks)
-    }
-
     pub fn update_document_metadata(&self, doc_id: i64, title: &str, modified: &str) -> Result<()> {
         let conn = self
             .db

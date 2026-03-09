@@ -502,18 +502,6 @@ impl Engine {
         let contextual_prefix = self.config.chunking.defaults.contextual_prefix;
 
         let mut chunks_by_doc: HashMap<i64, Vec<ChunkRow>> = HashMap::new();
-        if neighbor_window > 0 {
-            let candidate_doc_ids = candidates
-                .iter()
-                .map(|c| c.doc_id)
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
-            let all_chunks = self.storage.get_chunks_for_documents(&candidate_doc_ids)?;
-            for chunk in all_chunks {
-                chunks_by_doc.entry(chunk.doc_id).or_default().push(chunk);
-            }
-        }
 
         if apply_rerank && !candidates.is_empty() {
             let rerank_count = rerank_candidate_count(limit, candidates.len());
