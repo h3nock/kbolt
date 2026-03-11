@@ -1,6 +1,6 @@
 use kbolt_types::{
-    EvalCase, EvalModeReport, EvalQueryReport, EvalRunReport, SearchMode, SearchRequest,
-    SearchResult,
+    EvalCase, EvalModeFailure, EvalModeReport, EvalQueryReport, EvalRunReport, SearchMode,
+    SearchRequest, SearchResult,
 };
 use std::collections::HashSet;
 
@@ -14,14 +14,22 @@ impl Engine {
         let modes = self.eval_modes();
         let total_cases = dataset.cases.len();
         let mut reports = Vec::with_capacity(modes.len());
+        let mut failed_modes = Vec::new();
 
         for mode in modes {
-            reports.push(self.run_eval_mode(&dataset.cases, mode)?);
+            match self.run_eval_mode(&dataset.cases, mode.clone()) {
+                Ok(report) => reports.push(report),
+                Err(err) => failed_modes.push(EvalModeFailure {
+                    mode,
+                    error: err.to_string(),
+                }),
+            }
         }
 
         Ok(EvalRunReport {
             total_cases,
             modes: reports,
+            failed_modes,
         })
     }
 
@@ -171,6 +179,14 @@ mod tests {
         }
     }
 
+    struct FailingExpander;
+
+    impl Expander for FailingExpander {
+        fn expand(&self, _query: &str) -> crate::Result<Vec<String>> {
+            Err(KboltError::Inference("expander unavailable".to_string()).into())
+        }
+    }
+
     #[test]
     fn run_eval_reports_keyword_auto_and_deep_without_embedder() {
         let root = tempdir().expect("create temp root");
@@ -279,6 +295,54 @@ expected_paths = ["rust/guides/traits.md"]
         assert_eq!(semantic.queries[0].first_relevant_rank, Some(1));
         assert_eq!(semantic.recall_at_5, 1.0);
         assert_eq!(semantic.mrr_at_10, 1.0);
+    }
+
+    #[test]
+    fn run_eval_keeps_successful_modes_when_later_mode_fails() {
+        let root = tempdir().expect("create temp root");
+        let collection_dir = seed_collection(root.path(), "rust", "guides/traits.md", TRAITS_DOC);
+        let engine = test_engine(None, Some(Arc::new(FailingExpander)));
+        seed_eval_file(
+            &engine,
+            r#"
+[[cases]]
+query = "trait object generic"
+space = "default"
+collections = ["rust"]
+expected_paths = ["rust/guides/traits.md"]
+"#,
+        );
+
+        engine
+            .add_collection(AddCollectionRequest {
+                path: collection_dir,
+                space: Some("default".to_string()),
+                name: Some("rust".to_string()),
+                description: None,
+                extensions: None,
+                no_index: true,
+            })
+            .expect("add collection");
+        engine
+            .update(UpdateOptions {
+                space: Some("default".to_string()),
+                collections: vec!["rust".to_string()],
+                no_embed: true,
+                dry_run: false,
+                verbose: false,
+            })
+            .expect("update collection");
+
+        let report = engine.run_eval().expect("run eval");
+
+        assert!(report
+            .modes
+            .iter()
+            .any(|mode| mode.mode == SearchMode::Keyword));
+        assert!(report
+            .failed_modes
+            .iter()
+            .any(|mode| mode.mode == SearchMode::Deep && mode.error.contains("expander unavailable")));
     }
 
     fn test_engine(

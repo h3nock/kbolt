@@ -13,7 +13,9 @@ pub use document::{
     OmitReason, OmittedFile,
 };
 pub use error::{KboltError, Result};
-pub use eval::{EvalCase, EvalDataset, EvalModeReport, EvalQueryReport, EvalRunReport};
+pub use eval::{
+    EvalCase, EvalDataset, EvalModeFailure, EvalModeReport, EvalQueryReport, EvalRunReport,
+};
 pub use indexing::{FileError, UpdateDecision, UpdateDecisionKind, UpdateOptions, UpdateReport};
 pub use model::PullReport;
 pub use schedule::{

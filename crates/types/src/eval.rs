@@ -21,6 +21,7 @@ pub struct EvalCase {
 pub struct EvalRunReport {
     pub total_cases: usize,
     pub modes: Vec<EvalModeReport>,
+    pub failed_modes: Vec<EvalModeFailure>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -31,6 +32,12 @@ pub struct EvalModeReport {
     pub latency_p50_ms: u64,
     pub latency_p95_ms: u64,
     pub queries: Vec<EvalQueryReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvalModeFailure {
+    pub mode: SearchMode,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -49,7 +56,9 @@ pub struct EvalQueryReport {
 mod tests {
     use serde_json::json;
 
-    use super::{EvalCase, EvalDataset, EvalModeReport, EvalQueryReport, EvalRunReport};
+    use super::{
+        EvalCase, EvalDataset, EvalModeFailure, EvalModeReport, EvalQueryReport, EvalRunReport,
+    };
     use crate::SearchMode;
 
     #[test]
@@ -100,6 +109,10 @@ mod tests {
                     elapsed_ms: 3,
                 }],
             }],
+            failed_modes: vec![EvalModeFailure {
+                mode: SearchMode::Deep,
+                error: "model not available".to_string(),
+            }],
         })
         .expect("serialize eval report");
 
@@ -126,6 +139,12 @@ mod tests {
                                 "elapsed_ms": 3
                             }
                         ]
+                    }
+                ],
+                "failed_modes": [
+                    {
+                        "mode": "Deep",
+                        "error": "model not available"
                     }
                 ]
             })

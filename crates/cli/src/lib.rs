@@ -1151,6 +1151,9 @@ fn format_eval_run_report(report: &EvalRunReport) -> String {
             mode.latency_p95_ms
         ));
     }
+    for failure in &report.failed_modes {
+        lines.push(format!("- {}: failed ({})", format_eval_mode_name(&failure.mode), failure.error));
+    }
 
     let findings = report
         .modes
@@ -1193,7 +1196,11 @@ fn format_eval_run_report(report: &EvalRunReport) -> String {
 }
 
 fn format_eval_mode(report: &EvalModeReport) -> &'static str {
-    match report.mode {
+    format_eval_mode_name(&report.mode)
+}
+
+fn format_eval_mode_name(mode: &SearchMode) -> &'static str {
+    match mode {
         SearchMode::Keyword => "keyword",
         SearchMode::Auto => "auto",
         SearchMode::Deep => "deep",
@@ -1357,10 +1364,15 @@ mod tests {
                     }],
                 },
             ],
+            failed_modes: vec![kbolt_types::EvalModeFailure {
+                mode: SearchMode::Semantic,
+                error: "model not available".to_string(),
+            }],
         });
 
         assert!(output.contains("- keyword: recall@5 1.000, mrr@10 1.000, p50 2ms, p95 3ms"));
         assert!(output.contains("- deep: recall@5 0.000, mrr@10 0.000, p50 8ms, p95 12ms"));
+        assert!(output.contains("- semantic: failed (model not available)"));
         assert!(output.contains("queries needing attention:"));
         assert!(output.contains("[deep] trait object generic | first relevant: none"));
     }
