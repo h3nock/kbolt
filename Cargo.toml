@@ -13,7 +13,7 @@ fs2 = "0.4"
 hf-hub = "0.4"
 httpdate = "1.0"
 ignore = "0.4"
-llama-cpp-2 = { git = "https://github.com/h3nock/llama-cpp-rs.git", branch = "main" }
+llama-cpp-2 = { path = "vendor/llama-cpp-2" }
 ort = "2.0.0-rc.12"
 pulldown-cmark = "0.13"
 rusqlite = "0.33"
