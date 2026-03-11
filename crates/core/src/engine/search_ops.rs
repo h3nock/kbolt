@@ -177,8 +177,10 @@ impl Engine {
             .into());
         };
 
-        let vectors =
-            embedder.embed_batch(crate::models::EmbeddingInputKind::Query, &[query.to_string()])?;
+        let vectors = embedder.embed_batch(
+            crate::models::EmbeddingInputKind::Query,
+            &[query.to_string()],
+        )?;
         if vectors.len() != 1 || vectors[0].is_empty() {
             return Err(KboltError::Inference(
                 "embedder must return one non-empty query vector".to_string(),

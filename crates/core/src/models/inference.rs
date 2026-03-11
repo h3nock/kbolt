@@ -967,7 +967,10 @@ mod tests {
             .expect("embedder should exist");
 
         let vectors = embedder
-            .embed_batch(EmbeddingInputKind::Document, &["a".to_string(), "b".to_string()])
+            .embed_batch(
+                EmbeddingInputKind::Document,
+                &["a".to_string(), "b".to_string()],
+            )
             .expect("embed");
         assert_eq!(vectors, vec![vec![0.1, 0.2], vec![0.3, 0.4]]);
     }
@@ -987,7 +990,10 @@ mod tests {
             .expect("embedder should exist");
 
         let vectors = embedder
-            .embed_batch(EmbeddingInputKind::Document, &["a".to_string(), "b".to_string()])
+            .embed_batch(
+                EmbeddingInputKind::Document,
+                &["a".to_string(), "b".to_string()],
+            )
             .expect("embed");
         assert_eq!(vectors, vec![vec![0.51, 0.52], vec![0.61, 0.62]]);
     }
@@ -1026,7 +1032,10 @@ mod tests {
             .expect("embedder should exist");
 
         let vectors = embedder
-            .embed_batch(EmbeddingInputKind::Document, &["a".to_string(), "b".to_string()])
+            .embed_batch(
+                EmbeddingInputKind::Document,
+                &["a".to_string(), "b".to_string()],
+            )
             .expect("embed");
         assert_eq!(vectors, vec![vec![0.11, 0.22], vec![0.33, 0.44]]);
     }

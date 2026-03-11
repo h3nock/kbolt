@@ -1152,7 +1152,11 @@ fn format_eval_run_report(report: &EvalRunReport) -> String {
         ));
     }
     for failure in &report.failed_modes {
-        lines.push(format!("- {}: failed ({})", format_eval_mode_name(&failure.mode), failure.error));
+        lines.push(format!(
+            "- {}: failed ({})",
+            format_eval_mode_name(&failure.mode),
+            failure.error
+        ));
     }
 
     let findings = report

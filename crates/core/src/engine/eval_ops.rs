@@ -343,10 +343,9 @@ expected_paths = ["rust/guides/traits.md"]
             .modes
             .iter()
             .any(|mode| mode.mode == SearchMode::Keyword));
-        assert!(report
-            .failed_modes
-            .iter()
-            .any(|mode| mode.mode == SearchMode::Deep && mode.error.contains("expander unavailable")));
+        assert!(report.failed_modes.iter().any(
+            |mode| mode.mode == SearchMode::Deep && mode.error.contains("expander unavailable")
+        ));
     }
 
     fn test_engine(
