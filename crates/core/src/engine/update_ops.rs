@@ -186,7 +186,8 @@ impl Engine {
                 break;
             }
 
-            let vectors = embedder.embed_batch(&texts)?;
+            let vectors =
+                embedder.embed_batch(crate::models::EmbeddingInputKind::Document, &texts)?;
             if vectors.len() != chunk_ids.len() {
                 return Err(KboltError::Inference(format!(
                     "embedder returned {} vectors for {} chunks",
@@ -227,7 +228,7 @@ impl Engine {
             .iter()
             .map(|embedding| embedding.text.clone())
             .collect::<Vec<_>>();
-        let vectors = embedder.embed_batch(&texts)?;
+        let vectors = embedder.embed_batch(crate::models::EmbeddingInputKind::Document, &texts)?;
         if vectors.len() != pending.len() {
             return Err(KboltError::Inference(format!(
                 "embedder returned {} vectors for {} buffered chunks",

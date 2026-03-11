@@ -8,7 +8,7 @@ use ort::value::Tensor;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams, TruncationStrategy};
 
 use crate::models::artifacts::{resolve_file_with_extension, resolve_tokenizer_file};
-use crate::models::Embedder;
+use crate::models::{Embedder, EmbeddingInputKind};
 use crate::Result;
 
 pub(super) struct LocalOnnxEmbedder {
@@ -17,7 +17,7 @@ pub(super) struct LocalOnnxEmbedder {
 }
 
 impl Embedder for LocalOnnxEmbedder {
-    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    fn embed_batch(&self, _kind: EmbeddingInputKind, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         embed_with_local_onnx(self, texts)
     }
 }

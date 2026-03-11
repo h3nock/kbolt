@@ -46,7 +46,7 @@ const MODEL_DIRNAME_RERANKER: &str = "reranker";
 const MODEL_DIRNAME_EXPANDER: &str = "expander";
 const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";
 
-pub(crate) use embedder::Embedder;
+pub(crate) use embedder::{Embedder, EmbeddingInputKind};
 pub(crate) use expander::Expander;
 #[cfg(test)]
 pub(crate) use inference::build_embedder;

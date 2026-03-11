@@ -18,7 +18,9 @@ use crate::models::local_llama::{
 };
 use crate::models::local_onnx::build_local_onnx_embedder;
 use crate::models::local_reranker::LocalCrossEncoderReranker;
-use crate::models::{resolve_model_artifact, Embedder, Expander, ModelRole, Reranker};
+use crate::models::{
+    resolve_model_artifact, Embedder, EmbeddingInputKind, Expander, ModelRole, Reranker,
+};
 use crate::Result;
 
 #[cfg(test)]
@@ -386,15 +388,15 @@ fn build_completion_client_for_role(
 }
 
 impl Embedder for HttpApiEmbedder {
-    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    fn embed_batch(&self, _kind: EmbeddingInputKind, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         embed_with_http_api(&self.client, &self.model, self.batch_size, texts)
     }
 }
 
 impl Embedder for LazyArc<dyn Embedder> {
-    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    fn embed_batch(&self, kind: EmbeddingInputKind, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let embedder = self.get()?;
-        embedder.embed_batch(texts)
+        embedder.embed_batch(kind, texts)
     }
 }
 
@@ -965,7 +967,7 @@ mod tests {
             .expect("embedder should exist");
 
         let vectors = embedder
-            .embed_batch(&["a".to_string(), "b".to_string()])
+            .embed_batch(EmbeddingInputKind::Document, &["a".to_string(), "b".to_string()])
             .expect("embed");
         assert_eq!(vectors, vec![vec![0.1, 0.2], vec![0.3, 0.4]]);
     }
@@ -985,7 +987,7 @@ mod tests {
             .expect("embedder should exist");
 
         let vectors = embedder
-            .embed_batch(&["a".to_string(), "b".to_string()])
+            .embed_batch(EmbeddingInputKind::Document, &["a".to_string(), "b".to_string()])
             .expect("embed");
         assert_eq!(vectors, vec![vec![0.51, 0.52], vec![0.61, 0.62]]);
     }
@@ -1003,7 +1005,9 @@ mod tests {
             .expect("build embedder")
             .expect("embedder should exist");
 
-        let vectors = embedder.embed_batch(&["a".to_string()]).expect("embed");
+        let vectors = embedder
+            .embed_batch(EmbeddingInputKind::Document, &["a".to_string()])
+            .expect("embed");
         assert_eq!(vectors, vec![vec![0.15, 0.25]]);
     }
 
@@ -1022,7 +1026,7 @@ mod tests {
             .expect("embedder should exist");
 
         let vectors = embedder
-            .embed_batch(&["a".to_string(), "b".to_string()])
+            .embed_batch(EmbeddingInputKind::Document, &["a".to_string(), "b".to_string()])
             .expect("embed");
         assert_eq!(vectors, vec![vec![0.11, 0.22], vec![0.33, 0.44]]);
     }
@@ -1045,7 +1049,7 @@ mod tests {
 
         std::env::remove_var("KBOLT_TEST_MISSING_API_KEY");
         let err = embedder
-            .embed_batch(&["hello".to_string()])
+            .embed_batch(EmbeddingInputKind::Document, &["hello".to_string()])
             .expect_err("missing key should fail");
         assert!(err
             .to_string()
@@ -1082,7 +1086,7 @@ mod tests {
             .expect("build embedder")
             .expect("embedder should exist");
         let err = embedder
-            .embed_batch(&["a".to_string()])
+            .embed_batch(EmbeddingInputKind::Document, &["a".to_string()])
             .expect_err("missing local model should fail on first use");
         assert!(err.to_string().contains("model not available"));
     }
@@ -1109,7 +1113,7 @@ mod tests {
             .expect("build embedder")
             .expect("embedder should exist");
         let err = embedder
-            .embed_batch(&["a".to_string()])
+            .embed_batch(EmbeddingInputKind::Document, &["a".to_string()])
             .expect_err("missing local model should fail on first use");
         assert!(err.to_string().contains("model not available"));
     }
@@ -1365,7 +1369,7 @@ mod tests {
             .expect("embedder should exist");
 
         let vectors = embedder
-            .embed_batch(&["hello".to_string()])
+            .embed_batch(EmbeddingInputKind::Document, &["hello".to_string()])
             .expect("embed should retry then succeed");
         assert_eq!(vectors, vec![vec![0.1, 0.2]]);
     }

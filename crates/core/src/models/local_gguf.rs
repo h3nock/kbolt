@@ -9,7 +9,7 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::token::LlamaToken;
 
-use crate::models::Embedder;
+use crate::models::{Embedder, EmbeddingInputKind};
 use crate::Result;
 
 use super::llama_backend;
@@ -23,7 +23,7 @@ pub(super) struct LocalGgufEmbedder {
 }
 
 impl Embedder for LocalGgufEmbedder {
-    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    fn embed_batch(&self, _kind: EmbeddingInputKind, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         embed_with_local_gguf(self, texts)
     }
 }

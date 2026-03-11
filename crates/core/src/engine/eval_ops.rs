@@ -158,7 +158,11 @@ mod tests {
     struct DeterministicEmbedder;
 
     impl Embedder for DeterministicEmbedder {
-        fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
+        fn embed_batch(
+            &self,
+            _kind: crate::models::EmbeddingInputKind,
+            texts: &[String],
+        ) -> crate::Result<Vec<Vec<f32>>> {
             Ok(texts
                 .iter()
                 .map(|text| {

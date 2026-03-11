@@ -177,7 +177,8 @@ impl Engine {
             .into());
         };
 
-        let vectors = embedder.embed_batch(&[query.to_string()])?;
+        let vectors =
+            embedder.embed_batch(crate::models::EmbeddingInputKind::Query, &[query.to_string()])?;
         if vectors.len() != 1 || vectors[0].is_empty() {
             return Err(KboltError::Inference(
                 "embedder must return one non-empty query vector".to_string(),
@@ -322,7 +323,7 @@ impl Engine {
         }
         pipeline.expansion = true;
         let variant_vectors = if let Some(embedder) = self.embedder.as_ref() {
-            match embedder.embed_batch(&variants) {
+            match embedder.embed_batch(crate::models::EmbeddingInputKind::Query, &variants) {
                 Ok(vectors) => {
                     if vectors.len() != variants.len() {
                         return Err(KboltError::Inference(format!(
