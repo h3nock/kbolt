@@ -27,36 +27,8 @@ fn load_creates_default_config_and_directories() {
     assert_eq!(config.models.expander.provider, ModelProvider::HuggingFace);
     assert_eq!(config.models.expander.id, DEFAULT_EXPANDER_MODEL);
     assert_eq!(config.models.expander.revision, None);
-    assert_eq!(
-        config.embeddings,
-        Some(EmbeddingConfig::LocalGguf {
-            model_file: Some(DEFAULT_LOCAL_GGUF_EMBED_MODEL_FILE.to_string()),
-            batch_size: DEFAULT_LOCAL_GGUF_EMBEDDING_BATCH_SIZE,
-            n_threads: None,
-            n_threads_batch: None,
-        })
-    );
-    assert_eq!(
-        config.inference,
-        InferenceConfig {
-            reranker: Some(TextInferenceConfig {
-                provider: TextInferenceProvider::LocalLlama {
-                    model_file: Some(DEFAULT_LOCAL_RERANKER_MODEL_FILE.to_string()),
-                    max_tokens: DEFAULT_LOCAL_INFERENCE_MAX_TOKENS,
-                    n_ctx: DEFAULT_LOCAL_INFERENCE_N_CTX,
-                    n_gpu_layers: None,
-                },
-            }),
-            expander: Some(TextInferenceConfig {
-                provider: TextInferenceProvider::LocalLlama {
-                    model_file: Some(DEFAULT_LOCAL_EXPANDER_MODEL_FILE.to_string()),
-                    max_tokens: DEFAULT_LOCAL_EXPANDER_MAX_TOKENS,
-                    n_ctx: DEFAULT_LOCAL_INFERENCE_N_CTX,
-                    n_gpu_layers: None,
-                },
-            }),
-        }
-    );
+    assert_eq!(config.embeddings, None);
+    assert_eq!(config.inference, InferenceConfig::default());
     assert_eq!(config.reaping.days, DEFAULT_REAP_DAYS);
     assert_eq!(config.chunking.defaults.target_tokens, 450);
     assert_eq!(config.chunking.defaults.soft_max_tokens, 550);
