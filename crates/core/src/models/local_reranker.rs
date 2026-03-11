@@ -12,6 +12,9 @@ use crate::Result;
 
 use super::llama_backend;
 
+// This adapter currently supports binary rank-pooled reranker models where the
+// rank output is either a single relevance score or a two-value [no, yes]
+// score pair. The default Qwen3-Reranker GGUF follows the latter convention.
 pub(super) struct LocalCrossEncoderReranker {
     model: Arc<LlamaModel>,
     chat_template: LlamaChatTemplate,
@@ -128,20 +131,21 @@ fn score_docs(model: &LlamaModel, n_ctx: u32, tokenized: &[Vec<LlamaToken>]) -> 
             KboltError::Inference(format!("reranker embedding read failed: {err}"))
         })?;
 
-        let score = extract_rank_pooling_score(&embeddings)?;
+        let score = extract_binary_rank_relevance_score(&embeddings)?;
         scores.push(score);
     }
 
     Ok(scores)
 }
 
-fn extract_rank_pooling_score(embeddings: &[f32]) -> Result<f32> {
+fn extract_binary_rank_relevance_score(embeddings: &[f32]) -> Result<f32> {
     match embeddings.len() {
         0 => Err(KboltError::Inference("reranker returned empty embeddings".to_string()).into()),
         1 => Ok(embeddings[0]),
+        // Qwen3-Reranker rank pooling yields [logit_no, logit_yes].
         2 => Ok(embeddings[1]),
         len => Err(KboltError::Inference(format!(
-            "reranker returned unsupported rank output shape with {len} values"
+            "local reranker supports only binary rank outputs with 1 or 2 values, got {len}"
         ))
         .into()),
     }
@@ -160,7 +164,7 @@ fn resolve_reranker_context_size(configured_n_ctx: u32, required_tokens: u32) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_rank_pooling_score, resolve_reranker_context_size};
+    use super::{extract_binary_rank_relevance_score, resolve_reranker_context_size};
 
     #[test]
     fn reranker_context_size_respects_configured_ceiling() {
@@ -172,9 +176,15 @@ mod tests {
 
     #[test]
     fn reranker_rank_pooling_score_uses_supported_shapes_only() {
-        assert_eq!(extract_rank_pooling_score(&[0.25]).expect("single"), 0.25);
-        assert_eq!(extract_rank_pooling_score(&[0.1, 0.9]).expect("pair"), 0.9);
-        assert!(extract_rank_pooling_score(&[]).is_err());
-        assert!(extract_rank_pooling_score(&[0.1, 0.2, 0.3]).is_err());
+        assert_eq!(
+            extract_binary_rank_relevance_score(&[0.25]).expect("single"),
+            0.25
+        );
+        assert_eq!(
+            extract_binary_rank_relevance_score(&[0.1, 0.9]).expect("pair"),
+            0.9
+        );
+        assert!(extract_binary_rank_relevance_score(&[]).is_err());
+        assert!(extract_binary_rank_relevance_score(&[0.1, 0.2, 0.3]).is_err());
     }
 }
