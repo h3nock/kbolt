@@ -82,6 +82,14 @@ impl crate::models::Reranker for DeterministicReranker {
     }
 }
 
+struct ConstantReranker(f32);
+
+impl crate::models::Reranker for ConstantReranker {
+    fn rerank(&self, _query: &str, docs: &[String]) -> crate::Result<Vec<f32>> {
+        Ok(vec![self.0; docs.len()])
+    }
+}
+
 #[derive(Default)]
 struct DeterministicExpander;
 
@@ -170,6 +178,20 @@ fn test_engine_with_search_models(
     reranker: Option<Arc<dyn crate::models::Reranker>>,
     expander: Option<Arc<dyn crate::models::Expander>>,
 ) -> Engine {
+    test_engine_with_search_models_and_ranking(
+        embedder,
+        reranker,
+        expander,
+        RankingConfig::default(),
+    )
+}
+
+fn test_engine_with_search_models_and_ranking(
+    embedder: Option<Arc<dyn crate::models::Embedder>>,
+    reranker: Option<Arc<dyn crate::models::Reranker>>,
+    expander: Option<Arc<dyn crate::models::Expander>>,
+    ranking: RankingConfig,
+) -> Engine {
     let root = tempdir().expect("create temp root");
     let root_path = root.path().to_path_buf();
     std::mem::forget(root);
@@ -201,7 +223,7 @@ fn test_engine_with_search_models(
         inference: InferenceConfig::default(),
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
-        ranking: RankingConfig::default(),
+        ranking,
     };
     Engine::from_parts_with_models(storage, config, embedder, reranker, expander)
 }
@@ -2414,6 +2436,81 @@ fn search_deep_mode_reports_rerank_unavailable_when_model_is_missing() {
         let first = &response.results[0];
         let signals = first.signals.as_ref().expect("debug signals");
         assert!(signals.reranker.is_none());
+    });
+}
+
+#[test]
+fn search_auto_mode_keeps_unreranked_tail_below_reranked_pool() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_search_models_and_ranking(
+            Some(Arc::new(DeterministicEmbedder)),
+            Some(Arc::new(ConstantReranker(0.05))),
+            None,
+            RankingConfig::default(),
+        );
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        for index in 0..21 {
+            write_text_file(
+                &work_path.join(format!("doc-{index:02}.md")),
+                &format!("shared token document {index}\n"),
+            );
+        }
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let response = engine
+            .search(SearchRequest {
+                query: "shared token".to_string(),
+                mode: SearchMode::Auto,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 21,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: true,
+            })
+            .expect("run auto search");
+
+        assert_eq!(response.results.len(), 21);
+
+        let reranked_prefix_len = response
+            .results
+            .iter()
+            .take_while(|result| {
+                result
+                    .signals
+                    .as_ref()
+                    .expect("debug signals")
+                    .reranker
+                    .is_some()
+            })
+            .count();
+
+        assert_eq!(reranked_prefix_len, 20);
+        assert!(
+            response.results[reranked_prefix_len..]
+                .iter()
+                .all(|result| {
+                    result
+                        .signals
+                        .as_ref()
+                        .expect("debug signals")
+                        .reranker
+                        .is_none()
+                }),
+            "expected all non-reranked candidates after the reranked pool"
+        );
+        assert!(
+            response.results[19].score > response.results[20].score,
+            "expected untouched tail candidate to score below reranked pool"
+        );
     });
 }
 

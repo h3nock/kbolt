@@ -598,12 +598,7 @@ impl Engine {
                 .into_iter()
                 .zip(raw_scores.into_iter())
                 .collect::<HashMap<_, _>>();
-            for candidate in &mut candidates {
-                if let Some(reranker_score) = reranker_scores.get(&candidate.chunk_id).copied() {
-                    candidate.reranker = Some(reranker_score);
-                    candidate.final_score = reranker_score;
-                }
-            }
+            apply_reranker_scores(&mut candidates, &reranker_scores);
         }
 
         finalize_search_results(
@@ -666,6 +661,31 @@ fn build_rerank_input(
         candidate.heading.as_deref(),
         contextual_prefix,
     )))
+}
+
+fn apply_reranker_scores(
+    candidates: &mut [PendingSearchCandidate],
+    reranker_scores: &HashMap<i64, f32>,
+) {
+    if reranker_scores.is_empty() {
+        return;
+    }
+
+    let mut fallback_score = reranker_scores
+        .values()
+        .copied()
+        .fold(f32::INFINITY, f32::min)
+        .next_down();
+
+    for candidate in candidates {
+        if let Some(reranker_score) = reranker_scores.get(&candidate.chunk_id).copied() {
+            candidate.reranker = Some(reranker_score);
+            candidate.final_score = reranker_score;
+        } else {
+            candidate.final_score = fallback_score;
+            fallback_score = fallback_score.next_down();
+        }
+    }
 }
 
 fn finalize_search_results(
