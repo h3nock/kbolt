@@ -119,9 +119,10 @@ fn embed_with_local_gguf(embedder: &LocalGgufEmbedder, texts: &[String]) -> Resu
 
 fn tokenize_embedding_text(model: &LlamaModel, text: &str) -> Result<Vec<LlamaToken>> {
     let input = if text.is_empty() { " " } else { text };
-    let tokens = model
+    let mut tokens = model
         .str_to_token(input, AddBos::Always)
         .map_err(|err| KboltError::Inference(format!("local gguf tokenization failed: {err}")))?;
+    truncate_embedding_tokens(&mut tokens);
 
     if tokens.is_empty() {
         return Err(
@@ -130,4 +131,27 @@ fn tokenize_embedding_text(model: &LlamaModel, text: &str) -> Result<Vec<LlamaTo
     }
 
     Ok(tokens)
+}
+
+fn truncate_embedding_tokens(tokens: &mut Vec<LlamaToken>) {
+    if tokens.len() > EMBED_CTX_SIZE as usize {
+        tokens.truncate(EMBED_CTX_SIZE as usize);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{truncate_embedding_tokens, EMBED_CTX_SIZE};
+    use llama_cpp_2::token::LlamaToken;
+
+    #[test]
+    fn embedding_tokens_are_truncated_to_embed_context_size() {
+        let mut tokens = (0..(EMBED_CTX_SIZE as usize + 25))
+            .map(|token| LlamaToken::new(token as i32))
+            .collect::<Vec<_>>();
+
+        truncate_embedding_tokens(&mut tokens);
+
+        assert_eq!(tokens.len(), EMBED_CTX_SIZE as usize);
+    }
 }
