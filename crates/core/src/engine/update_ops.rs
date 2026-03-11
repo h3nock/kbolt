@@ -41,6 +41,7 @@ impl Engine {
 
         let mut fts_dirty_by_space: HashMap<String, HashSet<i64>> = HashMap::new();
         let mut pending_embeddings = Vec::new();
+        let mut failed_embedding_chunk_ids = HashSet::new();
         for target in &targets {
             self.update_collection_target(
                 target,
@@ -48,11 +49,16 @@ impl Engine {
                 &mut report,
                 &mut fts_dirty_by_space,
                 &mut pending_embeddings,
+                &mut failed_embedding_chunk_ids,
             )?;
         }
 
         if !options.dry_run {
-            self.flush_buffered_embeddings(&mut pending_embeddings, &mut report)?;
+            self.flush_buffered_embeddings(
+                &mut pending_embeddings,
+                &mut failed_embedding_chunk_ids,
+                &mut report,
+            )?;
 
             for (space, doc_ids) in fts_dirty_by_space {
                 if doc_ids.is_empty() {
@@ -65,7 +71,7 @@ impl Engine {
                 self.storage.batch_clear_fts_dirty(&ids)?;
             }
 
-            self.embed_pending_chunks(&options, &mut report)?;
+            self.embed_pending_chunks(&options, &mut failed_embedding_chunk_ids, &mut report)?;
 
             let reaped = self
                 .storage
@@ -138,6 +144,7 @@ impl Engine {
     fn embed_pending_chunks(
         &self,
         options: &UpdateOptions,
+        failed_chunk_ids: &mut HashSet<i64>,
         report: &mut UpdateReport,
     ) -> Result<()> {
         if options.no_embed || options.dry_run {
@@ -155,10 +162,12 @@ impl Engine {
                 break;
             }
 
-            let mut chunk_ids = Vec::new();
-            let mut spaces = Vec::new();
-            let mut texts = Vec::new();
+            let mut pending = Vec::new();
             for record in backlog {
+                if failed_chunk_ids.contains(&record.chunk_id) {
+                    continue;
+                }
+
                 let full_path = record.collection_path.join(&record.doc_path);
                 let bytes = match std::fs::read(&full_path) {
                     Ok(bytes) => bytes,
@@ -177,33 +186,24 @@ impl Engine {
                     text = " ".to_string();
                 }
 
-                chunk_ids.push(record.chunk_id);
-                spaces.push(record.space_name);
-                texts.push(text);
+                pending.push(PendingChunkEmbedding {
+                    chunk_id: record.chunk_id,
+                    space_name: record.space_name,
+                    path: full_path,
+                    text,
+                });
             }
 
-            if chunk_ids.is_empty() {
+            if pending.is_empty() {
                 break;
             }
 
-            let vectors =
-                embedder.embed_batch(crate::models::EmbeddingInputKind::Document, &texts)?;
-            if vectors.len() != chunk_ids.len() {
-                return Err(KboltError::Inference(format!(
-                    "embedder returned {} vectors for {} chunks",
-                    vectors.len(),
-                    chunk_ids.len()
-                ))
-                .into());
+            let result =
+                self.embed_pending_batch_with_partial_failures(embedder.as_ref(), pending, report)?;
+            failed_chunk_ids.extend(result.failed_chunk_ids);
+            if !result.embeddings.is_empty() {
+                self.store_chunk_embeddings(model, result.embeddings, report)?;
             }
-
-            let embeddings = chunk_ids
-                .into_iter()
-                .zip(spaces.into_iter())
-                .zip(vectors.into_iter())
-                .map(|((chunk_id, space_name), vector)| (chunk_id, space_name, vector))
-                .collect::<Vec<_>>();
-            self.store_chunk_embeddings(model, embeddings, report)?;
         }
 
         Ok(())
@@ -211,7 +211,8 @@ impl Engine {
 
     fn flush_buffered_embeddings(
         &self,
-        pending_embeddings: &mut Vec<BufferedChunkEmbedding>,
+        pending_embeddings: &mut Vec<PendingChunkEmbedding>,
+        failed_chunk_ids: &mut HashSet<i64>,
         report: &mut UpdateReport,
     ) -> Result<()> {
         if pending_embeddings.is_empty() {
@@ -224,26 +225,87 @@ impl Engine {
         };
 
         let pending = std::mem::take(pending_embeddings);
+        let result =
+            self.embed_pending_batch_with_partial_failures(embedder.as_ref(), pending, report)?;
+        failed_chunk_ids.extend(result.failed_chunk_ids);
+        if result.embeddings.is_empty() {
+            return Ok(());
+        }
+
+        self.store_chunk_embeddings(self.embedding_model_key(), result.embeddings, report)
+    }
+
+    fn embed_pending_batch_with_partial_failures(
+        &self,
+        embedder: &dyn crate::models::Embedder,
+        pending: Vec<PendingChunkEmbedding>,
+        report: &mut UpdateReport,
+    ) -> Result<EmbeddedPendingBatch> {
+        if pending.is_empty() {
+            return Ok(EmbeddedPendingBatch::default());
+        }
+
         let texts = pending
             .iter()
             .map(|embedding| embedding.text.clone())
             .collect::<Vec<_>>();
-        let vectors = embedder.embed_batch(crate::models::EmbeddingInputKind::Document, &texts)?;
-        if vectors.len() != pending.len() {
-            return Err(KboltError::Inference(format!(
-                "embedder returned {} vectors for {} buffered chunks",
-                vectors.len(),
-                pending.len()
-            ))
-            .into());
+        match embedder.embed_batch(crate::models::EmbeddingInputKind::Document, &texts) {
+            Ok(vectors) => {
+                if let Some(detail) = invalid_pending_embedding_batch_detail(&pending, &vectors) {
+                    return self.split_pending_embedding_batch(embedder, pending, report, detail);
+                }
+
+                let embeddings = pending
+                    .into_iter()
+                    .zip(vectors)
+                    .map(|(embedding, vector)| (embedding.chunk_id, embedding.space_name, vector))
+                    .collect::<Vec<_>>();
+                Ok(EmbeddedPendingBatch {
+                    embeddings,
+                    failed_chunk_ids: Vec::new(),
+                })
+            }
+            Err(err) => {
+                self.split_pending_embedding_batch(embedder, pending, report, err.to_string())
+            }
+        }
+    }
+
+    fn split_pending_embedding_batch(
+        &self,
+        embedder: &dyn crate::models::Embedder,
+        pending: Vec<PendingChunkEmbedding>,
+        report: &mut UpdateReport,
+        detail: String,
+    ) -> Result<EmbeddedPendingBatch> {
+        if pending.len() == 1 {
+            let embedding = pending
+                .into_iter()
+                .next()
+                .expect("single pending embedding should exist");
+            report.errors.push(file_error(
+                Some(embedding.path),
+                format!("embed failed: {detail}"),
+            ));
+            return Ok(EmbeddedPendingBatch {
+                embeddings: Vec::new(),
+                failed_chunk_ids: vec![embedding.chunk_id],
+            });
         }
 
-        let embeddings = pending
-            .into_iter()
-            .zip(vectors.into_iter())
-            .map(|(embedding, vector)| (embedding.chunk_id, embedding.space_name, vector))
-            .collect::<Vec<_>>();
-        self.store_chunk_embeddings(self.embedding_model_key(), embeddings, report)
+        let mid = pending.len() / 2;
+        let mut right = pending;
+        let left = right.drain(..mid).collect::<Vec<_>>();
+
+        let mut left_result =
+            self.embed_pending_batch_with_partial_failures(embedder, left, report)?;
+        let right_result =
+            self.embed_pending_batch_with_partial_failures(embedder, right, report)?;
+        left_result.embeddings.extend(right_result.embeddings);
+        left_result
+            .failed_chunk_ids
+            .extend(right_result.failed_chunk_ids);
+        Ok(left_result)
     }
 
     fn store_chunk_embeddings(
@@ -446,7 +508,8 @@ impl Engine {
         options: &UpdateOptions,
         report: &mut UpdateReport,
         fts_dirty_by_space: &mut HashMap<String, HashSet<i64>>,
-        pending_embeddings: &mut Vec<BufferedChunkEmbedding>,
+        pending_embeddings: &mut Vec<PendingChunkEmbedding>,
+        failed_chunk_ids: &mut HashSet<i64>,
     ) -> Result<()> {
         let all_documents = self.storage.list_documents(target.collection.id, false)?;
         let mut docs_by_path: HashMap<String, DocumentRow> = all_documents
@@ -734,14 +797,19 @@ impl Engine {
                         if text.trim().is_empty() {
                             text = " ".to_string();
                         }
-                        pending_embeddings.push(BufferedChunkEmbedding {
+                        pending_embeddings.push(PendingChunkEmbedding {
                             chunk_id: *chunk_id,
                             space_name: target.space.clone(),
+                            path: entry.path().to_path_buf(),
                             text,
                         });
                     }
                     if pending_embeddings.len() >= 64 {
-                        self.flush_buffered_embeddings(pending_embeddings, report)?;
+                        self.flush_buffered_embeddings(
+                            pending_embeddings,
+                            failed_chunk_ids,
+                            report,
+                        )?;
                     }
                 }
 
@@ -824,10 +892,42 @@ impl Engine {
 }
 
 #[derive(Debug)]
-struct BufferedChunkEmbedding {
+struct PendingChunkEmbedding {
     chunk_id: i64,
     space_name: String,
+    path: std::path::PathBuf,
     text: String,
+}
+
+#[derive(Default)]
+struct EmbeddedPendingBatch {
+    embeddings: Vec<(i64, String, Vec<f32>)>,
+    failed_chunk_ids: Vec<i64>,
+}
+
+fn invalid_pending_embedding_batch_detail(
+    pending: &[PendingChunkEmbedding],
+    vectors: &[Vec<f32>],
+) -> Option<String> {
+    if vectors.len() != pending.len() {
+        return Some(format!(
+            "embedder returned {} vectors for {} chunks",
+            vectors.len(),
+            pending.len()
+        ));
+    }
+
+    if vectors.iter().any(|vector| vector.is_empty()) {
+        if pending.len() == 1 {
+            return Some(format!(
+                "embedder returned an empty vector for chunk {}",
+                pending[0].chunk_id
+            ));
+        }
+        return Some("embedder returned an empty vector".to_string());
+    }
+
+    None
 }
 
 fn push_update_decision(

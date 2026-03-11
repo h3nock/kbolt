@@ -40,6 +40,30 @@ impl crate::models::Embedder for DeterministicEmbedder {
 }
 
 #[derive(Default)]
+struct SelectiveFailureEmbedder;
+
+impl crate::models::Embedder for SelectiveFailureEmbedder {
+    fn embed_batch(
+        &self,
+        _kind: crate::models::EmbeddingInputKind,
+        texts: &[String],
+    ) -> crate::Result<Vec<Vec<f32>>> {
+        if texts.iter().any(|text| text.contains("EMBED_FAIL")) {
+            return Err(KboltError::Inference("simulated embed failure".to_string()).into());
+        }
+
+        Ok(texts
+            .iter()
+            .map(|text| {
+                let token_count = text.split_whitespace().count().max(1) as f32;
+                let byte_count = text.len().max(1) as f32;
+                vec![token_count, byte_count]
+            })
+            .collect())
+    }
+}
+
+#[derive(Default)]
 struct DeterministicReranker;
 
 impl crate::models::Reranker for DeterministicReranker {
@@ -3209,6 +3233,132 @@ fn update_embeds_chunks_when_embedder_is_configured() {
             .expect("list files");
         assert_eq!(files.len(), 1);
         assert!(files[0].embedded, "file should be fully embedded");
+    });
+}
+
+#[test]
+fn update_isolates_buffered_embedding_failures() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_embedder(Arc::new(SelectiveFailureEmbedder));
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        write_text_file(&collection_path.join("good.md"), "helpful setup guide\n");
+        write_text_file(&collection_path.join("bad.md"), "EMBED_FAIL trigger\n");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update with partial embed failure");
+
+        assert_eq!(report.scanned, 2);
+        assert_eq!(report.added, 2);
+        assert_eq!(report.embedded, 1);
+        assert_eq!(report.errors.len(), 1);
+        assert!(
+            report.errors[0].path.ends_with("bad.md"),
+            "unexpected error path: {:?}",
+            report.errors
+        );
+        assert!(
+            report.errors[0].error.contains("simulated embed failure"),
+            "unexpected error: {:?}",
+            report.errors
+        );
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(work_space.id))
+                .expect("count embedded chunks"),
+            1
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_usearch("work")
+                .expect("count usearch vectors"),
+            1
+        );
+
+        let files = engine
+            .list_files(Some("work"), "api", None)
+            .expect("list files");
+        assert_eq!(files.len(), 2);
+        let good = files
+            .iter()
+            .find(|file| file.path == "good.md")
+            .expect("good file entry");
+        let bad = files
+            .iter()
+            .find(|file| file.path == "bad.md")
+            .expect("bad file entry");
+        assert!(good.embedded, "good file should be embedded");
+        assert!(!bad.embedded, "bad file should remain pending");
+    });
+}
+
+#[test]
+fn update_isolates_backlog_embedding_failures() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_embedder(Arc::new(SelectiveFailureEmbedder));
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        write_text_file(&collection_path.join("good.md"), "helpful setup guide\n");
+        write_text_file(&collection_path.join("bad.md"), "EMBED_FAIL trigger\n");
+
+        engine
+            .update(UpdateOptions {
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                no_embed: true,
+                dry_run: false,
+                verbose: false,
+            })
+            .expect("index without embeddings");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("embed backlog with partial failure");
+
+        assert_eq!(report.skipped_mtime, 2);
+        assert_eq!(report.embedded, 1);
+        assert_eq!(report.errors.len(), 1);
+        assert!(
+            report.errors[0].path.ends_with("bad.md"),
+            "unexpected error path: {:?}",
+            report.errors
+        );
+        assert!(
+            report.errors[0].error.contains("simulated embed failure"),
+            "unexpected error: {:?}",
+            report.errors
+        );
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(work_space.id))
+                .expect("count embedded chunks"),
+            1
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_usearch("work")
+                .expect("count usearch vectors"),
+            1
+        );
     });
 }
 
