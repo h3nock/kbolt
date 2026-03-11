@@ -40,3 +40,6 @@ llguidance = ["dep:llguidance", "dep:toktrie"]
 llama-cpp-sys-2 = { git = "https://github.com/h3nock/llama-cpp-rs.git", branch = "main", version = "0.1.139", features = [
     "metal",
 ] }
+
+[dev-dependencies]
+tracing-subscriber = "0.3"

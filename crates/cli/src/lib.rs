@@ -1389,15 +1389,15 @@ mod tests {
             let output = adapter.models_list().expect("list models");
             assert!(output.contains("models:"), "unexpected output: {output}");
             assert!(
-                output.contains(&format!("- embedder: {embed_model} (missing)")),
+                output.contains(&format!("- embedder: {embed_model} (not_applicable)")),
                 "unexpected output: {output}"
             );
             assert!(
-                output.contains(&format!("- reranker: {reranker_model} (missing)")),
+                output.contains(&format!("- reranker: {reranker_model} (not_applicable)")),
                 "unexpected output: {output}"
             );
             assert!(
-                output.contains(&format!("- expander: {expander_model} (missing)")),
+                output.contains(&format!("- expander: {expander_model} (not_applicable)")),
                 "unexpected output: {output}"
             );
         });
