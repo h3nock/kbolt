@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use kbolt_types::KboltError;
 use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
 use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaChatTemplate, LlamaModel};
+use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::token::LlamaToken;
 
 use crate::models::Reranker;
@@ -12,25 +12,24 @@ use crate::Result;
 
 use super::llama_backend;
 
-// This adapter currently supports binary rank-pooled reranker models where the
-// rank output is either a single relevance score or a two-value [no, yes]
-// score pair. The default Qwen3-Reranker GGUF follows the latter convention.
+const QWEN3_RERANK_SYSTEM_PROMPT: &str = "Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be yes or no.";
+const QWEN3_RERANK_INSTRUCT: &str =
+    "Given a web search query, retrieve relevant passages that answer the query";
+const QWEN3_RERANK_ASSISTANT_PREFIX: &str = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
+
+// This adapter currently targets Qwen3-style binary rank-pooled reranker
+// models. The default Qwen3-Reranker GGUF emits a two-value [no, yes]
+// probability pair after rank pooling.
 pub(super) struct LocalCrossEncoderReranker {
     model: Arc<LlamaModel>,
-    chat_template: LlamaChatTemplate,
     n_ctx: u32,
     inference_lock: Mutex<()>,
 }
 
 impl LocalCrossEncoderReranker {
-    pub(super) fn new(
-        model: Arc<LlamaModel>,
-        chat_template: LlamaChatTemplate,
-        n_ctx: u32,
-    ) -> Self {
+    pub(super) fn new(model: Arc<LlamaModel>, n_ctx: u32) -> Self {
         Self {
             model,
-            chat_template,
             n_ctx,
             inference_lock: Mutex::new(()),
         }
@@ -50,7 +49,7 @@ impl Reranker for LocalCrossEncoderReranker {
 
         let tokenized = docs
             .iter()
-            .map(|doc| tokenize_rerank_prompt(&self.model, &self.chat_template, query, doc))
+            .map(|doc| tokenize_rerank_prompt(&self.model, self.n_ctx, query, doc))
             .collect::<Result<Vec<_>>>()?;
         score_docs(&self.model, self.n_ctx, &tokenized)
     }
@@ -58,31 +57,45 @@ impl Reranker for LocalCrossEncoderReranker {
 
 fn tokenize_rerank_prompt(
     model: &LlamaModel,
-    template: &LlamaChatTemplate,
+    n_ctx: u32,
     query: &str,
     document: &str,
 ) -> Result<Vec<LlamaToken>> {
-    let system_content =
-        "Judge whether the Document is relevant to the Query. Answer only \"yes\" or \"no\".";
-    let user_content = format!("<Query>: {query}\n<Document>: {document}");
+    let prompt = build_qwen3_rerank_prompt(query, document);
+    let tokens = tokenize_prompt(model, &prompt)?;
+    if tokens.len() as u32 <= n_ctx {
+        return Ok(tokens);
+    }
 
-    let messages = vec![
-        LlamaChatMessage::new("system".to_string(), system_content.to_string()).map_err(|err| {
-            KboltError::Inference(format!("reranker chat message build failed: {err}"))
-        })?,
-        LlamaChatMessage::new("user".to_string(), user_content).map_err(|err| {
-            KboltError::Inference(format!("reranker chat message build failed: {err}"))
-        })?,
-    ];
+    let base_prompt = build_qwen3_rerank_prompt(query, "");
+    let base_tokens = tokenize_prompt(model, &base_prompt)?;
+    if base_tokens.len() as u32 > n_ctx {
+        return Err(KboltError::Inference(format!(
+            "local reranker prompt requires at least {} context tokens before any document text but n_ctx is configured as {n_ctx}",
+            base_tokens.len()
+        ))
+        .into());
+    }
 
-    let prompt = model
-        .apply_chat_template(template, &messages, true)
-        .map_err(|err| {
-            KboltError::Inference(format!("reranker chat template apply failed: {err}"))
-        })?;
+    let fitted_document = fit_utf8_prefix_to_token_limit(document, n_ctx as usize, |candidate| {
+        let prompt = build_qwen3_rerank_prompt(query, candidate);
+        Ok(tokenize_prompt(model, &prompt)?.len())
+    })?;
+    tokenize_prompt(model, &build_qwen3_rerank_prompt(query, fitted_document))
+}
 
+fn build_qwen3_rerank_prompt(query: &str, document: &str) -> String {
+    let user_content =
+        format!("<Instruct>: {QWEN3_RERANK_INSTRUCT}\n<Query>: {query}\n<Document>: {document}");
+
+    format!(
+        "<|im_start|>system\n{QWEN3_RERANK_SYSTEM_PROMPT}<|im_end|>\n<|im_start|>user\n{user_content}<|im_end|>\n{QWEN3_RERANK_ASSISTANT_PREFIX}"
+    )
+}
+
+fn tokenize_prompt(model: &LlamaModel, prompt: &str) -> Result<Vec<LlamaToken>> {
     let tokens = model
-        .str_to_token(&prompt, AddBos::Always)
+        .str_to_token(prompt, AddBos::Always)
         .map_err(|err| KboltError::Inference(format!("reranker tokenization failed: {err}")))?;
 
     if tokens.is_empty() {
@@ -92,6 +105,41 @@ fn tokenize_rerank_prompt(
     }
 
     Ok(tokens)
+}
+
+fn fit_utf8_prefix_to_token_limit<'a, F>(
+    text: &'a str,
+    max_tokens: usize,
+    mut token_count: F,
+) -> Result<&'a str>
+where
+    F: FnMut(&str) -> Result<usize>,
+{
+    let mut boundaries = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    boundaries.push(text.len());
+
+    let mut low = 0usize;
+    let mut high = boundaries.len() - 1;
+    let mut best_end = 0usize;
+
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        let end = boundaries[mid];
+        let token_len = token_count(&text[..end])?;
+        if token_len <= max_tokens {
+            best_end = end;
+            low = mid.saturating_add(1);
+        } else if mid == 0 {
+            break;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    Ok(&text[..best_end])
 }
 
 fn score_docs(model: &LlamaModel, n_ctx: u32, tokenized: &[Vec<LlamaToken>]) -> Result<Vec<f32>> {
@@ -142,7 +190,7 @@ fn extract_binary_rank_relevance_score(embeddings: &[f32]) -> Result<f32> {
     match embeddings.len() {
         0 => Err(KboltError::Inference("reranker returned empty embeddings".to_string()).into()),
         1 => Ok(embeddings[0]),
-        // Qwen3-Reranker rank pooling yields [logit_no, logit_yes].
+        // Qwen3 rank pooling yields [p(no), p(yes)] after softmax in llama.cpp.
         2 => Ok(embeddings[1]),
         len => Err(KboltError::Inference(format!(
             "local reranker supports only binary rank outputs with 1 or 2 values, got {len}"
@@ -164,7 +212,10 @@ fn resolve_reranker_context_size(configured_n_ctx: u32, required_tokens: u32) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_binary_rank_relevance_score, resolve_reranker_context_size};
+    use super::{
+        build_qwen3_rerank_prompt, extract_binary_rank_relevance_score,
+        fit_utf8_prefix_to_token_limit, resolve_reranker_context_size,
+    };
 
     #[test]
     fn reranker_context_size_respects_configured_ceiling() {
@@ -186,5 +237,25 @@ mod tests {
         );
         assert!(extract_binary_rank_relevance_score(&[]).is_err());
         assert!(extract_binary_rank_relevance_score(&[0.1, 0.2, 0.3]).is_err());
+    }
+
+    #[test]
+    fn qwen3_rerank_prompt_matches_documented_contract() {
+        let prompt = build_qwen3_rerank_prompt("where is auth configured?", "Look in settings.");
+
+        assert_eq!(
+            prompt,
+            "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be yes or no.<|im_end|>\n<|im_start|>user\n<Instruct>: Given a web search query, retrieve relevant passages that answer the query\n<Query>: where is auth configured?\n<Document>: Look in settings.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        );
+    }
+
+    #[test]
+    fn utf8_prefix_fit_preserves_character_boundaries() {
+        let fitted = fit_utf8_prefix_to_token_limit("aé😀b", 3, |candidate| {
+            Ok(candidate.as_bytes().len())
+        })
+        .expect("fit utf8");
+
+        assert_eq!(fitted, "aé");
     }
 }

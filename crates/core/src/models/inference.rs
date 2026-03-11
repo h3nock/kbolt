@@ -597,16 +597,9 @@ fn build_local_cross_encoder_reranker(
         "inference.reranker.model_file",
     )?;
 
-    let (model, chat_template) = load_local_llama_model_and_template(&gguf_path, n_gpu_layers)?;
-    let chat_template = chat_template.ok_or_else(|| {
-        KboltError::Inference("local reranker model has no embedded chat template".to_string())
-    })?;
+    let (model, _) = load_local_llama_model_and_template(&gguf_path, n_gpu_layers)?;
 
-    Ok(Arc::new(LocalCrossEncoderReranker::new(
-        model,
-        chat_template,
-        n_ctx,
-    )))
+    Ok(Arc::new(LocalCrossEncoderReranker::new(model, n_ctx)))
 }
 
 fn build_local_llama_expander(
