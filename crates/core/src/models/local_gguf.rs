@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use kbolt_types::KboltError;
-use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
@@ -23,8 +23,8 @@ pub(super) struct LocalGgufEmbedder {
 }
 
 impl Embedder for LocalGgufEmbedder {
-    fn embed_batch(&self, _kind: EmbeddingInputKind, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        embed_with_local_gguf(self, texts)
+    fn embed_batch(&self, kind: EmbeddingInputKind, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        embed_with_local_gguf(self, kind, texts)
     }
 }
 
@@ -53,8 +53,14 @@ pub(super) fn build_local_gguf_embedder(
 }
 
 const EMBED_CTX_SIZE: u32 = 512;
+const EMBEDDING_GEMMA_QUERY_PREFIX: &str = "task: search result | query: ";
+const EMBEDDING_GEMMA_DOCUMENT_PREFIX: &str = "title: none | text: ";
 
-fn embed_with_local_gguf(embedder: &LocalGgufEmbedder, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+fn embed_with_local_gguf(
+    embedder: &LocalGgufEmbedder,
+    kind: EmbeddingInputKind,
+    texts: &[String],
+) -> Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
@@ -66,18 +72,7 @@ fn embed_with_local_gguf(embedder: &LocalGgufEmbedder, texts: &[String]) -> Resu
 
     let backend = llama_backend();
 
-    let mut ctx_params = LlamaContextParams::default()
-        .with_embeddings(true)
-        .with_n_ctx(NonZeroU32::new(EMBED_CTX_SIZE))
-        .with_n_batch(EMBED_CTX_SIZE)
-        .with_n_ubatch(EMBED_CTX_SIZE)
-        .with_n_seq_max(1);
-    if let Some(n_threads) = embedder.n_threads {
-        ctx_params = ctx_params.with_n_threads(n_threads as i32);
-    }
-    if let Some(n_threads_batch) = embedder.n_threads_batch {
-        ctx_params = ctx_params.with_n_threads_batch(n_threads_batch as i32);
-    }
+    let ctx_params = embed_context_params(embedder.n_threads, embedder.n_threads_batch);
 
     let mut ctx = embedder
         .model
@@ -90,7 +85,7 @@ fn embed_with_local_gguf(embedder: &LocalGgufEmbedder, texts: &[String]) -> Resu
 
     let mut vectors = Vec::with_capacity(texts.len());
     for text in texts {
-        let tokens = tokenize_embedding_text(&embedder.model, text)?;
+        let tokens = tokenize_embedding_text(&embedder.model, kind, text)?;
         ctx.clear_kv_cache();
 
         let mut batch = LlamaBatch::new(tokens.len(), 1);
@@ -111,16 +106,40 @@ fn embed_with_local_gguf(embedder: &LocalGgufEmbedder, texts: &[String]) -> Resu
             )
             .into());
         }
-        vectors.push(emb.to_vec());
+        vectors.push(normalize_embedding_vector(emb.to_vec()));
     }
 
     Ok(vectors)
 }
 
-fn tokenize_embedding_text(model: &LlamaModel, text: &str) -> Result<Vec<LlamaToken>> {
-    let input = if text.is_empty() { " " } else { text };
+fn embed_context_params(
+    n_threads: Option<u32>,
+    n_threads_batch: Option<u32>,
+) -> LlamaContextParams {
+    let mut ctx_params = LlamaContextParams::default()
+        .with_embeddings(true)
+        .with_pooling_type(LlamaPoolingType::Mean)
+        .with_n_ctx(NonZeroU32::new(EMBED_CTX_SIZE))
+        .with_n_batch(EMBED_CTX_SIZE)
+        .with_n_ubatch(EMBED_CTX_SIZE)
+        .with_n_seq_max(1);
+    if let Some(n_threads) = n_threads {
+        ctx_params = ctx_params.with_n_threads(n_threads as i32);
+    }
+    if let Some(n_threads_batch) = n_threads_batch {
+        ctx_params = ctx_params.with_n_threads_batch(n_threads_batch as i32);
+    }
+    ctx_params
+}
+
+fn tokenize_embedding_text(
+    model: &LlamaModel,
+    kind: EmbeddingInputKind,
+    text: &str,
+) -> Result<Vec<LlamaToken>> {
+    let input = format_embedding_text(kind, text);
     let mut tokens = model
-        .str_to_token(input, AddBos::Always)
+        .str_to_token(&input, AddBos::Always)
         .map_err(|err| KboltError::Inference(format!("local gguf tokenization failed: {err}")))?;
     truncate_embedding_tokens(&mut tokens);
 
@@ -133,6 +152,34 @@ fn tokenize_embedding_text(model: &LlamaModel, text: &str) -> Result<Vec<LlamaTo
     Ok(tokens)
 }
 
+fn format_embedding_text(kind: EmbeddingInputKind, text: &str) -> String {
+    let text = if text.is_empty() { " " } else { text };
+    match kind {
+        EmbeddingInputKind::Query => format!("{EMBEDDING_GEMMA_QUERY_PREFIX}{text}"),
+        EmbeddingInputKind::Document => format!("{EMBEDDING_GEMMA_DOCUMENT_PREFIX}{text}"),
+    }
+}
+
+fn normalize_embedding_vector(mut vector: Vec<f32>) -> Vec<f32> {
+    let mut sum = 0.0_f64;
+    for value in &vector {
+        let value = f64::from(*value);
+        sum += value * value;
+    }
+
+    let norm = sum.sqrt();
+    let scale = if norm > 0.0 {
+        1.0_f32 / norm as f32
+    } else {
+        0.0_f32
+    };
+    for value in &mut vector {
+        *value *= scale;
+    }
+
+    vector
+}
+
 fn truncate_embedding_tokens(tokens: &mut Vec<LlamaToken>) {
     if tokens.len() > EMBED_CTX_SIZE as usize {
         tokens.truncate(EMBED_CTX_SIZE as usize);
@@ -141,7 +188,13 @@ fn truncate_embedding_tokens(tokens: &mut Vec<LlamaToken>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{truncate_embedding_tokens, EMBED_CTX_SIZE};
+    use super::{
+        embed_context_params, format_embedding_text, normalize_embedding_vector,
+        truncate_embedding_tokens, EMBEDDING_GEMMA_DOCUMENT_PREFIX, EMBEDDING_GEMMA_QUERY_PREFIX,
+        EMBED_CTX_SIZE,
+    };
+    use crate::models::EmbeddingInputKind;
+    use llama_cpp_2::context::params::LlamaPoolingType;
     use llama_cpp_2::token::LlamaToken;
 
     #[test]
@@ -153,5 +206,47 @@ mod tests {
         truncate_embedding_tokens(&mut tokens);
 
         assert_eq!(tokens.len(), EMBED_CTX_SIZE as usize);
+    }
+
+    #[test]
+    fn formats_query_inputs_with_embedding_gemma_prefix() {
+        let formatted = format_embedding_text(EmbeddingInputKind::Query, "find setup docs");
+
+        assert_eq!(
+            formatted,
+            format!("{EMBEDDING_GEMMA_QUERY_PREFIX}find setup docs")
+        );
+    }
+
+    #[test]
+    fn formats_document_inputs_with_embedding_gemma_prefix() {
+        let formatted = format_embedding_text(EmbeddingInputKind::Document, "setup guide");
+
+        assert_eq!(
+            formatted,
+            format!("{EMBEDDING_GEMMA_DOCUMENT_PREFIX}setup guide")
+        );
+    }
+
+    #[test]
+    fn gguf_embedding_context_uses_mean_pooling() {
+        let params = embed_context_params(Some(4), Some(2));
+
+        assert_eq!(params.pooling_type(), LlamaPoolingType::Mean);
+    }
+
+    #[test]
+    fn normalizes_embedding_vectors_with_l2_norm() {
+        let vector = normalize_embedding_vector(vec![3.0, 4.0]);
+
+        assert!((vector[0] - 0.6).abs() < 1.0e-6);
+        assert!((vector[1] - 0.8).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn leaves_zero_vectors_at_zero_when_normalizing() {
+        let vector = normalize_embedding_vector(vec![0.0, 0.0, 0.0]);
+
+        assert_eq!(vector, vec![0.0, 0.0, 0.0]);
     }
 }
