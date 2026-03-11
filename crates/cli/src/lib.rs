@@ -1499,7 +1499,7 @@ mod tests {
                 "unexpected output: {output}"
             );
             assert!(
-                output.contains("note: dense retrieval unavailable: required model not downloaded"),
+                output.contains("note: dense retrieval unavailable: not configured"),
                 "unexpected output: {output}"
             );
         });
