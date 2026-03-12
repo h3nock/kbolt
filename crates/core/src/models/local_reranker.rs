@@ -192,12 +192,10 @@ fn extract_binary_rank_relevance_score(embeddings: &[f32]) -> Result<f32> {
             KboltError::Inference("Qwen3 reranker returned empty embeddings".to_string()).into(),
         ),
         1 => Ok(embeddings[0]),
-        // Qwen3 rank pooling yields [p(no), p(yes)] after softmax in llama.cpp.
-        2 => Ok(embeddings[1]),
-        len => Err(KboltError::Inference(format!(
-            "local Qwen3 reranker supports only binary rank outputs with 1 or 2 values, got {len}"
-        ))
-        .into()),
+        // Qwen3 rank pooling yields [p(yes), p(no)] after softmax in llama.cpp.
+        // cls_out weight is built as [true_row, false_row] in convert_hf_to_gguf.py,
+        // and llama.cpp server reads embd[0] as the relevance score.
+        _ => Ok(embeddings[0]),
     }
 }
 
@@ -233,12 +231,17 @@ mod tests {
             extract_binary_rank_relevance_score(&[0.25]).expect("single"),
             0.25
         );
+        // [p(yes), p(no)] — relevance score is index 0
         assert_eq!(
-            extract_binary_rank_relevance_score(&[0.1, 0.9]).expect("pair"),
+            extract_binary_rank_relevance_score(&[0.9, 0.1]).expect("pair"),
             0.9
         );
+        // n_cls_out may exceed 2 in some model variants; index 0 is still p(yes)
+        assert_eq!(
+            extract_binary_rank_relevance_score(&[0.7, 0.2, 0.1]).expect("triple"),
+            0.7
+        );
         assert!(extract_binary_rank_relevance_score(&[]).is_err());
-        assert!(extract_binary_rank_relevance_score(&[0.1, 0.2, 0.3]).is_err());
     }
 
     #[test]
