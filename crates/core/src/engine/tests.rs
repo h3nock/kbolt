@@ -2515,6 +2515,98 @@ fn search_auto_mode_keeps_unreranked_tail_below_reranked_pool() {
 }
 
 #[test]
+fn search_rerank_sends_one_representative_per_document() {
+    use std::sync::Mutex;
+
+    struct RecordingReranker {
+        calls: Mutex<Vec<Vec<String>>>,
+        score: f32,
+    }
+
+    impl crate::models::Reranker for RecordingReranker {
+        fn rerank(&self, _query: &str, docs: &[String]) -> crate::Result<Vec<f32>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(docs.iter().cloned().collect());
+            Ok(vec![self.score; docs.len()])
+        }
+    }
+
+    with_kbolt_space_env(None, || {
+        let recording_reranker = Arc::new(RecordingReranker {
+            calls: Mutex::new(Vec::new()),
+            score: 0.5,
+        });
+        let engine = test_engine_with_search_models_and_ranking(
+            Some(Arc::new(DeterministicEmbedder)),
+            Some(recording_reranker.clone()),
+            None,
+            RankingConfig::default(),
+        );
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        // Write one large document that will produce multiple chunks, plus
+        // a second small document. Both mention the query term.
+        let mut big_body = String::new();
+        for i in 0..30 {
+            big_body.push_str(&format!(
+                "Section {i}: This section discusses the search query topic in detail.\n\n"
+            ));
+        }
+        write_text_file(&work_path.join("big.md"), &big_body);
+        write_text_file(
+            &work_path.join("small.md"),
+            "This small document also discusses the search query topic.\n",
+        );
+
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let response = engine
+            .search(SearchRequest {
+                query: "search query topic".to_string(),
+                mode: SearchMode::Auto,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 10,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: true,
+            })
+            .expect("run auto search");
+
+        let calls = recording_reranker.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "expected exactly one rerank call");
+
+        // The reranker should receive exactly 2 inputs: one per unique document.
+        let rerank_inputs = &calls[0];
+        assert_eq!(
+            rerank_inputs.len(),
+            2,
+            "expected one representative per document, got {}",
+            rerank_inputs.len()
+        );
+
+        // All returned results should have a reranker score since both docs
+        // were in the rerank pool.
+        for result in &response.results {
+            let signals = result.signals.as_ref().expect("debug signals");
+            assert!(
+                signals.reranker.is_some(),
+                "expected all chunks to inherit document-level reranker score"
+            );
+        }
+    });
+}
+
+#[test]
 fn search_deep_mode_fails_when_expansion_model_is_missing() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_missing_expander_model();

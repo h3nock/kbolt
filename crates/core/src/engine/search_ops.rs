@@ -524,10 +524,12 @@ impl Engine {
                 self.config.ranking.rerank_candidates_min,
                 self.config.ranking.rerank_candidates_max,
             );
-            let mut rerank_chunk_ids = Vec::new();
+            let representative_indices = select_rerank_representatives(&candidates, rerank_count);
+            let mut rerank_doc_ids = Vec::new();
             let mut rerank_inputs = Vec::new();
             let mut invalid_chunk_ids = HashSet::new();
-            for candidate in candidates.iter().take(rerank_count) {
+            for &idx in &representative_indices {
+                let candidate = &candidates[idx];
                 match build_rerank_input(
                     candidate,
                     &self.storage,
@@ -537,7 +539,7 @@ impl Engine {
                     contextual_prefix,
                 )? {
                     Some(rerank_input) => {
-                        rerank_chunk_ids.push(candidate.chunk_id);
+                        rerank_doc_ids.push(candidate.doc_id);
                         rerank_inputs.push(rerank_input);
                     }
                     None => {
@@ -594,11 +596,11 @@ impl Engine {
                 ))
                 .into());
             }
-            let reranker_scores = rerank_chunk_ids
+            let doc_reranker_scores: HashMap<i64, f32> = rerank_doc_ids
                 .into_iter()
                 .zip(raw_scores.into_iter())
-                .collect::<HashMap<_, _>>();
-            apply_reranker_scores(&mut candidates, &reranker_scores);
+                .collect();
+            apply_reranker_scores(&mut candidates, &doc_reranker_scores);
         }
 
         finalize_search_results(
@@ -663,22 +665,45 @@ fn build_rerank_input(
     )))
 }
 
+/// Selects one representative candidate per unique document for reranking.
+/// Candidates are already sorted by RRF score, so the first candidate for
+/// each document is its highest-scoring chunk (MaxP strategy).
+fn select_rerank_representatives(
+    candidates: &[PendingSearchCandidate],
+    max_docs: usize,
+) -> Vec<usize> {
+    let mut seen_docs = HashSet::new();
+    let mut indices = Vec::new();
+    for (i, candidate) in candidates.iter().enumerate() {
+        if seen_docs.insert(candidate.doc_id) {
+            indices.push(i);
+            if indices.len() >= max_docs {
+                break;
+            }
+        }
+    }
+    indices
+}
+
+/// Applies per-document reranker scores to all candidates. Every chunk from
+/// a reranked document inherits that document's reranker score. Chunks from
+/// non-reranked documents get a fallback score below all reranked scores.
 fn apply_reranker_scores(
     candidates: &mut [PendingSearchCandidate],
-    reranker_scores: &HashMap<i64, f32>,
+    doc_reranker_scores: &HashMap<i64, f32>,
 ) {
-    if reranker_scores.is_empty() {
+    if doc_reranker_scores.is_empty() {
         return;
     }
 
-    let mut fallback_score = reranker_scores
+    let mut fallback_score = doc_reranker_scores
         .values()
         .copied()
         .fold(f32::INFINITY, f32::min)
         .next_down();
 
     for candidate in candidates {
-        if let Some(reranker_score) = reranker_scores.get(&candidate.chunk_id).copied() {
+        if let Some(reranker_score) = doc_reranker_scores.get(&candidate.doc_id).copied() {
             candidate.reranker = Some(reranker_score);
             candidate.final_score = reranker_score;
         } else {
