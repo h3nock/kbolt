@@ -27,6 +27,7 @@ pub struct EvalRunReport {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EvalModeReport {
     pub mode: SearchMode,
+    pub no_rerank: bool,
     pub recall_at_5: f32,
     pub mrr_at_10: f32,
     pub latency_p50_ms: u64,
@@ -37,6 +38,7 @@ pub struct EvalModeReport {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EvalModeFailure {
     pub mode: SearchMode,
+    pub no_rerank: bool,
     pub error: String,
 }
 
@@ -94,6 +96,7 @@ mod tests {
             total_cases: 1,
             modes: vec![EvalModeReport {
                 mode: SearchMode::Keyword,
+                no_rerank: true,
                 recall_at_5: 1.0,
                 mrr_at_10: 1.0,
                 latency_p50_ms: 3,
@@ -111,6 +114,7 @@ mod tests {
             }],
             failed_modes: vec![EvalModeFailure {
                 mode: SearchMode::Deep,
+                no_rerank: false,
                 error: "model not available".to_string(),
             }],
         })
@@ -123,6 +127,7 @@ mod tests {
                 "modes": [
                     {
                         "mode": "Keyword",
+                        "no_rerank": true,
                         "recall_at_5": 1.0,
                         "mrr_at_10": 1.0,
                         "latency_p50_ms": 3,
@@ -144,6 +149,7 @@ mod tests {
                 "failed_modes": [
                     {
                         "mode": "Deep",
+                        "no_rerank": false,
                         "error": "model not available"
                     }
                 ]

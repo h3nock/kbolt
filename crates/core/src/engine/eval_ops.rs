@@ -11,16 +11,17 @@ use super::*;
 impl Engine {
     pub fn run_eval(&self) -> Result<EvalRunReport> {
         let dataset = load_eval_dataset(&self.config.config_dir)?;
-        let modes = self.eval_modes();
+        let eval_runs = self.eval_runs();
         let total_cases = dataset.cases.len();
-        let mut reports = Vec::with_capacity(modes.len());
+        let mut reports = Vec::with_capacity(eval_runs.len());
         let mut failed_modes = Vec::new();
 
-        for mode in modes {
-            match self.run_eval_mode(&dataset.cases, mode.clone()) {
+        for (mode, no_rerank) in eval_runs {
+            match self.run_eval_mode(&dataset.cases, mode.clone(), no_rerank) {
                 Ok(report) => reports.push(report),
                 Err(err) => failed_modes.push(EvalModeFailure {
                     mode,
+                    no_rerank,
                     error: err.to_string(),
                 }),
             }
@@ -33,15 +34,25 @@ impl Engine {
         })
     }
 
-    fn eval_modes(&self) -> Vec<SearchMode> {
-        let mut modes = vec![SearchMode::Keyword, SearchMode::Auto, SearchMode::Deep];
+    fn eval_runs(&self) -> Vec<(SearchMode, bool)> {
+        let mut runs = vec![
+            (SearchMode::Keyword, true),
+            (SearchMode::Auto, true),
+            (SearchMode::Auto, false),
+        ];
         if self.embedder.is_some() {
-            modes.push(SearchMode::Semantic);
+            runs.push((SearchMode::Semantic, true));
         }
-        modes
+        runs.push((SearchMode::Deep, false));
+        runs
     }
 
-    fn run_eval_mode(&self, cases: &[EvalCase], mode: SearchMode) -> Result<EvalModeReport> {
+    fn run_eval_mode(
+        &self,
+        cases: &[EvalCase],
+        mode: SearchMode,
+        no_rerank: bool,
+    ) -> Result<EvalModeReport> {
         let mut query_reports = Vec::with_capacity(cases.len());
         let mut recall_sum = 0.0_f32;
         let mut mrr_sum = 0.0_f32;
@@ -55,7 +66,7 @@ impl Engine {
                 collections: case.collections.clone(),
                 limit: 10,
                 min_score: 0.0,
-                no_rerank: false,
+                no_rerank,
                 debug: false,
             })?;
 
@@ -95,6 +106,7 @@ impl Engine {
         let case_count = cases.len() as f32;
         Ok(EvalModeReport {
             mode,
+            no_rerank,
             recall_at_5: recall_sum / case_count,
             mrr_at_10: mrr_sum / case_count,
             latency_p50_ms: percentile_ms(&latencies, 0.50),
@@ -230,13 +242,19 @@ expected_paths = ["rust/guides/traits.md"]
         let report = engine.run_eval().expect("run eval");
 
         assert_eq!(report.total_cases, 1);
+        let mode_labels: Vec<_> = report
+            .modes
+            .iter()
+            .map(|m| (m.mode.clone(), m.no_rerank))
+            .collect();
         assert_eq!(
-            report
-                .modes
-                .iter()
-                .map(|mode| mode.mode.clone())
-                .collect::<Vec<_>>(),
-            vec![SearchMode::Keyword, SearchMode::Auto, SearchMode::Deep]
+            mode_labels,
+            vec![
+                (SearchMode::Keyword, true),
+                (SearchMode::Auto, true),
+                (SearchMode::Auto, false),
+                (SearchMode::Deep, false),
+            ]
         );
         for mode in &report.modes {
             assert_eq!(mode.queries.len(), 1);

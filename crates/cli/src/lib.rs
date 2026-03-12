@@ -4,13 +4,12 @@ use kbolt_core::engine::Engine;
 use kbolt_core::ModelPullEvent;
 use kbolt_core::Result;
 use kbolt_types::{
-    ActiveSpaceSource, AddCollectionRequest, AddScheduleRequest, EvalModeReport, EvalRunReport,
-    GetRequest, KboltError, Locator, MultiGetRequest, OmitReason, RemoveScheduleRequest,
-    ScheduleAddResponse, ScheduleBackend, ScheduleInterval, ScheduleIntervalUnit,
-    ScheduleRunResult, ScheduleScope, ScheduleState, ScheduleStatusResponse, ScheduleTrigger,
-    ScheduleWeekday, SearchMode, SearchPipeline, SearchPipelineNotice, SearchPipelineStep,
-    SearchPipelineUnavailableReason, SearchRequest, UpdateDecision, UpdateDecisionKind,
-    UpdateOptions, UpdateReport,
+    ActiveSpaceSource, AddCollectionRequest, AddScheduleRequest, EvalRunReport, GetRequest,
+    KboltError, Locator, MultiGetRequest, OmitReason, RemoveScheduleRequest, ScheduleAddResponse,
+    ScheduleBackend, ScheduleInterval, ScheduleIntervalUnit, ScheduleRunResult, ScheduleScope,
+    ScheduleState, ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode,
+    SearchPipeline, SearchPipelineNotice, SearchPipelineStep, SearchPipelineUnavailableReason,
+    SearchRequest, UpdateDecision, UpdateDecisionKind, UpdateOptions, UpdateReport,
 };
 
 pub struct CliAdapter {
@@ -1144,7 +1143,7 @@ fn format_eval_run_report(report: &EvalRunReport) -> String {
     for mode in &report.modes {
         lines.push(format!(
             "- {}: recall@5 {:.3}, mrr@10 {:.3}, p50 {}ms, p95 {}ms",
-            format_eval_mode(mode),
+            format_eval_mode_label(&mode.mode, mode.no_rerank),
             mode.recall_at_5,
             mode.mrr_at_10,
             mode.latency_p50_ms,
@@ -1154,7 +1153,7 @@ fn format_eval_run_report(report: &EvalRunReport) -> String {
     for failure in &report.failed_modes {
         lines.push(format!(
             "- {}: failed ({})",
-            format_eval_mode_name(&failure.mode),
+            format_eval_mode_label(&failure.mode, failure.no_rerank),
             failure.error
         ));
     }
@@ -1172,7 +1171,7 @@ fn format_eval_run_report(report: &EvalRunReport) -> String {
 
                 Some(format!(
                     "- [{}] {} | first relevant: {} | expected: {} | returned: {}",
-                    format_eval_mode(mode),
+                    format_eval_mode_label(&mode.mode, mode.no_rerank),
                     query.query,
                     query
                         .first_relevant_rank
@@ -1199,16 +1198,14 @@ fn format_eval_run_report(report: &EvalRunReport) -> String {
     lines.join("\n")
 }
 
-fn format_eval_mode(report: &EvalModeReport) -> &'static str {
-    format_eval_mode_name(&report.mode)
-}
-
-fn format_eval_mode_name(mode: &SearchMode) -> &'static str {
-    match mode {
-        SearchMode::Keyword => "keyword",
-        SearchMode::Auto => "auto",
-        SearchMode::Deep => "deep",
-        SearchMode::Semantic => "semantic",
+fn format_eval_mode_label(mode: &SearchMode, no_rerank: bool) -> &'static str {
+    match (mode, no_rerank) {
+        (SearchMode::Keyword, _) => "keyword",
+        (SearchMode::Auto, true) => "auto",
+        (SearchMode::Auto, false) => "auto+rerank",
+        (SearchMode::Semantic, _) => "semantic",
+        (SearchMode::Deep, true) => "deep-norerank",
+        (SearchMode::Deep, false) => "deep",
     }
 }
 
@@ -1335,6 +1332,7 @@ mod tests {
             modes: vec![
                 EvalModeReport {
                     mode: SearchMode::Keyword,
+                    no_rerank: true,
                     recall_at_5: 1.0,
                     mrr_at_10: 1.0,
                     latency_p50_ms: 2,
@@ -1352,6 +1350,7 @@ mod tests {
                 },
                 EvalModeReport {
                     mode: SearchMode::Deep,
+                    no_rerank: false,
                     recall_at_5: 0.0,
                     mrr_at_10: 0.0,
                     latency_p50_ms: 8,
@@ -1370,6 +1369,7 @@ mod tests {
             ],
             failed_modes: vec![kbolt_types::EvalModeFailure {
                 mode: SearchMode::Semantic,
+                no_rerank: true,
                 error: "model not available".to_string(),
             }],
         });
