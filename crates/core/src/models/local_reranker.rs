@@ -12,7 +12,7 @@ use crate::Result;
 
 use super::llama_backend;
 
-const QWEN3_RERANK_SYSTEM_PROMPT: &str = "Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be yes or no.";
+const QWEN3_RERANK_SYSTEM_PROMPT: &str = "Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".";
 const QWEN3_RERANK_INSTRUCT: &str =
     "Given a web search query, retrieve relevant passages that answer the query";
 const QWEN3_RERANK_ASSISTANT_PREFIX: &str = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
@@ -247,7 +247,7 @@ mod tests {
 
         assert_eq!(
             prompt,
-            "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be yes or no.<|im_end|>\n<|im_start|>user\n<Instruct>: Given a web search query, retrieve relevant passages that answer the query\n<Query>: where is auth configured?\n<Document>: Look in settings.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n<Instruct>: Given a web search query, retrieve relevant passages that answer the query\n<Query>: where is auth configured?\n<Document>: Look in settings.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
         );
     }
 
