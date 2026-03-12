@@ -17,16 +17,16 @@ const QWEN3_RERANK_INSTRUCT: &str =
     "Given a web search query, retrieve relevant passages that answer the query";
 const QWEN3_RERANK_ASSISTANT_PREFIX: &str = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
 
-// This adapter currently targets Qwen3-style binary rank-pooled reranker
-// models. The default Qwen3-Reranker GGUF emits a two-value [no, yes]
-// probability pair after rank pooling.
-pub(super) struct LocalCrossEncoderReranker {
+// This adapter is intentionally Qwen3-specific. The local `provider =
+// "local_llama"` reranker path currently supports Qwen3-style binary
+// rank-pooled GGUF rerankers only.
+pub(super) struct LocalQwen3Reranker {
     model: Arc<LlamaModel>,
     n_ctx: u32,
     inference_lock: Mutex<()>,
 }
 
-impl LocalCrossEncoderReranker {
+impl LocalQwen3Reranker {
     pub(super) fn new(model: Arc<LlamaModel>, n_ctx: u32) -> Self {
         Self {
             model,
@@ -36,16 +36,15 @@ impl LocalCrossEncoderReranker {
     }
 }
 
-impl Reranker for LocalCrossEncoderReranker {
+impl Reranker for LocalQwen3Reranker {
     fn rerank(&self, query: &str, docs: &[String]) -> Result<Vec<f32>> {
         if docs.is_empty() {
             return Ok(Vec::new());
         }
 
-        let _guard = self
-            .inference_lock
-            .lock()
-            .map_err(|_| KboltError::Inference("local reranker mutex poisoned".to_string()))?;
+        let _guard = self.inference_lock.lock().map_err(|_| {
+            KboltError::Inference("local Qwen3 reranker mutex poisoned".to_string())
+        })?;
 
         let tokenized = docs
             .iter()
@@ -71,7 +70,7 @@ fn tokenize_rerank_prompt(
     let base_tokens = tokenize_prompt(model, &base_prompt)?;
     if base_tokens.len() as u32 > n_ctx {
         return Err(KboltError::Inference(format!(
-            "local reranker prompt requires at least {} context tokens before any document text but n_ctx is configured as {n_ctx}",
+            "local Qwen3 reranker prompt requires at least {} context tokens before any document text but n_ctx is configured as {n_ctx}",
             base_tokens.len()
         ))
         .into());
@@ -94,14 +93,15 @@ fn build_qwen3_rerank_prompt(query: &str, document: &str) -> String {
 }
 
 fn tokenize_prompt(model: &LlamaModel, prompt: &str) -> Result<Vec<LlamaToken>> {
-    let tokens = model
-        .str_to_token(prompt, AddBos::Always)
-        .map_err(|err| KboltError::Inference(format!("reranker tokenization failed: {err}")))?;
+    let tokens = model.str_to_token(prompt, AddBos::Always).map_err(|err| {
+        KboltError::Inference(format!("Qwen3 reranker tokenization failed: {err}"))
+    })?;
 
     if tokens.is_empty() {
-        return Err(
-            KboltError::Inference("reranker tokenization returned 0 tokens".to_string()).into(),
-        );
+        return Err(KboltError::Inference(
+            "Qwen3 reranker tokenization returned 0 tokens".to_string(),
+        )
+        .into());
     }
 
     Ok(tokens)
@@ -159,9 +159,9 @@ fn score_docs(model: &LlamaModel, n_ctx: u32, tokenized: &[Vec<LlamaToken>]) -> 
         .with_embeddings(true)
         .with_pooling_type(LlamaPoolingType::Rank);
 
-    let mut ctx = model
-        .new_context(backend, ctx_params)
-        .map_err(|err| KboltError::Inference(format!("reranker context creation failed: {err}")))?;
+    let mut ctx = model.new_context(backend, ctx_params).map_err(|err| {
+        KboltError::Inference(format!("Qwen3 reranker context creation failed: {err}"))
+    })?;
 
     let mut scores = Vec::with_capacity(tokenized.len());
     for tokens in tokenized {
@@ -169,14 +169,14 @@ fn score_docs(model: &LlamaModel, n_ctx: u32, tokenized: &[Vec<LlamaToken>]) -> 
 
         let mut batch = LlamaBatch::new(tokens.len(), 1);
         batch.add_sequence(tokens, 0, false).map_err(|err| {
-            KboltError::Inference(format!("reranker batch creation failed: {err}"))
+            KboltError::Inference(format!("Qwen3 reranker batch creation failed: {err}"))
         })?;
 
         ctx.decode(&mut batch)
-            .map_err(|err| KboltError::Inference(format!("reranker decode failed: {err}")))?;
+            .map_err(|err| KboltError::Inference(format!("Qwen3 reranker decode failed: {err}")))?;
 
         let embeddings = ctx.embeddings_seq_ith(0).map_err(|err| {
-            KboltError::Inference(format!("reranker embedding read failed: {err}"))
+            KboltError::Inference(format!("Qwen3 reranker embedding read failed: {err}"))
         })?;
 
         let score = extract_binary_rank_relevance_score(&embeddings)?;
@@ -188,12 +188,14 @@ fn score_docs(model: &LlamaModel, n_ctx: u32, tokenized: &[Vec<LlamaToken>]) -> 
 
 fn extract_binary_rank_relevance_score(embeddings: &[f32]) -> Result<f32> {
     match embeddings.len() {
-        0 => Err(KboltError::Inference("reranker returned empty embeddings".to_string()).into()),
+        0 => Err(
+            KboltError::Inference("Qwen3 reranker returned empty embeddings".to_string()).into(),
+        ),
         1 => Ok(embeddings[0]),
         // Qwen3 rank pooling yields [p(no), p(yes)] after softmax in llama.cpp.
         2 => Ok(embeddings[1]),
         len => Err(KboltError::Inference(format!(
-            "local reranker supports only binary rank outputs with 1 or 2 values, got {len}"
+            "local Qwen3 reranker supports only binary rank outputs with 1 or 2 values, got {len}"
         ))
         .into()),
     }
@@ -202,7 +204,7 @@ fn extract_binary_rank_relevance_score(embeddings: &[f32]) -> Result<f32> {
 fn resolve_reranker_context_size(configured_n_ctx: u32, required_tokens: u32) -> Result<u32> {
     if required_tokens > configured_n_ctx {
         return Err(KboltError::Inference(format!(
-            "local reranker request requires {required_tokens} context tokens but n_ctx is configured as {configured_n_ctx}"
+            "local Qwen3 reranker request requires {required_tokens} context tokens but n_ctx is configured as {configured_n_ctx}"
         ))
         .into());
     }

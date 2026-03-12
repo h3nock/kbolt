@@ -17,7 +17,7 @@ use crate::models::local_llama::{
     load_local_llama_model_and_template,
 };
 use crate::models::local_onnx::build_local_onnx_embedder;
-use crate::models::local_reranker::LocalCrossEncoderReranker;
+use crate::models::local_reranker::LocalQwen3Reranker;
 use crate::models::{
     resolve_model_artifact, Embedder, EmbeddingInputKind, Expander, ModelRole, Reranker,
 };
@@ -265,8 +265,8 @@ fn build_reranker_inner(
             let model_file = model_file.clone();
             let n_ctx = *n_ctx;
             let n_gpu_layers = *n_gpu_layers;
-            Arc::new(LazyArc::new("local cross-encoder reranker", move || {
-                build_local_cross_encoder_reranker(
+            Arc::new(LazyArc::new("local qwen3 reranker", move || {
+                build_local_qwen3_reranker(
                     &runtime.model_config,
                     &runtime.model_dir,
                     model_file.as_deref(),
@@ -582,7 +582,7 @@ fn local_llama_model_field(role: ModelRole) -> &'static str {
     }
 }
 
-fn build_local_cross_encoder_reranker(
+fn build_local_qwen3_reranker(
     model_config: &ModelConfig,
     model_dir: &Path,
     model_file: Option<&str>,
@@ -599,7 +599,7 @@ fn build_local_cross_encoder_reranker(
 
     let (model, _) = load_local_llama_model_and_template(&gguf_path, n_gpu_layers)?;
 
-    Ok(Arc::new(LocalCrossEncoderReranker::new(model, n_ctx)))
+    Ok(Arc::new(LocalQwen3Reranker::new(model, n_ctx)))
 }
 
 fn build_local_llama_expander(

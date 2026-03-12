@@ -1655,6 +1655,7 @@ Notes:
 - `provider = "local_gguf"` loads a GGUF artifact from `~/.cache/kbolt/models/embedder` (or explicit `model_file`) and fails fast when artifact selection is ambiguous.
 - The current `local_gguf` embedding path is tuned for the default EmbeddingGemma model family: query inputs are prefixed with `task: search result | query: `, document inputs with `title: none | text: `, sequence embeddings use mean pooling, and vectors are L2-normalized before storage/search.
 - `provider = "local_llama"` loads GGUF artifacts from role directories (`reranker` / `expander`) and fails fast when artifact selection is ambiguous.
+- The current local reranker path is intentionally Qwen3-specific: it builds the documented Qwen3 reranker prompt contract, uses rank pooling, and should be treated as support for Qwen3-style GGUF rerankers rather than a generic local cross-encoder interface.
 
 ---
 
