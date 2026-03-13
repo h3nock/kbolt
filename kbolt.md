@@ -1502,12 +1502,15 @@ Rule-based (no LLM). Auto mode defaults to BM25+dense with reranker off for spee
 
 ### Stage 3: Query Expansion (--deep only)
 
-Expander model (Qwen3 1.7B GGUF) generates three query variants:
-- **Lexical variant**: rephrased with different vocabulary (for BM25 recall)
-- **Semantic variant**: describes the concept differently (for dense recall)
-- **HyDE variant**: a hypothetical answer paragraph (embedded for vector search)
+Deep search always includes the normalized original query. The expander then adds generated
+queries tagged with retrieval routes:
+- **Keyword-only**: lexical rewrites that go to BM25 only
+- **Dense-only**: semantic rewrites or HyDE-style passages that go to dense retrieval only
+- **Both**: generic rewrites that go to both retrieval signals
 
-Each variant is fed to Stage 4 independently, producing its own BM25 and dense candidate lists. All candidates from all variants are collected into a single pool, then enter Stage 5 (fusion) together.
+Each routed query is fed to Stage 4 independently, producing its own candidate list(s). All
+candidates from all routed queries are collected into a single pool, then enter Stage 5 (fusion)
+together.
 
 ### Stage 4: Multi-Signal Retrieval (parallel)
 

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::models::completion::CompletionClient;
-use crate::models::Expander;
+use crate::models::{normalize_query_text, ExpandedQuery, Expander, ExpansionRoute};
 use crate::Result;
 
 use super::local_llama::LocalLlamaClient;
@@ -18,8 +18,8 @@ impl LocalLlamaExpander {
 }
 
 impl Expander for LocalLlamaExpander {
-    fn expand(&self, query: &str) -> Result<Vec<String>> {
-        let normalized = query.split_whitespace().collect::<Vec<_>>().join(" ");
+    fn expand(&self, query: &str) -> Result<Vec<ExpandedQuery>> {
+        let normalized = normalize_query_text(query);
         if normalized.is_empty() {
             return Ok(Vec::new());
         }
@@ -33,17 +33,18 @@ impl Expander for LocalLlamaExpander {
 
         let mut seen = HashSet::new();
         let mut variants = Vec::new();
-        seen.insert(normalized.to_ascii_lowercase());
-        variants.push(normalized);
 
         for variant in raw_variants {
-            let trimmed = variant.trim();
+            let trimmed = normalize_query_text(&variant);
             if trimmed.is_empty() {
                 continue;
             }
             let key = trimmed.to_ascii_lowercase();
             if seen.insert(key) {
-                variants.push(trimmed.to_string());
+                variants.push(ExpandedQuery {
+                    text: trimmed,
+                    route: ExpansionRoute::Both,
+                });
             }
         }
 

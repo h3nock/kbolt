@@ -19,7 +19,8 @@ use crate::models::local_llama::{
 use crate::models::local_onnx::build_local_onnx_embedder;
 use crate::models::local_reranker::LocalQwen3Reranker;
 use crate::models::{
-    resolve_model_artifact, Embedder, EmbeddingInputKind, Expander, ModelRole, Reranker,
+    normalize_query_text, resolve_model_artifact, Embedder, EmbeddingInputKind, ExpandedQuery,
+    Expander, ExpansionRoute, ModelRole, Reranker,
 };
 use crate::Result;
 
@@ -415,7 +416,7 @@ impl Reranker for LazyArc<dyn Reranker> {
 }
 
 impl Expander for LazyArc<dyn Expander> {
-    fn expand(&self, query: &str) -> Result<Vec<String>> {
+    fn expand(&self, query: &str) -> Result<Vec<ExpandedQuery>> {
         let expander = self.get()?;
         expander.expand(query)
     }
@@ -481,8 +482,8 @@ impl Reranker for ChatBackedReranker {
 }
 
 impl Expander for ChatBackedExpander {
-    fn expand(&self, query: &str) -> Result<Vec<String>> {
-        let normalized = query.split_whitespace().collect::<Vec<_>>().join(" ");
+    fn expand(&self, query: &str) -> Result<Vec<ExpandedQuery>> {
+        let normalized = normalize_query_text(query);
         if normalized.is_empty() {
             return Ok(Vec::new());
         }
@@ -496,19 +497,19 @@ impl Expander for ChatBackedExpander {
 
         let mut seen = std::collections::HashSet::new();
         let mut variants = Vec::new();
-        let normalized_key = normalized.to_ascii_lowercase();
-        seen.insert(normalized_key);
-        variants.push(normalized);
 
         for variant in parsed.into_variants() {
-            let trimmed = variant.trim();
+            let trimmed = normalize_query_text(&variant);
             if trimmed.is_empty() {
                 continue;
             }
 
             let key = trimmed.to_ascii_lowercase();
             if seen.insert(key) {
-                variants.push(trimmed.to_string());
+                variants.push(ExpandedQuery {
+                    text: trimmed,
+                    route: ExpansionRoute::Both,
+                });
             }
         }
 
@@ -1274,9 +1275,14 @@ mod tests {
         assert_eq!(
             variants,
             vec![
-                "rust traits".to_string(),
-                "trait object rust".to_string(),
-                "explain rust traits".to_string(),
+                ExpandedQuery {
+                    text: "trait object rust".to_string(),
+                    route: ExpansionRoute::Both,
+                },
+                ExpandedQuery {
+                    text: "explain rust traits".to_string(),
+                    route: ExpansionRoute::Both,
+                },
             ]
         );
     }

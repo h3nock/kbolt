@@ -94,8 +94,21 @@ impl crate::models::Reranker for ConstantReranker {
 struct DeterministicExpander;
 
 impl crate::models::Expander for DeterministicExpander {
-    fn expand(&self, query: &str) -> crate::Result<Vec<String>> {
-        Ok(vec![query.to_string(), format!("explain {query}")])
+    fn expand(&self, query: &str) -> crate::Result<Vec<crate::models::ExpandedQuery>> {
+        Ok(vec![crate::models::ExpandedQuery {
+            text: format!("explain {query}"),
+            route: crate::models::ExpansionRoute::Both,
+        }])
+    }
+}
+
+struct RouteExpander {
+    items: Vec<crate::models::ExpandedQuery>,
+}
+
+impl crate::models::Expander for RouteExpander {
+    fn expand(&self, _query: &str) -> crate::Result<Vec<crate::models::ExpandedQuery>> {
+        Ok(self.items.clone())
     }
 }
 
@@ -2436,6 +2449,105 @@ fn search_deep_mode_reports_rerank_unavailable_when_model_is_missing() {
         let first = &response.results[0];
         let signals = first.signals.as_ref().expect("debug signals");
         assert!(signals.reranker.is_none());
+    });
+}
+
+#[test]
+fn search_deep_mode_does_not_embed_keyword_only_expansions() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_search_models(
+            Some(Arc::new(SelectiveFailureEmbedder)),
+            None,
+            Some(Arc::new(RouteExpander {
+                items: vec![crate::models::ExpandedQuery {
+                    text: "setup install EMBED_FAIL".to_string(),
+                    route: crate::models::ExpansionRoute::KeywordOnly,
+                }],
+            })),
+        );
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        write_text_file(
+            &work_path.join("guide.md"),
+            "# Setup\n\nThis document explains setup install steps.\n",
+        );
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let response = engine
+            .search(SearchRequest {
+                query: "unrelated topic".to_string(),
+                mode: SearchMode::Deep,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 10,
+                min_score: 0.0,
+                no_rerank: true,
+                debug: false,
+            })
+            .expect("deep search should skip embedding keyword-only expansions");
+
+        assert_eq!(response.effective_mode, SearchMode::Deep);
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].path, "api/guide.md");
+    });
+}
+
+#[test]
+fn search_deep_mode_does_not_send_dense_only_expansions_to_bm25() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_search_models(
+            None,
+            None,
+            Some(Arc::new(RouteExpander {
+                items: vec![crate::models::ExpandedQuery {
+                    text: "setup install guide".to_string(),
+                    route: crate::models::ExpansionRoute::DenseOnly,
+                }],
+            })),
+        );
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        write_text_file(
+            &work_path.join("guide.md"),
+            "# Setup\n\nThis document explains setup install steps.\n",
+        );
+        engine
+            .update(UpdateOptions {
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                no_embed: true,
+                dry_run: false,
+                verbose: false,
+            })
+            .expect("index without embeddings");
+
+        let response = engine
+            .search(SearchRequest {
+                query: "totally unrelated".to_string(),
+                mode: SearchMode::Deep,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 10,
+                min_score: 0.0,
+                no_rerank: true,
+                debug: false,
+            })
+            .expect("deep search should ignore dense-only expansion without embedder");
+
+        assert!(response.results.is_empty());
+        assert!(!response.pipeline.dense);
     });
 }
 

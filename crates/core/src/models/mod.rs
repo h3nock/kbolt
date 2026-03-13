@@ -47,7 +47,7 @@ const MODEL_DIRNAME_EXPANDER: &str = "expander";
 const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";
 
 pub(crate) use embedder::{Embedder, EmbeddingInputKind};
-pub(crate) use expander::Expander;
+pub(crate) use expander::{normalize_query_text, ExpandedQuery, Expander, ExpansionRoute};
 #[cfg(test)]
 pub(crate) use inference::build_embedder;
 pub(crate) use inference::{
