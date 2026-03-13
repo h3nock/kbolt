@@ -31,7 +31,7 @@ const DEFAULT_LOCAL_GGUF_EMBEDDING_BATCH_SIZE: usize = 8;
 const DEFAULT_INFERENCE_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_INFERENCE_MAX_RETRIES: u32 = 2;
 const DEFAULT_LOCAL_INFERENCE_MAX_TOKENS: usize = 256;
-const DEFAULT_LOCAL_EXPANDER_MAX_TOKENS: usize = 64;
+const DEFAULT_LOCAL_EXPANDER_MAX_TOKENS: usize = 600;
 const DEFAULT_LOCAL_INFERENCE_N_CTX: u32 = 2048;
 const DEFAULT_RANKING_RRF_K: usize = 60;
 const DEFAULT_RANKING_DEEP_VARIANTS_MAX: usize = 4;
@@ -109,13 +109,27 @@ pub struct InferenceConfig {
     #[serde(default)]
     pub reranker: Option<TextInferenceConfig>,
     #[serde(default)]
-    pub expander: Option<TextInferenceConfig>,
+    pub expander: Option<ExpanderInferenceConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextInferenceConfig {
     #[serde(flatten)]
     pub provider: TextInferenceProvider,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpanderInferenceConfig {
+    pub adapter: ExpanderAdapter,
+    #[serde(flatten)]
+    pub provider: TextInferenceProvider,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpanderAdapter {
+    JsonVariants,
+    Qmd,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -557,17 +571,43 @@ fn validate_embeddings(embeddings: Option<&EmbeddingConfig>) -> Result<()> {
 }
 
 fn validate_inference(inference: &InferenceConfig) -> Result<()> {
-    validate_text_inference("inference.reranker", inference.reranker.as_ref())?;
-    validate_text_inference("inference.expander", inference.expander.as_ref())?;
+    validate_text_inference_config("inference.reranker", inference.reranker.as_ref())?;
+    validate_expander_inference("inference.expander", inference.expander.as_ref())?;
     Ok(())
 }
 
-fn validate_text_inference(scope: &str, config: Option<&TextInferenceConfig>) -> Result<()> {
+fn validate_text_inference_config(scope: &str, config: Option<&TextInferenceConfig>) -> Result<()> {
     let Some(config) = config else {
         return Ok(());
     };
 
-    match &config.provider {
+    validate_text_inference_provider(scope, &config.provider)
+}
+
+fn validate_expander_inference(
+    scope: &str,
+    config: Option<&ExpanderInferenceConfig>,
+) -> Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+
+    validate_text_inference_provider(scope, &config.provider)?;
+
+    if matches!(config.adapter, ExpanderAdapter::Qmd)
+        && !matches!(config.provider, TextInferenceProvider::LocalLlama { .. })
+    {
+        return Err(KboltError::Config(format!(
+            "{scope}.adapter=qmd requires provider=local_llama"
+        ))
+        .into());
+    }
+
+    Ok(())
+}
+
+fn validate_text_inference_provider(scope: &str, provider: &TextInferenceProvider) -> Result<()> {
+    match provider {
         TextInferenceProvider::OpenAiCompatible {
             model,
             base_url,
@@ -748,11 +788,19 @@ struct FileInferenceConfig {
     #[serde(default)]
     reranker: Option<FileTextInferenceConfig>,
     #[serde(default)]
-    expander: Option<FileTextInferenceConfig>,
+    expander: Option<FileExpanderInferenceConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct FileTextInferenceConfig {
+    #[serde(flatten)]
+    provider: FileTextInferenceProvider,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FileExpanderInferenceConfig {
+    #[serde(default)]
+    adapter: Option<ExpanderAdapter>,
     #[serde(flatten)]
     provider: FileTextInferenceProvider,
 }
@@ -821,7 +869,7 @@ impl From<FileInferenceConfig> for InferenceConfig {
                 value.reranker,
                 default_local_inference_max_tokens(),
             ),
-            expander: file_text_inference_to_runtime(
+            expander: file_expander_inference_to_runtime(
                 value.expander,
                 default_local_expander_max_tokens(),
             ),
@@ -833,7 +881,10 @@ impl From<&InferenceConfig> for FileInferenceConfig {
     fn from(value: &InferenceConfig) -> Self {
         Self {
             reranker: value.reranker.as_ref().map(FileTextInferenceConfig::from),
-            expander: value.expander.as_ref().map(FileTextInferenceConfig::from),
+            expander: value
+                .expander
+                .as_ref()
+                .map(FileExpanderInferenceConfig::from),
         }
     }
 }
@@ -873,40 +924,78 @@ impl From<&TextInferenceConfig> for FileTextInferenceConfig {
     }
 }
 
+impl From<&ExpanderInferenceConfig> for FileExpanderInferenceConfig {
+    fn from(value: &ExpanderInferenceConfig) -> Self {
+        let provider = FileTextInferenceConfig::from(&TextInferenceConfig {
+            provider: value.provider.clone(),
+        })
+        .provider;
+
+        Self {
+            adapter: Some(value.adapter.clone()),
+            provider,
+        }
+    }
+}
+
 fn file_text_inference_to_runtime(
     config: Option<FileTextInferenceConfig>,
     default_max_tokens: usize,
 ) -> Option<TextInferenceConfig> {
     config.map(|config| TextInferenceConfig {
-        provider: match config.provider {
-            FileTextInferenceProvider::OpenAiCompatible {
-                output_mode,
-                model,
-                base_url,
-                api_key_env,
-                timeout_ms,
-                max_retries,
-            } => TextInferenceProvider::OpenAiCompatible {
-                output_mode,
-                model,
-                base_url,
-                api_key_env,
-                timeout_ms,
-                max_retries,
-            },
-            FileTextInferenceProvider::LocalLlama {
-                model_file,
-                max_tokens,
-                n_ctx,
-                n_gpu_layers,
-            } => TextInferenceProvider::LocalLlama {
-                model_file,
-                max_tokens: max_tokens.unwrap_or(default_max_tokens),
-                n_ctx,
-                n_gpu_layers,
-            },
-        },
+        provider: file_text_inference_provider_to_runtime(config.provider, default_max_tokens),
     })
+}
+
+fn file_expander_inference_to_runtime(
+    config: Option<FileExpanderInferenceConfig>,
+    default_max_tokens: usize,
+) -> Option<ExpanderInferenceConfig> {
+    config.map(|config| {
+        let adapter = config.adapter.unwrap_or_else(|| match &config.provider {
+            FileTextInferenceProvider::OpenAiCompatible { .. } => ExpanderAdapter::JsonVariants,
+            FileTextInferenceProvider::LocalLlama { .. } => ExpanderAdapter::Qmd,
+        });
+
+        ExpanderInferenceConfig {
+            adapter,
+            provider: file_text_inference_provider_to_runtime(config.provider, default_max_tokens),
+        }
+    })
+}
+
+fn file_text_inference_provider_to_runtime(
+    provider: FileTextInferenceProvider,
+    default_max_tokens: usize,
+) -> TextInferenceProvider {
+    match provider {
+        FileTextInferenceProvider::OpenAiCompatible {
+            output_mode,
+            model,
+            base_url,
+            api_key_env,
+            timeout_ms,
+            max_retries,
+        } => TextInferenceProvider::OpenAiCompatible {
+            output_mode,
+            model,
+            base_url,
+            api_key_env,
+            timeout_ms,
+            max_retries,
+        },
+        FileTextInferenceProvider::LocalLlama {
+            model_file,
+            max_tokens,
+            n_ctx,
+            n_gpu_layers,
+        } => TextInferenceProvider::LocalLlama {
+            model_file,
+            max_tokens: max_tokens.unwrap_or(default_max_tokens),
+            n_ctx,
+            n_gpu_layers,
+        },
+    }
 }
 
 fn default_embedder_source() -> ModelSourceConfig {

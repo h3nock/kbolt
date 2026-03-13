@@ -162,7 +162,8 @@ contextual_prefix = true
                     max_retries: 1,
                 },
             }),
-            expander: Some(TextInferenceConfig {
+            expander: Some(ExpanderInferenceConfig {
+                adapter: ExpanderAdapter::JsonVariants,
                 provider: TextInferenceProvider::OpenAiCompatible {
                     output_mode: TextInferenceOutputMode::JsonObject,
                     model: "expand-1".to_string(),
@@ -272,7 +273,8 @@ fn save_writes_index_toml() {
                     max_retries: 1,
                 },
             }),
-            expander: Some(TextInferenceConfig {
+            expander: Some(ExpanderInferenceConfig {
+                adapter: ExpanderAdapter::JsonVariants,
                 provider: TextInferenceProvider::OpenAiCompatible {
                     output_mode: TextInferenceOutputMode::JsonObject,
                     model: "expand-1".to_string(),
@@ -360,7 +362,8 @@ fn save_writes_index_toml() {
                     max_retries: 1,
                 },
             }),
-            expander: Some(TextInferenceConfig {
+            expander: Some(ExpanderInferenceConfig {
+                adapter: ExpanderAdapter::JsonVariants,
                 provider: TextInferenceProvider::OpenAiCompatible {
                     output_mode: TextInferenceOutputMode::JsonObject,
                     model: "expand-1".to_string(),
@@ -643,6 +646,33 @@ base_url = "api.openai.com/v1"
 }
 
 #[test]
+fn load_rejects_qmd_adapter_with_openai_provider() {
+    let tmp = tempdir().expect("create tempdir");
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    let config_file = config_dir.join(CONFIG_FILENAME);
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        &config_file,
+        r#"
+[inference.expander]
+provider = "openai_compatible"
+adapter = "qmd"
+output_mode = "text"
+model = "expand-1"
+base_url = "https://api.openai.com/v1"
+"#,
+    )
+    .expect("write config file");
+
+    let err = load_from_file(&config_file, &config_dir, &cache_dir)
+        .expect_err("qmd adapter should require local llama");
+    assert!(err
+        .to_string()
+        .contains("inference.expander.adapter=qmd requires provider=local_llama"));
+}
+
+#[test]
 fn load_rejects_invalid_ranking_config() {
     let tmp = tempdir().expect("create tempdir");
     let config_dir = tmp.path().join("config");
@@ -724,7 +754,8 @@ provider = "local_llama"
     );
     assert_eq!(
         config.inference.expander,
-        Some(TextInferenceConfig {
+        Some(ExpanderInferenceConfig {
+            adapter: ExpanderAdapter::Qmd,
             provider: TextInferenceProvider::LocalLlama {
                 model_file: None,
                 max_tokens: DEFAULT_LOCAL_EXPANDER_MAX_TOKENS,

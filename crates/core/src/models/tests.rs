@@ -5,8 +5,9 @@ use serde_json::json;
 use tempfile::tempdir;
 
 use crate::config::{
-    EmbeddingConfig, InferenceConfig, ModelConfig, ModelProvider, ModelSourceConfig,
-    TextInferenceConfig, TextInferenceOutputMode, TextInferenceProvider,
+    EmbeddingConfig, ExpanderAdapter, ExpanderInferenceConfig, InferenceConfig, ModelConfig,
+    ModelProvider, ModelSourceConfig, TextInferenceConfig, TextInferenceOutputMode,
+    TextInferenceProvider,
 };
 use crate::models::{
     build_embedder, pull_with_downloader, pull_with_downloader_and_progress,
@@ -235,7 +236,8 @@ fn local_runtime_config() -> (EmbeddingConfig, InferenceConfig) {
                     n_gpu_layers: Some(0),
                 },
             }),
-            expander: Some(TextInferenceConfig {
+            expander: Some(ExpanderInferenceConfig {
+                adapter: ExpanderAdapter::Qmd,
                 provider: TextInferenceProvider::LocalLlama {
                     model_file: None,
                     max_tokens: 128,
@@ -553,7 +555,8 @@ fn pull_uses_configured_relative_file_overrides() {
                 n_gpu_layers: Some(0),
             },
         }),
-        expander: Some(TextInferenceConfig {
+        expander: Some(ExpanderInferenceConfig {
+            adapter: ExpanderAdapter::JsonVariants,
             provider: TextInferenceProvider::OpenAiCompatible {
                 output_mode: TextInferenceOutputMode::JsonObject,
                 model: "remote".to_string(),

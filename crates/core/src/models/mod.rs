@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::config::{
-    EmbeddingConfig, InferenceConfig, ModelConfig, ModelProvider, ModelSourceConfig,
-    TextInferenceConfig, TextInferenceProvider,
+    EmbeddingConfig, ExpanderInferenceConfig, InferenceConfig, ModelConfig, ModelProvider,
+    ModelSourceConfig, TextInferenceConfig, TextInferenceProvider,
 };
 use crate::Result;
 
@@ -21,13 +21,13 @@ mod embedder;
 mod expander;
 mod http;
 mod inference;
-mod local_expander;
 mod local_gguf;
 mod local_llama;
 mod local_onnx;
 mod local_reranker;
 mod provider;
 mod providers;
+mod qmd_expander;
 mod reranker;
 mod text;
 
@@ -339,7 +339,7 @@ fn local_download_requirements_for_target(
             inference.reranker.as_ref(),
             "inference.reranker.model_file",
         ),
-        ModelRole::Expander => text_role_download_requirements(
+        ModelRole::Expander => expander_download_requirements(
             inference.expander.as_ref(),
             "inference.expander.model_file",
         ),
@@ -399,11 +399,31 @@ fn text_role_download_requirements(
     config: Option<&TextInferenceConfig>,
     config_field: &'static str,
 ) -> Option<Vec<ModelFileRequirement>> {
-    let Some(config) = config else {
+    text_inference_provider_download_requirements(
+        config.map(|config| &config.provider),
+        config_field,
+    )
+}
+
+fn expander_download_requirements(
+    config: Option<&ExpanderInferenceConfig>,
+    config_field: &'static str,
+) -> Option<Vec<ModelFileRequirement>> {
+    text_inference_provider_download_requirements(
+        config.map(|config| &config.provider),
+        config_field,
+    )
+}
+
+fn text_inference_provider_download_requirements(
+    provider: Option<&TextInferenceProvider>,
+    config_field: &'static str,
+) -> Option<Vec<ModelFileRequirement>> {
+    let Some(provider) = provider else {
         return None;
     };
 
-    match &config.provider {
+    match provider {
         TextInferenceProvider::LocalLlama { model_file, .. } => {
             let configured = configured_repo_path(model_file.as_deref())
                 .map(|path| ModelFileRequirement::ExactPath { path, config_field });

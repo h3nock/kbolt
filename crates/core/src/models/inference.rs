@@ -5,12 +5,14 @@ use kbolt_types::KboltError;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::config::{EmbeddingConfig, ModelConfig, TextInferenceConfig, TextInferenceProvider};
+use crate::config::{
+    EmbeddingConfig, ExpanderAdapter, ExpanderInferenceConfig, ModelConfig, TextInferenceConfig,
+    TextInferenceProvider,
+};
 use crate::models::artifacts::resolve_file_with_extension;
 use crate::models::chat::HttpChatClient;
 use crate::models::completion::CompletionClient;
 use crate::models::http::{HttpJsonClient, HttpOperation};
-use crate::models::local_expander::LocalLlamaExpander;
 use crate::models::local_gguf::build_local_gguf_embedder;
 use crate::models::local_llama::{
     build_local_llama_client_shared, build_local_llama_completion_client,
@@ -18,6 +20,7 @@ use crate::models::local_llama::{
 };
 use crate::models::local_onnx::build_local_onnx_embedder;
 use crate::models::local_reranker::LocalQwen3Reranker;
+use crate::models::qmd_expander::LocalQmdExpander;
 use crate::models::{
     normalize_query_text, resolve_model_artifact, Embedder, EmbeddingInputKind, ExpandedQuery,
     Expander, ExpansionRoute, ModelRole, Reranker,
@@ -44,7 +47,7 @@ struct ChatBackedReranker {
 }
 
 #[derive(Clone)]
-struct ChatBackedExpander {
+struct JsonVariantsExpander {
     chat: Arc<dyn CompletionClient>,
 }
 
@@ -94,13 +97,13 @@ pub(crate) fn build_reranker_with_local_runtime(
 
 #[cfg(test)]
 pub(crate) fn build_expander(
-    config: Option<&TextInferenceConfig>,
+    config: Option<&ExpanderInferenceConfig>,
 ) -> Result<Option<Arc<dyn Expander>>> {
     build_expander_inner(config, None)
 }
 
 pub(crate) fn build_expander_with_local_runtime(
-    config: Option<&TextInferenceConfig>,
+    config: Option<&ExpanderInferenceConfig>,
     model_config: &ModelConfig,
     model_dir: &Path,
 ) -> Result<Option<Arc<dyn Expander>>> {
@@ -289,31 +292,42 @@ fn build_reranker_inner(
 }
 
 fn build_expander_inner(
-    config: Option<&TextInferenceConfig>,
+    config: Option<&ExpanderInferenceConfig>,
     local_runtime: Option<LocalRuntimeContext>,
 ) -> Result<Option<Arc<dyn Expander>>> {
     let Some(config) = config else {
         return Ok(None);
     };
 
-    let expander: Arc<dyn Expander> = match &config.provider {
-        TextInferenceProvider::LocalLlama {
-            model_file,
-            max_tokens,
-            n_ctx,
-            n_gpu_layers,
-        } => {
+    let expander: Arc<dyn Expander> = match (&config.adapter, &config.provider) {
+        (ExpanderAdapter::JsonVariants, provider) => Arc::new(JsonVariantsExpander {
+            chat: build_completion_client_for_role(
+                provider,
+                local_runtime,
+                ModelRole::Expander,
+                "expander",
+            )?,
+        }),
+        (
+            ExpanderAdapter::Qmd,
+            TextInferenceProvider::LocalLlama {
+                model_file,
+                max_tokens,
+                n_ctx,
+                n_gpu_layers,
+            },
+        ) => {
             let runtime = local_runtime.ok_or_else(|| {
                 KboltError::Inference(
-                    "local_llama expander requires local runtime context".to_string(),
+                    "local_llama qmd expander requires local runtime context".to_string(),
                 )
             })?;
             let model_file = model_file.clone();
             let max_tokens = *max_tokens;
             let n_ctx = *n_ctx;
             let n_gpu_layers = *n_gpu_layers;
-            Arc::new(LazyArc::new("local llama expander", move || {
-                build_local_llama_expander(
+            Arc::new(LazyArc::new("local qmd expander", move || {
+                build_local_qmd_expander(
                     &runtime.model_config,
                     &runtime.model_dir,
                     model_file.as_deref(),
@@ -323,14 +337,12 @@ fn build_expander_inner(
                 )
             }))
         }
-        TextInferenceProvider::OpenAiCompatible { .. } => Arc::new(ChatBackedExpander {
-            chat: build_completion_client_for_role(
-                &config.provider,
-                local_runtime,
-                ModelRole::Expander,
-                "expander",
-            )?,
-        }),
+        (ExpanderAdapter::Qmd, TextInferenceProvider::OpenAiCompatible { .. }) => {
+            return Err(KboltError::Inference(
+                "expander adapter qmd is only supported with provider=local_llama".to_string(),
+            )
+            .into())
+        }
     };
     Ok(Some(expander))
 }
@@ -481,7 +493,7 @@ impl Reranker for ChatBackedReranker {
     }
 }
 
-impl Expander for ChatBackedExpander {
+impl Expander for JsonVariantsExpander {
     fn expand(&self, query: &str) -> Result<Vec<ExpandedQuery>> {
         let normalized = normalize_query_text(query);
         if normalized.is_empty() {
@@ -603,7 +615,7 @@ fn build_local_qwen3_reranker(
     Ok(Arc::new(LocalQwen3Reranker::new(model, n_ctx)))
 }
 
-fn build_local_llama_expander(
+fn build_local_qmd_expander(
     model_config: &ModelConfig,
     model_dir: &Path,
     model_file: Option<&str>,
@@ -619,7 +631,7 @@ fn build_local_llama_expander(
         "inference.expander.model_file",
     )?;
     let client = build_local_llama_client_shared(&gguf_path, max_tokens, n_ctx, n_gpu_layers)?;
-    Ok(Arc::new(LocalLlamaExpander::new(client)))
+    Ok(Arc::new(LocalQmdExpander::new(client)))
 }
 
 fn parse_json_payload<T>(label: &str, content: &str) -> Result<T>
@@ -781,6 +793,23 @@ mod tests {
         output_mode: TextInferenceOutputMode,
     ) -> TextInferenceConfig {
         TextInferenceConfig {
+            provider: TextInferenceProvider::OpenAiCompatible {
+                output_mode,
+                model: "text-model".to_string(),
+                base_url,
+                api_key_env: None,
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        }
+    }
+
+    fn base_expander_config(
+        base_url: String,
+        output_mode: TextInferenceOutputMode,
+    ) -> ExpanderInferenceConfig {
+        ExpanderInferenceConfig {
+            adapter: ExpanderAdapter::JsonVariants,
             provider: TextInferenceProvider::OpenAiCompatible {
                 output_mode,
                 model: "text-model".to_string(),
@@ -1267,7 +1296,7 @@ mod tests {
   ]
 }"#;
         let base_url = serve_once(200, body);
-        let config = base_text_config(base_url, TextInferenceOutputMode::JsonObject);
+        let config = base_expander_config(base_url, TextInferenceOutputMode::JsonObject);
         let expander = build_expander(Some(&config)).expect("build expander");
         let expander = expander.expect("expander should exist");
 
@@ -1285,6 +1314,29 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn qmd_adapter_rejects_openai_compatible_provider() {
+        let config = ExpanderInferenceConfig {
+            adapter: ExpanderAdapter::Qmd,
+            provider: TextInferenceProvider::OpenAiCompatible {
+                output_mode: TextInferenceOutputMode::Text,
+                model: "text-model".to_string(),
+                base_url: "https://example.test/v1".to_string(),
+                api_key_env: None,
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        };
+
+        let err = match build_expander(Some(&config)) {
+            Ok(_) => panic!("qmd should reject openai provider"),
+            Err(err) => err,
+        };
+        assert!(err
+            .to_string()
+            .contains("expander adapter qmd is only supported with provider=local_llama"));
     }
 
     #[test]

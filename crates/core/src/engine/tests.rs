@@ -5,8 +5,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tempfile::tempdir;
 
 use crate::config::{
-    ChunkingConfig, Config, EmbeddingConfig, InferenceConfig, ModelConfig, ModelProvider,
-    ModelSourceConfig, RankingConfig, ReapingConfig, TextInferenceConfig, TextInferenceProvider,
+    ChunkingConfig, Config, EmbeddingConfig, ExpanderAdapter, ExpanderInferenceConfig,
+    InferenceConfig, ModelConfig, ModelProvider, ModelSourceConfig, RankingConfig, ReapingConfig,
+    TextInferenceConfig, TextInferenceProvider,
 };
 use crate::engine::{retrieval_text_with_prefix, Engine};
 use crate::ingest::chunk::FinalChunkKind;
@@ -373,6 +374,18 @@ fn local_text_inference_config(model_file: &str) -> TextInferenceConfig {
     }
 }
 
+fn local_expander_config(model_file: &str) -> ExpanderInferenceConfig {
+    ExpanderInferenceConfig {
+        adapter: ExpanderAdapter::Qmd,
+        provider: TextInferenceProvider::LocalLlama {
+            model_file: Some(model_file.to_string()),
+            max_tokens: 256,
+            n_ctx: 2048,
+            n_gpu_layers: Some(0),
+        },
+    }
+}
+
 fn test_engine_with_local_model_runtime() -> Engine {
     let root = tempdir().expect("create temp root");
     let root_path = root.path().to_path_buf();
@@ -416,7 +429,8 @@ fn test_engine_with_local_model_runtime() -> Engine {
                     n_gpu_layers: Some(0),
                 },
             }),
-            expander: Some(TextInferenceConfig {
+            expander: Some(ExpanderInferenceConfig {
+                adapter: ExpanderAdapter::Qmd,
                 provider: TextInferenceProvider::LocalLlama {
                     model_file: None,
                     max_tokens: 256,
@@ -512,7 +526,7 @@ fn test_engine_with_missing_expander_model() -> Engine {
         embeddings: None,
         inference: InferenceConfig {
             reranker: None,
-            expander: Some(local_text_inference_config("missing-expander.gguf")),
+            expander: Some(local_expander_config("missing-expander.gguf")),
         },
         reaping: ReapingConfig { days: 7 },
         chunking: ChunkingConfig::default(),
