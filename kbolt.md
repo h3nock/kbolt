@@ -217,7 +217,8 @@ core/
     completion.rs        # shared completion client contract
     local_onnx.rs        # local ONNX embedder runtime
     local_gguf.rs        # local GGUF embedder runtime
-    local_llama.rs       # local llama completion runtime
+    local_llama.rs       # local llama generation runtime (raw/chat + sampling + grammar)
+    qmd_expander.rs      # qmd local expander adapter
     artifacts.rs         # model artifact file discovery helpers
     text.rs              # shared text normalization helpers
 
@@ -332,8 +333,19 @@ pub trait Reranker: Send + Sync {
     fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<f32>>;
 }
 
+pub enum ExpansionRoute {
+    Both,
+    KeywordOnly,
+    DenseOnly,
+}
+
+pub struct ExpandedQuery {
+    pub text: String,
+    pub route: ExpansionRoute,
+}
+
 pub trait Expander: Send + Sync {
-    fn expand(&self, query: &str) -> Result<Vec<String>>;
+    fn expand(&self, query: &str) -> Result<Vec<ExpandedQuery>>;
 }
 
 pub trait Generator: Send + Sync {
@@ -1611,8 +1623,9 @@ n_ctx = 2048
 
 [inference.expander]
 provider = "local_llama"
+adapter = "qmd"
 model_file = "qmd-query-expansion-1.7B-q4_k_m.gguf"
-max_tokens = 64
+max_tokens = 600
 n_ctx = 2048
 # omit n_gpu_layers to auto-detect acceleration
 
@@ -1658,7 +1671,9 @@ Notes:
 - `provider = "local_gguf"` loads a GGUF artifact from `~/.cache/kbolt/models/embedder` (or explicit `model_file`) and fails fast when artifact selection is ambiguous.
 - The current `local_gguf` embedding path is tuned for the default EmbeddingGemma model family: query inputs are prefixed with `task: search result | query: `, document inputs with `title: none | text: `, sequence embeddings use mean pooling, and vectors are L2-normalized before storage/search.
 - `provider = "local_llama"` loads GGUF artifacts from role directories (`reranker` / `expander`) and fails fast when artifact selection is ambiguous.
+- `inference.expander` separates runtime `provider` from expander `adapter`. V1 adapters are `json_variants` and `qmd`; `adapter = "qmd"` is currently supported only with `provider = "local_llama"`.
 - The current local reranker path is intentionally Qwen3-specific: it builds the documented Qwen3 reranker prompt contract, uses rank pooling, and should be treated as support for Qwen3-style GGUF rerankers rather than a generic local cross-encoder interface.
+- The current local qmd expander path is intentionally qmd-specific: the adapter owns the `/no_think Expand this search query: ...` prompt, applies the model's GGUF chat template via the local chat prompt path, owns the qmd grammar and non-greedy sampler defaults, and maps `lex` / `vec` / `hyde` into routed `ExpandedQuery` values. `local_llama` remains the reusable runtime underneath it.
 
 ---
 
