@@ -489,7 +489,7 @@ pub struct SearchResult {
     pub collection: String,
     pub heading: Option<String>,           // chunk heading breadcrumb within the document
     pub text: String,                      // chunk content (read from disk at offset/length)
-    pub score: f32,                        // final relevance score [0, 1]
+    pub score: f32,                        // final query-local ranking score [0, 1]
     pub signals: Option<SearchSignals>,    // per-signal breakdown (populated when debug requested)
 }
 
@@ -497,7 +497,7 @@ pub struct SearchSignals {
     pub bm25: Option<f32>,                 // normalized BM25 score
     pub dense: Option<f32>,                // cosine similarity
     pub rrf: f32,                          // RRF fusion score
-    pub reranker: Option<f32>,             // cross-encoder score
+    pub reranker: Option<f32>,             // raw cross-encoder score used for rerank ordering
 }
 ```
 
@@ -1538,7 +1538,7 @@ Both signals operate on the same unit: individual chunks.
 
 Both run in parallel threads. Because both operate at chunk granularity, RRF fusion compares equivalent units.
 
-**Cross-space search**: When searching across multiple spaces (no `--space` specified), each space's Tantivy index and USearch file are queried independently. Candidate lists from all spaces are concatenated before entering fusion. The reranker (Stage 8) normalizes scores across spaces — since it scores each (query, chunk) pair independently, it doesn't matter which space the chunk came from.
+**Cross-space search**: When searching across multiple spaces (no `--space` specified), each space's Tantivy index and USearch file are queried independently. Candidate lists from all spaces are concatenated before entering fusion. Stage 8 then reranks the combined document pool without regard to source space.
 
 ### Stage 5: Fusion (RRF)
 
@@ -1550,9 +1550,12 @@ RRF(d) = w_bm25 / (k + rank_bm25(d)) + w_dense / (k + rank_dense(d))
 
 Defaults: `k=60`, `w_bm25=1.0`, `w_dense=1.0`. Agreement bonus: 1.2x multiplier for chunks appearing in both result sets.
 
-### Stage 6: Document Deduplication
+### Stage 6: Candidate Carry-Through
 
-Multiple chunks from the same document → keep only the highest-scoring chunk per document. Remaining slots filled by next-best results from other documents.
+Retrieval remains chunk-based through the ranking pipeline:
+- no document-level deduplication is applied before final result assembly
+- when reranking is enabled, Stage 8 selects one highest-RRF representative chunk per document (MaxP) for reranker input construction only
+- the final result set may still contain multiple chunks from the same document
 
 ### Stage 7: Context Expansion
 
@@ -1566,9 +1569,13 @@ Neighbor expansion is used for answer context in result assembly. It does not ch
 ### Stage 8: Reranking
 
 Cross-encoder (Qwen3-Reranker 0.6B GGUF) scores top-20 candidates:
-- Input: (query, primary-hit-chunk text) pairs — reranker scores the original hit chunk (optionally with deterministic contextual prefix), not neighbor-expanded context
-- Output: relevance score per pair
-- Final score: reranker score when reranking is applied; first-stage retrieval remains the candidate-generation stage and debug signal source.
+- Input: (query, primary-hit-chunk text) pairs — reranker scores one representative chunk per document (optionally with deterministic contextual prefix), not neighbor-expanded context
+- Output: raw query-local relevance score per representative document
+- Score application:
+  - reranker rank establishes between-document priority
+  - chunk-level normalized RRF keeps ordering within each reranked document
+  - final result score is the product of a document-rank prior and the chunk's relative RRF within that document
+- Debug signals keep the raw reranker score and first-stage retrieval signals; the final result score is not a calibrated probability.
 
 ### Stage 9: Result Assembly
 
