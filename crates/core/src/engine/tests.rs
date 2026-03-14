@@ -2680,9 +2680,9 @@ fn search_rerank_sends_one_representative_per_document() {
         // Write one large document that will produce multiple chunks, plus
         // a second small document. Both mention the query term.
         let mut big_body = String::new();
-        for i in 0..30 {
+        for i in 0..120 {
             big_body.push_str(&format!(
-                "Section {i}: This section discusses the search query topic in detail.\n\n"
+                "Section {i}: This section discusses the search query topic in detail, covers retrieval scoring behavior, and repeats the search query topic so the document spans multiple chunks.\n\n"
             ));
         }
         write_text_file(&work_path.join("big.md"), &big_body);
@@ -2729,6 +2729,32 @@ fn search_rerank_sends_one_representative_per_document() {
                 "expected all chunks to inherit document-level reranker score"
             );
         }
+
+        let big_results = response
+            .results
+            .iter()
+            .filter(|result| result.path.ends_with("big.md"))
+            .collect::<Vec<_>>();
+        assert!(
+            big_results.len() >= 2,
+            "expected multiple chunks from the large document in the result set"
+        );
+        assert!(
+            big_results[0].score > big_results[1].score,
+            "expected within-document chunk ordering to keep retrieval differentiation after reranking"
+        );
+        assert_eq!(
+            big_results[0]
+                .signals
+                .as_ref()
+                .expect("debug signals")
+                .reranker,
+            big_results[1]
+                .signals
+                .as_ref()
+                .expect("debug signals")
+                .reranker
+        );
     });
 }
 

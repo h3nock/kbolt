@@ -745,9 +745,14 @@ fn select_rerank_representatives(
     indices
 }
 
-/// Applies per-document reranker scores to all candidates. Every chunk from
-/// a reranked document inherits that document's reranker score. Chunks from
-/// non-reranked documents get a fallback score below all reranked scores.
+fn reranked_doc_prior(doc_rank: usize) -> f32 {
+    1.0 / ((doc_rank.max(1) + 1) as f32).log2()
+}
+
+/// Applies doc-level reranker ordering to the candidate pool. Reranked
+/// documents are ranked by reranker score, while chunk-level RRF preserves
+/// ordering within each document. Chunks from non-reranked documents get a
+/// fallback score below the reranked pool.
 fn apply_reranker_scores(
     candidates: &mut [PendingSearchCandidate],
     doc_reranker_scores: &HashMap<i64, f32>,
@@ -756,17 +761,65 @@ fn apply_reranker_scores(
         return;
     }
 
-    let mut fallback_score = doc_reranker_scores
-        .values()
-        .copied()
-        .fold(f32::INFINITY, f32::min)
-        .next_down();
+    let mut reranked_docs = Vec::new();
+    let mut seen_reranked_docs = HashSet::new();
+    let mut max_rrf_by_doc = HashMap::new();
 
-    for candidate in candidates {
+    for (index, candidate) in candidates.iter().enumerate() {
+        let Some(&reranker_score) = doc_reranker_scores.get(&candidate.doc_id) else {
+            continue;
+        };
+
+        if seen_reranked_docs.insert(candidate.doc_id) {
+            reranked_docs.push((candidate.doc_id, reranker_score, index));
+        }
+
+        max_rrf_by_doc
+            .entry(candidate.doc_id)
+            .and_modify(|max_rrf: &mut f32| *max_rrf = f32::max(*max_rrf, candidate.rrf))
+            .or_insert(candidate.rrf);
+    }
+
+    reranked_docs.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.2.cmp(&right.2))
+    });
+
+    let doc_rank_by_doc: HashMap<i64, usize> = reranked_docs
+        .iter()
+        .enumerate()
+        .map(|(index, (doc_id, _, _))| (*doc_id, index + 1))
+        .collect();
+
+    let mut lowest_reranked_score = f32::INFINITY;
+
+    for candidate in candidates.iter_mut() {
         if let Some(reranker_score) = doc_reranker_scores.get(&candidate.doc_id).copied() {
             candidate.reranker = Some(reranker_score);
-            candidate.final_score = reranker_score;
-        } else {
+
+            let doc_rank = *doc_rank_by_doc
+                .get(&candidate.doc_id)
+                .expect("reranked document rank missing");
+            let doc_prior = reranked_doc_prior(doc_rank);
+            let max_rrf = *max_rrf_by_doc
+                .get(&candidate.doc_id)
+                .expect("reranked document max rrf missing");
+            let chunk_scale = if max_rrf > 0.0 {
+                (candidate.rrf / max_rrf).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+
+            candidate.final_score = doc_prior * chunk_scale;
+            lowest_reranked_score = lowest_reranked_score.min(candidate.final_score);
+        }
+    }
+
+    let mut fallback_score = lowest_reranked_score.next_down();
+    for candidate in candidates.iter_mut() {
+        if candidate.reranker.is_none() {
             candidate.final_score = fallback_score;
             fallback_score = fallback_score.next_down();
         }
@@ -860,6 +913,63 @@ fn load_candidate_bytes<'a>(
     }
 
     Ok(bytes_by_doc.get(&candidate.doc_id).map(Vec::as_slice))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ingest::chunk::FinalChunkKind;
+
+    fn candidate(doc_id: i64, chunk_id: i64, rrf: f32) -> PendingSearchCandidate {
+        PendingSearchCandidate {
+            chunk_id,
+            doc_id,
+            docid: format!("#{doc_id}"),
+            path: format!("doc-{doc_id}.md"),
+            title: format!("Doc {doc_id}"),
+            space: "work".to_string(),
+            collection: "docs".to_string(),
+            heading: None,
+            chunk: ChunkRow {
+                id: chunk_id,
+                doc_id,
+                seq: chunk_id as i32,
+                offset: 0,
+                length: 0,
+                heading: None,
+                kind: FinalChunkKind::Paragraph,
+            },
+            full_path: std::path::PathBuf::from(format!("doc-{doc_id}.md")),
+            bm25: None,
+            dense: None,
+            rrf,
+            reranker: None,
+            final_score: rrf,
+        }
+    }
+
+    #[test]
+    fn apply_reranker_scores_uses_doc_rank_and_within_doc_rrf_scale() {
+        let mut candidates = vec![
+            candidate(10, 100, 0.90),
+            candidate(20, 200, 1.00),
+            candidate(10, 101, 0.45),
+            candidate(30, 300, 0.30),
+        ];
+        let doc_reranker_scores = HashMap::from([(10, 0.80), (20, 0.95)]);
+
+        apply_reranker_scores(&mut candidates, &doc_reranker_scores);
+
+        assert_eq!(candidates[0].reranker, Some(0.80));
+        assert_eq!(candidates[1].reranker, Some(0.95));
+        assert_eq!(candidates[2].reranker, Some(0.80));
+        assert_eq!(candidates[3].reranker, None);
+
+        assert!((candidates[1].final_score - 1.0).abs() < 1e-6);
+        assert!((candidates[0].final_score - reranked_doc_prior(2)).abs() < 1e-6);
+        assert!((candidates[2].final_score - (reranked_doc_prior(2) * 0.5)).abs() < 1e-6);
+        assert!(candidates[3].final_score < candidates[2].final_score);
+    }
 }
 
 fn fuse_ranked_chunks(
