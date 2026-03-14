@@ -3704,6 +3704,74 @@ fn update_isolates_backlog_embedding_failures() {
 }
 
 #[test]
+fn update_backlog_embedding_advances_past_failed_prefix() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_embedder(Arc::new(SelectiveFailureEmbedder));
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        for index in 0..64 {
+            write_text_file(
+                &collection_path.join(format!("bad-{index:02}.md")),
+                "EMBED_FAIL trigger\n",
+            );
+        }
+        write_text_file(&collection_path.join("good.md"), "helpful setup guide\n");
+
+        engine
+            .update(UpdateOptions {
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                no_embed: true,
+                dry_run: false,
+                verbose: false,
+            })
+            .expect("index without embeddings");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("embed backlog after failed prefix");
+
+        assert_eq!(report.skipped_mtime, 65);
+        assert_eq!(report.embedded, 1);
+        assert!(
+            report.errors.len() >= 64,
+            "expected one error per failed prefix chunk, got {:?}",
+            report.errors
+        );
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(work_space.id))
+                .expect("count embedded chunks"),
+            1
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_usearch("work")
+                .expect("count usearch vectors"),
+            1
+        );
+
+        let files = engine
+            .list_files(Some("work"), "api", None)
+            .expect("list files");
+        let good = files
+            .iter()
+            .find(|file| file.path == "good.md")
+            .expect("good file entry");
+        assert!(good.embedded, "good file should be embedded");
+    });
+}
+
+#[test]
 fn update_records_embeddings_with_configured_embedding_model_key() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_embedder_and_embedding_model(

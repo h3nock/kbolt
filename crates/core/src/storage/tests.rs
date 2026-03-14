@@ -1486,6 +1486,13 @@ fn get_unembedded_chunks_filters_active_and_model_specific_backlog() {
                     heading: None,
                     kind: FinalChunkKind::Section,
                 },
+                super::ChunkInsert {
+                    seq: 2,
+                    offset: 150,
+                    length: 25,
+                    heading: None,
+                    kind: FinalChunkKind::Section,
+                },
             ],
         )
         .expect("insert active chunks");
@@ -1513,9 +1520,9 @@ fn get_unembedded_chunks_filters_active_and_model_specific_backlog() {
         .expect("deactivate second doc");
 
     let backlog = storage
-        .get_unembedded_chunks("model-a", 10)
+        .get_unembedded_chunks("model-a", 0, 10)
         .expect("query backlog");
-    assert_eq!(backlog.len(), 1);
+    assert_eq!(backlog.len(), 2);
     assert_eq!(backlog[0].chunk_id, active_chunk_ids[1]);
     assert_eq!(backlog[0].doc_path, "src/active.rs");
     assert_eq!(
@@ -1525,12 +1532,20 @@ fn get_unembedded_chunks_filters_active_and_model_specific_backlog() {
     assert_eq!(backlog[0].space_name, "work");
     assert_eq!(backlog[0].offset, 100);
     assert_eq!(backlog[0].length, 50);
+    assert_eq!(backlog[1].chunk_id, active_chunk_ids[2]);
     assert_ne!(backlog[0].chunk_id, inactive_chunk_ids[0]);
 
     let limited = storage
-        .get_unembedded_chunks("model-a", 1)
+        .get_unembedded_chunks("model-a", 0, 1)
         .expect("query limited backlog");
     assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].chunk_id, active_chunk_ids[1]);
+
+    let next_page = storage
+        .get_unembedded_chunks("model-a", limited[0].chunk_id, 10)
+        .expect("query paged backlog");
+    assert_eq!(next_page.len(), 1);
+    assert_eq!(next_page[0].chunk_id, active_chunk_ids[2]);
 }
 
 #[test]

@@ -156,29 +156,48 @@ impl Engine {
         };
 
         let model = self.embedding_model_key();
+        let mut after_chunk_id = 0_i64;
         loop {
-            let backlog = self.storage.get_unembedded_chunks(model, 64)?;
+            let backlog = self
+                .storage
+                .get_unembedded_chunks(model, after_chunk_id, 64)?;
             if backlog.is_empty() {
                 break;
             }
 
+            after_chunk_id = backlog
+                .last()
+                .map(|record| record.chunk_id)
+                .expect("non-empty backlog should have a last chunk id");
+
             let mut pending = Vec::new();
+            let mut bytes_by_path: HashMap<std::path::PathBuf, Option<Vec<u8>>> = HashMap::new();
             for record in backlog {
                 if failed_chunk_ids.contains(&record.chunk_id) {
                     continue;
                 }
 
                 let full_path = record.collection_path.join(&record.doc_path);
-                let bytes = match std::fs::read(&full_path) {
-                    Ok(bytes) => bytes,
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(err) => {
-                        report.errors.push(file_error(
-                            Some(full_path),
-                            format!("embed read failed: {err}"),
-                        ));
-                        continue;
-                    }
+                if !bytes_by_path.contains_key(&full_path) {
+                    let bytes = match std::fs::read(&full_path) {
+                        Ok(bytes) => Some(bytes),
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(err) => {
+                            report.errors.push(file_error(
+                                Some(full_path.clone()),
+                                format!("embed read failed: {err}"),
+                            ));
+                            None
+                        }
+                    };
+                    bytes_by_path.insert(full_path.clone(), bytes);
+                }
+
+                let Some(bytes) = bytes_by_path
+                    .get(&full_path)
+                    .and_then(|bytes| bytes.as_deref())
+                else {
+                    continue;
                 };
 
                 let mut text = chunk_text_from_bytes(&bytes, record.offset, record.length);
@@ -195,7 +214,7 @@ impl Engine {
             }
 
             if pending.is_empty() {
-                break;
+                continue;
             }
 
             let result =

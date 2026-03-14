@@ -1223,7 +1223,12 @@ CREATE TABLE IF NOT EXISTS embeddings (
         Ok(())
     }
 
-    pub fn get_unembedded_chunks(&self, model: &str, limit: usize) -> Result<Vec<EmbedRecord>> {
+    pub fn get_unembedded_chunks(
+        &self,
+        model: &str,
+        after_chunk_id: i64,
+        limit: usize,
+    ) -> Result<Vec<EmbedRecord>> {
         let conn = self
             .db
             .lock()
@@ -1238,12 +1243,12 @@ CREATE TABLE IF NOT EXISTS embeddings (
              JOIN collections col ON col.id = d.collection_id
              JOIN spaces s ON s.id = col.space_id
              LEFT JOIN embeddings e ON e.chunk_id = c.id AND e.model = ?1
-             WHERE d.active = 1 AND e.chunk_id IS NULL
+             WHERE d.active = 1 AND e.chunk_id IS NULL AND c.id > ?2
              ORDER BY c.id ASC
-             LIMIT ?2",
+             LIMIT ?3",
         )?;
 
-        let rows = stmt.query_map(params![model, sql_limit], |row| {
+        let rows = stmt.query_map(params![model, after_chunk_id, sql_limit], |row| {
             let offset_value: i64 = row.get(4)?;
             let length_value: i64 = row.get(5)?;
             Ok(EmbedRecord {
