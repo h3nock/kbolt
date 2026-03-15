@@ -74,6 +74,12 @@ pub struct EvalArgs {
 }
 
 #[derive(Debug, Args, PartialEq, Eq)]
+pub struct EvalImportArgs {
+    #[command(subcommand)]
+    pub dataset: EvalImportCommand,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
 pub struct EvalRunArgs {
     #[arg(long, value_name = "path")]
     pub file: Option<PathBuf>,
@@ -226,6 +232,24 @@ pub enum ModelsCommand {
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum EvalCommand {
     Run(EvalRunArgs),
+    Import(EvalImportArgs),
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum EvalImportCommand {
+    #[command(
+        about = "import BEIR SciFact from an extracted dataset directory",
+        long_about = "Import BEIR SciFact from an extracted dataset directory.\n\nExpected source layout:\n  corpus.jsonl\n  queries.jsonl\n  qrels/test.tsv\n\nDataset: https://huggingface.co/datasets/BeIR/scifact"
+    )]
+    Scifact(EvalImportScifactArgs),
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct EvalImportScifactArgs {
+    #[arg(long, value_name = "dir")]
+    pub source: PathBuf,
+    #[arg(long, value_name = "dir")]
+    pub output: PathBuf,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -288,9 +312,9 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        Cli, CollectionCommand, Command, EvalCommand, EvalRunArgs, GetArgs, MultiGetArgs,
-        OutputFormat, ScheduleAddArgs, ScheduleCommand, ScheduleDayArg, ScheduleRemoveArgs,
-        SearchArgs, SpaceCommand, UpdateArgs,
+        Cli, CollectionCommand, Command, EvalCommand, EvalImportArgs, EvalImportCommand,
+        EvalImportScifactArgs, EvalRunArgs, GetArgs, MultiGetArgs, OutputFormat, ScheduleAddArgs,
+        ScheduleCommand, ScheduleDayArg, ScheduleRemoveArgs, SearchArgs, SpaceCommand, UpdateArgs,
     };
 
     fn parse<const N: usize>(args: [&str; N]) -> Cli {
@@ -614,6 +638,32 @@ mod tests {
                 if eval.command
                     == EvalCommand::Run(EvalRunArgs {
                         file: Some(PathBuf::from("/tmp/scifact.toml"))
+                    })
+        ));
+    }
+
+    #[test]
+    fn parses_eval_import_scifact_with_required_paths() {
+        let parsed = parse([
+            "kbolt",
+            "eval",
+            "import",
+            "scifact",
+            "--source",
+            "/tmp/scifact-source",
+            "--output",
+            "/tmp/scifact-bench",
+        ]);
+
+        assert!(matches!(
+            parsed.command,
+            Command::Eval(eval)
+                if eval.command
+                    == EvalCommand::Import(EvalImportArgs {
+                        dataset: EvalImportCommand::Scifact(EvalImportScifactArgs {
+                            source: PathBuf::from("/tmp/scifact-source"),
+                            output: PathBuf::from("/tmp/scifact-bench"),
+                        })
                     })
         ));
     }

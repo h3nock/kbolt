@@ -9,6 +9,20 @@ pub struct EvalJudgment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvalImportReport {
+    pub dataset: String,
+    pub source: String,
+    pub output_dir: String,
+    pub corpus_dir: String,
+    pub manifest_path: String,
+    pub default_space: String,
+    pub collection: String,
+    pub document_count: usize,
+    pub query_count: usize,
+    pub judgment_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EvalDataset {
     pub cases: Vec<EvalCase>,
 }
@@ -67,8 +81,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        EvalCase, EvalDataset, EvalJudgment, EvalModeFailure, EvalModeReport, EvalQueryReport,
-        EvalRunReport,
+        EvalCase, EvalDataset, EvalImportReport, EvalJudgment, EvalModeFailure, EvalModeReport,
+        EvalQueryReport, EvalRunReport,
     };
     use crate::SearchMode;
 
@@ -184,6 +198,39 @@ mod tests {
                         "error": "model not available"
                     }
                 ]
+            })
+        );
+    }
+
+    #[test]
+    fn eval_import_report_serializes_paths_and_counts() {
+        let value = serde_json::to_value(EvalImportReport {
+            dataset: "scifact".to_string(),
+            source: "/tmp/scifact-source".to_string(),
+            output_dir: "/tmp/scifact-bench".to_string(),
+            corpus_dir: "/tmp/scifact-bench/corpus".to_string(),
+            manifest_path: "/tmp/scifact-bench/eval.toml".to_string(),
+            default_space: "bench".to_string(),
+            collection: "scifact".to_string(),
+            document_count: 5_183,
+            query_count: 300,
+            judgment_count: 1_109,
+        })
+        .expect("serialize import report");
+
+        assert_eq!(
+            value,
+            json!({
+                "dataset": "scifact",
+                "source": "/tmp/scifact-source",
+                "output_dir": "/tmp/scifact-bench",
+                "corpus_dir": "/tmp/scifact-bench/corpus",
+                "manifest_path": "/tmp/scifact-bench/eval.toml",
+                "default_space": "bench",
+                "collection": "scifact",
+                "document_count": 5183,
+                "query_count": 300,
+                "judgment_count": 1109
             })
         );
     }

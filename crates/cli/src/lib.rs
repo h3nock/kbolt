@@ -6,12 +6,13 @@ use kbolt_core::engine::Engine;
 use kbolt_core::ModelPullEvent;
 use kbolt_core::Result;
 use kbolt_types::{
-    ActiveSpaceSource, AddCollectionRequest, AddScheduleRequest, EvalRunReport, GetRequest,
-    KboltError, Locator, MultiGetRequest, OmitReason, RemoveScheduleRequest, ScheduleAddResponse,
-    ScheduleBackend, ScheduleInterval, ScheduleIntervalUnit, ScheduleRunResult, ScheduleScope,
-    ScheduleState, ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode,
-    SearchPipeline, SearchPipelineNotice, SearchPipelineStep, SearchPipelineUnavailableReason,
-    SearchRequest, UpdateDecision, UpdateDecisionKind, UpdateOptions, UpdateReport,
+    ActiveSpaceSource, AddCollectionRequest, AddScheduleRequest, EvalImportReport, EvalRunReport,
+    GetRequest, KboltError, Locator, MultiGetRequest, OmitReason, RemoveScheduleRequest,
+    ScheduleAddResponse, ScheduleBackend, ScheduleInterval, ScheduleIntervalUnit,
+    ScheduleRunResult, ScheduleScope, ScheduleState, ScheduleStatusResponse, ScheduleTrigger,
+    ScheduleWeekday, SearchMode, SearchPipeline, SearchPipelineNotice, SearchPipelineStep,
+    SearchPipelineUnavailableReason, SearchRequest, UpdateDecision, UpdateDecisionKind,
+    UpdateOptions, UpdateReport,
 };
 
 pub struct CliAdapter {
@@ -1201,6 +1202,34 @@ fn format_eval_run_report(report: &EvalRunReport) -> String {
     lines.join("\n")
 }
 
+pub fn format_eval_import_report(report: &EvalImportReport) -> String {
+    [
+        format!("imported benchmark: {}", report.dataset),
+        format!("source: {}", report.source),
+        format!("output: {}", report.output_dir),
+        format!("corpus_dir: {}", report.corpus_dir),
+        format!("manifest: {}", report.manifest_path),
+        format!("documents: {}", report.document_count),
+        format!("queries: {}", report.query_count),
+        format!("judgments: {}", report.judgment_count),
+        "next:".to_string(),
+        format!(
+            "- create the benchmark space if needed: kbolt space add {}",
+            report.default_space
+        ),
+        format!(
+            "- register the corpus: kbolt --space {} collection add {} --name {} --no-index",
+            report.default_space, report.corpus_dir, report.collection
+        ),
+        format!(
+            "- index it: kbolt --space {} update --collection {}",
+            report.default_space, report.collection
+        ),
+        format!("- run eval: kbolt eval run --file {}", report.manifest_path),
+    ]
+    .join("\n")
+}
+
 fn relevant_judgment_count(query: &kbolt_types::EvalQueryReport) -> usize {
     query
         .judgments
@@ -1240,14 +1269,14 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        format_eval_run_report, format_schedule_add_response, format_schedule_status_response,
-        parse_editor_command, resolve_editor_command, resolve_no_rerank_for_mode, CliAdapter,
-        CliSearchOptions,
+        format_eval_import_report, format_eval_run_report, format_schedule_add_response,
+        format_schedule_status_response, parse_editor_command, resolve_editor_command,
+        resolve_no_rerank_for_mode, CliAdapter, CliSearchOptions,
     };
     use kbolt_core::engine::Engine;
     use kbolt_types::{
-        AddCollectionRequest, EvalJudgment, EvalModeReport, EvalQueryReport, EvalRunReport,
-        ScheduleAddResponse, ScheduleBackend, ScheduleDefinition, ScheduleInterval,
+        AddCollectionRequest, EvalImportReport, EvalJudgment, EvalModeReport, EvalQueryReport,
+        EvalRunReport, ScheduleAddResponse, ScheduleBackend, ScheduleDefinition, ScheduleInterval,
         ScheduleIntervalUnit, ScheduleOrphan, ScheduleRunResult, ScheduleRunState, ScheduleScope,
         ScheduleState, ScheduleStatusEntry, ScheduleStatusResponse, ScheduleTrigger,
         ScheduleWeekday, SearchMode,
@@ -1409,6 +1438,29 @@ mod tests {
         assert!(output.contains("- semantic: failed (model not available)"));
         assert!(output.contains("queries needing attention:"));
         assert!(output.contains("[deep] trait object generic | first relevant: none"));
+    }
+
+    #[test]
+    fn eval_import_report_formats_next_steps() {
+        let output = format_eval_import_report(&EvalImportReport {
+            dataset: "scifact".to_string(),
+            source: "/tmp/scifact-source".to_string(),
+            output_dir: "/tmp/scifact-bench".to_string(),
+            corpus_dir: "/tmp/scifact-bench/corpus".to_string(),
+            manifest_path: "/tmp/scifact-bench/eval.toml".to_string(),
+            default_space: "bench".to_string(),
+            collection: "scifact".to_string(),
+            document_count: 2,
+            query_count: 2,
+            judgment_count: 3,
+        });
+
+        assert!(output.contains("imported benchmark: scifact"));
+        assert!(output.contains("documents: 2"));
+        assert!(output.contains("queries: 2"));
+        assert!(output.contains("judgments: 3"));
+        assert!(output.contains("kbolt space add bench"));
+        assert!(output.contains("kbolt eval run --file /tmp/scifact-bench/eval.toml"));
     }
 
     #[test]

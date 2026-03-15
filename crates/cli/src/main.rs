@@ -2,13 +2,17 @@ use std::ffi::OsString;
 
 use clap::Parser;
 use kbolt_cli::args::{
-    Cli, CollectionCommand, Command, EvalCommand, IgnoreCommand, ModelsCommand, OutputFormat,
-    ScheduleAddArgs, ScheduleCommand, ScheduleDayArg, ScheduleRemoveArgs, SpaceCommand,
+    Cli, CollectionCommand, Command, EvalCommand, EvalImportCommand, IgnoreCommand, ModelsCommand,
+    OutputFormat, ScheduleAddArgs, ScheduleCommand, ScheduleDayArg, ScheduleRemoveArgs,
+    SpaceCommand,
 };
-use kbolt_cli::{resolve_no_rerank_for_mode, CliAdapter, CliSearchOptions};
+use kbolt_cli::{
+    format_eval_import_report, resolve_no_rerank_for_mode, CliAdapter, CliSearchOptions,
+};
 use kbolt_core::config;
 use kbolt_core::engine::Engine;
 use kbolt_core::error::CoreError;
+use kbolt_core::eval_import;
 use kbolt_mcp::stdio;
 use kbolt_mcp::McpAdapter;
 use kbolt_types::{
@@ -39,6 +43,9 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
 
     let cli = Cli::try_parse_from(argv)?;
     ensure_supported_output_format(cli.format, &cli.command)?;
+    if handle_eval_import(&cli)? {
+        return Ok(());
+    }
     maybe_print_first_run_models_hint(&cli.command, cli.format);
 
     if matches!(cli.command, Command::Mcp) {
@@ -275,6 +282,7 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
                         print_text(&line);
                     }
                 }
+                EvalCommand::Import(_) => unreachable!("eval import handled before engine setup"),
             }
         }
         Command::Schedule(schedule) => {
@@ -494,6 +502,31 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
     }
 
     Ok(())
+}
+
+fn handle_eval_import(cli: &Cli) -> std::result::Result<bool, RunError> {
+    let Command::Eval(eval) = &cli.command else {
+        return Ok(false);
+    };
+
+    let EvalCommand::Import(import) = &eval.command else {
+        return Ok(false);
+    };
+    ensure_eval_uses_local_scope(cli.space.as_deref())?;
+
+    let report = match &import.dataset {
+        EvalImportCommand::Scifact(args) => {
+            eval_import::import_scifact(&args.source, &args.output)?
+        }
+    };
+
+    if cli.format == OutputFormat::Json {
+        emit_structured_output(&report)?;
+    } else {
+        emit_text_output(cli.format, &format_eval_import_report(&report));
+    }
+
+    Ok(true)
 }
 
 #[derive(Debug)]
