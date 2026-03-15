@@ -1433,6 +1433,8 @@ During `update`, the system automatically detects and corrects two embedding int
 
 **Why no `--force-embed` flag**: Both real scenarios (model change, USearch corruption) are handled by auto-detection. A manual `--force-embed` flag would require the user to understand that embeddings exist as a separate layer, that they can go stale, and that the system might have missed something — three layers of internals. If auto-detection has a bug, the fix is to fix auto-detection, not to expose an escape hatch.
 
+**Current V1 constraint (deferred)**: Dense state is split between SQLite (embedding ledger) and USearch (vectors), so V1 does not have an atomic dense commit boundary. We keep reconcile-on-update for now and defer a stronger design until it becomes a real problem.
+
 ---
 
 ## Filesystem Sync Strategy
