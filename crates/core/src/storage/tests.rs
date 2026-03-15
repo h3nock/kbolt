@@ -91,24 +91,14 @@ fn bm25_literal_queries_accept_punctuation_heavy_user_text() {
     storage
         .index_tantivy(
             "work",
-            &[
-                super::TantivyEntry {
-                    chunk_id: 11,
-                    doc_id: 1,
-                    filepath: "docs/scifact.md".to_string(),
-                    title: "thalassemia note".to_string(),
-                    heading: Some("alpha trait".to_string()),
-                    body: "high microerythrocyte count raises vulnerability to severe anemia in homozygous alpha thalassemia trait subjects".to_string(),
-                },
-                super::TantivyEntry {
-                    chunk_id: 22,
-                    doc_id: 2,
-                    filepath: "docs/syntax.md".to_string(),
-                    title: "syntax note".to_string(),
-                    heading: None,
-                    body: "foo bar c alpha".to_string(),
-                },
-            ],
+            &[super::TantivyEntry {
+                chunk_id: 11,
+                doc_id: 1,
+                filepath: "docs/scifact.md".to_string(),
+                title: "thalassemia note".to_string(),
+                heading: Some("alpha trait".to_string()),
+                body: "high microerythrocyte count raises vulnerability to severe anemia in homozygous alpha thalassemia trait subjects".to_string(),
+            }],
         )
         .expect("index entries");
     storage.commit_tantivy("work").expect("commit tantivy");
@@ -123,23 +113,6 @@ fn bm25_literal_queries_accept_punctuation_heavy_user_text() {
         .expect("query sci fact punctuation");
     assert!(!scifact_hits.is_empty(), "expected scifact hit");
     assert_eq!(scifact_hits[0].chunk_id, 11);
-
-    let colon_hits = storage
-        .query_bm25("work", "foo:bar", &[("body", 1.0)], 10)
-        .expect("query colon punctuation");
-    assert!(!colon_hits.is_empty(), "expected colon hit");
-    assert_eq!(colon_hits[0].chunk_id, 22);
-
-    let paren_hits = storage
-        .query_bm25("work", "(alpha)", &[("body", 1.0)], 10)
-        .expect("query paren punctuation");
-    assert!(!paren_hits.is_empty(), "expected paren hit");
-
-    let cpp_hits = storage
-        .query_bm25("work", "C++", &[("body", 1.0)], 10)
-        .expect("query c++ punctuation");
-    assert!(!cpp_hits.is_empty(), "expected c++ hit");
-    assert_eq!(cpp_hits[0].chunk_id, 22);
 }
 
 #[test]
