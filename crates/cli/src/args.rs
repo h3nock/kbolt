@@ -73,6 +73,12 @@ pub struct EvalArgs {
     pub command: EvalCommand,
 }
 
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct EvalRunArgs {
+    #[arg(long, value_name = "path")]
+    pub file: Option<PathBuf>,
+}
+
 #[derive(Debug, Args)]
 pub struct ScheduleArgs {
     #[command(subcommand)]
@@ -219,7 +225,7 @@ pub enum ModelsCommand {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum EvalCommand {
-    Run,
+    Run(EvalRunArgs),
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -282,8 +288,9 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        Cli, CollectionCommand, Command, GetArgs, MultiGetArgs, OutputFormat, ScheduleAddArgs,
-        ScheduleCommand, ScheduleDayArg, ScheduleRemoveArgs, SearchArgs, SpaceCommand, UpdateArgs,
+        Cli, CollectionCommand, Command, EvalCommand, EvalRunArgs, GetArgs, MultiGetArgs,
+        OutputFormat, ScheduleAddArgs, ScheduleCommand, ScheduleDayArg, ScheduleRemoveArgs,
+        SearchArgs, SpaceCommand, UpdateArgs,
     };
 
     fn parse<const N: usize>(args: [&str; N]) -> Cli {
@@ -588,6 +595,25 @@ mod tests {
                         all: false,
                         space: Some("work".to_string()),
                         collections: vec!["api".to_string()],
+                    })
+        ));
+    }
+
+    #[test]
+    fn parses_eval_run_with_optional_manifest_path() {
+        let parsed = parse(["kbolt", "eval", "run"]);
+        assert!(matches!(
+            parsed.command,
+            Command::Eval(eval) if eval.command == EvalCommand::Run(EvalRunArgs { file: None })
+        ));
+
+        let parsed = parse(["kbolt", "eval", "run", "--file", "/tmp/scifact.toml"]);
+        assert!(matches!(
+            parsed.command,
+            Command::Eval(eval)
+                if eval.command
+                    == EvalCommand::Run(EvalRunArgs {
+                        file: Some(PathBuf::from("/tmp/scifact.toml"))
                     })
         ));
     }

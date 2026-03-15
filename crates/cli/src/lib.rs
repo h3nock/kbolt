@@ -1,5 +1,7 @@
 pub mod args;
 
+use std::path::Path;
+
 use kbolt_core::engine::Engine;
 use kbolt_core::ModelPullEvent;
 use kbolt_core::Result;
@@ -488,8 +490,8 @@ impl CliAdapter {
         Ok(lines.join("\n"))
     }
 
-    pub fn eval_run(&self) -> Result<String> {
-        let report = self.engine.run_eval()?;
+    pub fn eval_run(&self, eval_file: Option<&Path>) -> Result<String> {
+        let report = self.engine.run_eval(eval_file)?;
         Ok(format_eval_run_report(&report))
     }
 

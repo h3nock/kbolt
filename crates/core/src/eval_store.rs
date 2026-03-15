@@ -9,14 +9,46 @@ use crate::error::Result;
 const EVAL_FILENAME: &str = "eval.toml";
 
 pub(crate) fn load_eval_dataset(config_dir: &Path) -> Result<EvalDataset> {
-    fs::create_dir_all(config_dir)?;
+    load_eval_dataset_from_path(&eval_file_path(config_dir), true)
+}
 
-    let eval_file = eval_file_path(config_dir);
-    let raw = fs::read_to_string(&eval_file).map_err(|err| match err.kind() {
-        std::io::ErrorKind::NotFound => KboltError::Config(format!(
+pub(crate) fn load_eval_dataset_with_file(
+    config_dir: &Path,
+    eval_file: Option<&Path>,
+) -> Result<EvalDataset> {
+    match eval_file {
+        Some(path) => load_eval_dataset_from_path(path, false),
+        None => load_eval_dataset(config_dir),
+    }
+}
+
+fn load_eval_dataset_from_path(eval_file: &Path, ensure_config_dir: bool) -> Result<EvalDataset> {
+    if ensure_config_dir {
+        let config_dir = eval_file.parent().ok_or_else(|| {
+            KboltError::Config(format!(
+                "invalid eval path {}: missing parent directory",
+                eval_file.display()
+            ))
+        })?;
+        fs::create_dir_all(config_dir)?;
+    }
+
+    if eval_file.is_dir() {
+        return Err(KboltError::Config(format!(
+            "invalid eval file {}: expected a file, found a directory",
+            eval_file.display()
+        ))
+        .into());
+    }
+
+    let raw = fs::read_to_string(eval_file).map_err(|err| match err.kind() {
+        std::io::ErrorKind::NotFound if ensure_config_dir => KboltError::Config(format!(
             "eval file not found: {}. create eval.toml under the config directory.",
             eval_file.display()
         )),
+        std::io::ErrorKind::NotFound => {
+            KboltError::Config(format!("eval file not found: {}", eval_file.display()))
+        }
         _ => KboltError::Io(err),
     })?;
 
@@ -166,7 +198,7 @@ mod tests {
     use kbolt_types::{EvalCase, EvalDataset, EvalJudgment};
     use tempfile::tempdir;
 
-    use super::load_eval_dataset;
+    use super::{load_eval_dataset, load_eval_dataset_with_file};
 
     const EVAL_FILENAME: &str = "eval.toml";
 
@@ -315,6 +347,62 @@ judgments = [{ path = "rust/traits.md", relevance = 0 }]
         assert!(
             err.to_string()
                 .contains("must include at least one judgment with relevance > 0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_supports_explicit_eval_file_path() {
+        let tmp = tempdir().expect("create tempdir");
+        let config_dir = tmp.path().join("config");
+        let eval_file = tmp.path().join("bench").join("scifact.toml");
+        fs::create_dir_all(eval_file.parent().expect("bench dir")).expect("create bench dir");
+        fs::write(
+            &eval_file,
+            r#"
+[[cases]]
+query = "trait object vs generic"
+judgments = [{ path = "rust/traits.md", relevance = 1 }]
+"#,
+        )
+        .expect("write eval file");
+
+        let dataset = load_eval_dataset_with_file(&config_dir, Some(&eval_file))
+            .expect("load explicit eval file");
+
+        assert_eq!(dataset.cases.len(), 1);
+        assert_eq!(dataset.cases[0].judgments[0].path, "rust/traits.md");
+    }
+
+    #[test]
+    fn load_rejects_directory_explicit_eval_path() {
+        let tmp = tempdir().expect("create tempdir");
+        let config_dir = tmp.path().join("config");
+        let eval_dir = tmp.path().join("bench");
+        fs::create_dir_all(&eval_dir).expect("create bench dir");
+
+        let err = load_eval_dataset_with_file(&config_dir, Some(&eval_dir))
+            .expect_err("directory path should fail");
+
+        assert!(
+            err.to_string()
+                .contains("expected a file, found a directory"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_missing_explicit_eval_file_path() {
+        let tmp = tempdir().expect("create tempdir");
+        let config_dir = tmp.path().join("config");
+        let eval_file = tmp.path().join("bench").join("missing.toml");
+
+        let err = load_eval_dataset_with_file(&config_dir, Some(&eval_file))
+            .expect_err("missing explicit file should fail");
+
+        assert!(
+            err.to_string()
+                .contains(&format!("eval file not found: {}", eval_file.display())),
             "unexpected error: {err}"
         );
     }

@@ -3,14 +3,15 @@ use kbolt_types::{
     SearchMode, SearchRequest, SearchResult,
 };
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
-use crate::eval_store::load_eval_dataset;
+use crate::eval_store::load_eval_dataset_with_file;
 
 use super::*;
 
 impl Engine {
-    pub fn run_eval(&self) -> Result<EvalRunReport> {
-        let dataset = load_eval_dataset(&self.config.config_dir)?;
+    pub fn run_eval(&self, eval_file: Option<&Path>) -> Result<EvalRunReport> {
+        let dataset = load_eval_dataset_with_file(&self.config.config_dir, eval_file)?;
         let eval_runs = self.eval_runs();
         let total_cases = dataset.cases.len();
         let mut reports = Vec::with_capacity(eval_runs.len());
@@ -291,7 +292,7 @@ judgments = [{ path = "rust/guides/traits.md", relevance = 1 }]
             })
             .expect("update collection");
 
-        let report = engine.run_eval().expect("run eval");
+        let report = engine.run_eval(None).expect("run eval");
 
         assert_eq!(report.total_cases, 1);
         let mode_labels: Vec<_> = report
@@ -356,7 +357,7 @@ judgments = [{ path = "rust/guides/traits.md", relevance = 1 }]
             })
             .expect("update collection");
 
-        let report = engine.run_eval().expect("run eval");
+        let report = engine.run_eval(None).expect("run eval");
 
         assert!(report
             .modes
@@ -409,7 +410,7 @@ judgments = [{ path = "rust/guides/traits.md", relevance = 1 }]
             })
             .expect("update collection");
 
-        let report = engine.run_eval().expect("run eval");
+        let report = engine.run_eval(None).expect("run eval");
 
         assert!(report
             .modes
@@ -515,6 +516,53 @@ judgments = [{ path = "rust/guides/traits.md", relevance = 1 }]
         );
 
         assert!(score > 0.0 && score < 1.0, "unexpected score: {score}");
+    }
+
+    #[test]
+    fn run_eval_supports_explicit_manifest_path() {
+        let root = tempdir().expect("create temp root");
+        let collection_dir = seed_collection(root.path(), "rust", "guides/traits.md", TRAITS_DOC);
+        let engine = test_engine(None, Some(Arc::new(DeterministicExpander)));
+        let eval_file = root.path().join("bench").join("scifact.toml");
+        if let Some(parent) = eval_file.parent() {
+            fs::create_dir_all(parent).expect("create bench dir");
+        }
+        fs::write(
+            &eval_file,
+            r#"
+[[cases]]
+query = "trait object generic"
+space = "default"
+collections = ["rust"]
+judgments = [{ path = "rust/guides/traits.md", relevance = 1 }]
+"#,
+        )
+        .expect("write eval file");
+
+        engine
+            .add_collection(AddCollectionRequest {
+                path: collection_dir,
+                space: Some("default".to_string()),
+                name: Some("rust".to_string()),
+                description: None,
+                extensions: None,
+                no_index: true,
+            })
+            .expect("add collection");
+        engine
+            .update(UpdateOptions {
+                space: Some("default".to_string()),
+                collections: vec!["rust".to_string()],
+                no_embed: true,
+                dry_run: false,
+                verbose: false,
+            })
+            .expect("update collection");
+
+        let report = engine.run_eval(Some(&eval_file)).expect("run eval");
+
+        assert_eq!(report.total_cases, 1);
+        assert!(report.modes.iter().all(|mode| mode.recall_at_10 >= 0.0));
     }
 
     fn test_engine(

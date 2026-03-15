@@ -266,12 +266,12 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
         Command::Eval(eval) => {
             ensure_eval_uses_local_scope(cli.space.as_deref())?;
             match eval.command {
-                EvalCommand::Run => {
+                EvalCommand::Run(args) => {
                     if wants_json {
-                        let report = adapter.engine.run_eval()?;
+                        let report = adapter.engine.run_eval(args.file.as_deref())?;
                         emit_structured_output(&report)?;
                     } else {
-                        let line = adapter.eval_run()?;
+                        let line = adapter.eval_run(args.file.as_deref())?;
                         print_text(&line);
                     }
                 }
@@ -601,7 +601,7 @@ fn ensure_eval_uses_local_scope(space: Option<&str>) -> std::result::Result<(), 
     }
 
     Err(CoreError::Domain(KboltError::InvalidInput(
-        "eval commands do not use the top-level --space flag; set scope inside eval.toml"
+        "eval commands do not use the top-level --space flag; set scope inside the eval manifest"
             .to_string(),
     ))
     .into())
