@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -7,8 +7,9 @@ use crate::ingest::chunk::FinalChunkKind;
 use kbolt_types::{DiskUsage, KboltError};
 use rusqlite::{params, params_from_iter, Connection, Error, ErrorCode};
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
-use tantivy::schema::{Field, Value, FAST, INDEXED, STORED, TEXT};
+use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, TermQuery};
+use tantivy::schema::{Field, IndexRecordOption, Value, FAST, INDEXED, STORED, TEXT};
+use tantivy::tokenizer::TokenStream;
 use tantivy::{Index, IndexWriter, TantivyDocument, Term};
 use usearch::{IndexOptions, MetricKind, ScalarKind};
 
@@ -162,6 +163,13 @@ struct TantivyFields {
     title: Field,
     heading: Field,
     body: Field,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Bm25FieldSpec {
+    field: Field,
+    boost: f32,
+    index_record_option: IndexRecordOption,
 }
 
 impl Storage {
@@ -1427,19 +1435,33 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
         let space_indexes = self.get_space_indexes(space)?;
 
+        let schema = space_indexes.tantivy_index.schema();
         let query_fields = fields
             .iter()
-            .map(|(name, _)| resolve_tantivy_field(space_indexes.fields, name))
+            .map(|(name, boost)| {
+                let field = resolve_tantivy_field(space_indexes.fields, name)?;
+                let field_entry = schema.get_field_entry(field);
+                let index_record_option = field_entry
+                    .field_type()
+                    .get_index_record_option()
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "bm25 field '{}' is not indexed",
+                            field_entry.name()
+                        ))
+                    })?;
+                Ok(Bm25FieldSpec {
+                    field,
+                    boost: *boost,
+                    index_record_option,
+                })
+            })
             .collect::<Result<Vec<_>>>()?;
-        let mut parser = QueryParser::for_index(&space_indexes.tantivy_index, query_fields);
-        for (field_name, boost) in fields {
-            let field = resolve_tantivy_field(space_indexes.fields, field_name)?;
-            parser.set_field_boost(field, *boost);
-        }
-
-        let parsed_query = parser.parse_query(query).map_err(|err| {
-            CoreError::Internal(format!("failed to parse bm25 query '{query}': {err}"))
-        })?;
+        let Some(parsed_query) =
+            build_literal_bm25_query(&space_indexes.tantivy_index, &query_fields, query)?
+        else {
+            return Ok(Vec::new());
+        };
         let reader = space_indexes.tantivy_index.reader()?;
         reader.reload()?;
         let searcher = reader.searcher();
@@ -2003,6 +2025,51 @@ fn open_or_create_tantivy_index(path: &Path) -> Result<Index> {
     }
 
     Ok(Index::create_in_dir(path, tantivy_schema())?)
+}
+
+fn build_literal_bm25_query(
+    index: &Index,
+    fields: &[Bm25FieldSpec],
+    query: &str,
+) -> Result<Option<Box<dyn Query>>> {
+    let mut clauses = Vec::new();
+    for field in fields {
+        for token in analyzed_terms_for_field(index, field.field, query)? {
+            let term_query: Box<dyn Query> = Box::new(TermQuery::new(
+                Term::from_field_text(field.field, &token),
+                field.index_record_option,
+            ));
+            let query = if (field.boost - 1.0).abs() > f32::EPSILON {
+                Box::new(BoostQuery::new(term_query, field.boost)) as Box<dyn Query>
+            } else {
+                term_query
+            };
+            clauses.push((Occur::Should, query));
+        }
+    }
+
+    if clauses.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(Box::new(BooleanQuery::new(clauses))))
+    }
+}
+
+fn analyzed_terms_for_field(index: &Index, field: Field, query: &str) -> Result<Vec<String>> {
+    let mut analyzer = index.tokenizer_for_field(field)?;
+    let mut stream = analyzer.token_stream(query);
+    let mut terms = Vec::new();
+    let mut seen = HashSet::new();
+    while let Some(token) = stream.next() {
+        if token.text.is_empty() {
+            continue;
+        }
+        let text = token.text.clone();
+        if seen.insert(text.clone()) {
+            terms.push(text);
+        }
+    }
+    Ok(terms)
 }
 
 fn new_usearch_index(dimensions: usize) -> Result<usearch::Index> {

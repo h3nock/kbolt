@@ -83,6 +83,93 @@ fn tantivy_index_and_query_returns_ranked_hits() {
 }
 
 #[test]
+fn bm25_literal_queries_accept_punctuation_heavy_user_text() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    storage.create_space("work", None).expect("create work");
+
+    storage
+        .index_tantivy(
+            "work",
+            &[
+                super::TantivyEntry {
+                    chunk_id: 11,
+                    doc_id: 1,
+                    filepath: "docs/scifact.md".to_string(),
+                    title: "thalassemia note".to_string(),
+                    heading: Some("alpha trait".to_string()),
+                    body: "high microerythrocyte count raises vulnerability to severe anemia in homozygous alpha thalassemia trait subjects".to_string(),
+                },
+                super::TantivyEntry {
+                    chunk_id: 22,
+                    doc_id: 2,
+                    filepath: "docs/syntax.md".to_string(),
+                    title: "syntax note".to_string(),
+                    heading: None,
+                    body: "foo bar c alpha".to_string(),
+                },
+            ],
+        )
+        .expect("index entries");
+    storage.commit_tantivy("work").expect("commit tantivy");
+
+    let scifact_hits = storage
+        .query_bm25(
+            "work",
+            "A high microerythrocyte count raises vulnerability to severe anemia in homozygous alpha (+)- thalassemia trait subjects.",
+            &[("body", 1.0)],
+            10,
+        )
+        .expect("query sci fact punctuation");
+    assert!(!scifact_hits.is_empty(), "expected scifact hit");
+    assert_eq!(scifact_hits[0].chunk_id, 11);
+
+    let colon_hits = storage
+        .query_bm25("work", "foo:bar", &[("body", 1.0)], 10)
+        .expect("query colon punctuation");
+    assert!(!colon_hits.is_empty(), "expected colon hit");
+    assert_eq!(colon_hits[0].chunk_id, 22);
+
+    let paren_hits = storage
+        .query_bm25("work", "(alpha)", &[("body", 1.0)], 10)
+        .expect("query paren punctuation");
+    assert!(!paren_hits.is_empty(), "expected paren hit");
+
+    let cpp_hits = storage
+        .query_bm25("work", "C++", &[("body", 1.0)], 10)
+        .expect("query c++ punctuation");
+    assert!(!cpp_hits.is_empty(), "expected c++ hit");
+    assert_eq!(cpp_hits[0].chunk_id, 22);
+}
+
+#[test]
+fn bm25_literal_queries_return_empty_hits_for_punctuation_only_input() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    storage.create_space("work", None).expect("create work");
+
+    storage
+        .index_tantivy(
+            "work",
+            &[super::TantivyEntry {
+                chunk_id: 11,
+                doc_id: 1,
+                filepath: "docs/alpha.md".to_string(),
+                title: "alpha guide".to_string(),
+                heading: None,
+                body: "alpha token in body".to_string(),
+            }],
+        )
+        .expect("index entries");
+    storage.commit_tantivy("work").expect("commit tantivy");
+
+    let hits = storage
+        .query_bm25("work", "(+)-::///", &[("title", 3.0), ("body", 1.0)], 10)
+        .expect("query punctuation only");
+    assert!(hits.is_empty(), "punctuation-only query should not match");
+}
+
+#[test]
 fn delete_tantivy_removes_chunk_after_commit() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
