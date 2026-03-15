@@ -1758,6 +1758,13 @@ MODELS
   kbolt models pull                 Download required models
   kbolt models list                 Show model status
 
+EVALUATION
+  kbolt eval run                    Run the default evaluation suite
+    --file <path>                  Run a specific eval manifest instead of ~/.config/kbolt/eval.toml
+  kbolt eval import scifact
+    --source <dir>                 Extracted BEIR SciFact dataset directory
+    --output <dir>                 Empty directory where corpus/ + eval.toml will be written
+
 SCHEDULING
   kbolt schedule add --every <interval>
                                    Set up recurring re-index (minutes/hours only, minimum 5m)
@@ -1827,10 +1834,13 @@ Models loaded lazily — embedder loads on first `kbolt update` (with embedding)
 ## Evaluation Framework
 
 ```
-kbolt eval run                    Run evaluation suite
+kbolt eval run
+kbolt eval run --file /path/to/eval.toml
+kbolt eval import scifact --source /path/to/scifact --output /path/to/scifact-bench
 ```
 
-Metrics: Recall@5, MRR@10, latency (p50/p95).
+Retrieval metrics: nDCG@10, Recall@10, MRR@10, latency (p50/p95).
+Operational metrics such as update throughput and index size are tracked separately from the eval report.
 
 Dataset in `~/.config/kbolt/eval.toml`:
 ```toml
@@ -1838,7 +1848,9 @@ Dataset in `~/.config/kbolt/eval.toml`:
 query = "how to handle errors in rust"
 space = "personal"
 collections = ["notes"]
-expected_paths = ["notes/error-handling.md"]
+judgments = [
+  { path = "notes/error-handling.md", relevance = 1 },
+]
 ```
 
 The eval runner compares fixed retrieval modes:
@@ -1848,6 +1860,17 @@ The eval runner compares fixed retrieval modes:
 - `semantic` only when embeddings are configured
 
 CLI output stays lean: per-mode summary metrics plus the queries that still need attention. JSON output returns the full structured report.
+
+`kbolt eval import scifact` is the first built-in public benchmark workflow. It expects an extracted BEIR SciFact directory with:
+- `corpus.jsonl`
+- `queries.jsonl`
+- `qrels/test.tsv`
+
+The importer materializes:
+- `corpus/{doc_id}.md`
+- `eval.toml`
+
+under the requested output directory, using the benchmark defaults `space = "bench"` and `collections = ["scifact"]`. The command prints the next steps to register that corpus as a normal collection, run `kbolt update`, and then run `kbolt eval run --file ...`.
 
 ---
 
