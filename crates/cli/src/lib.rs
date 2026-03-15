@@ -1142,9 +1142,10 @@ fn format_eval_run_report(report: &EvalRunReport) -> String {
     let mut lines = vec!["eval:".to_string()];
     for mode in &report.modes {
         lines.push(format!(
-            "- {}: recall@5 {:.3}, mrr@10 {:.3}, p50 {}ms, p95 {}ms",
+            "- {}: ndcg@10 {:.3}, recall@10 {:.3}, mrr@10 {:.3}, p50 {}ms, p95 {}ms",
             format_eval_mode_label(&mode.mode, mode.no_rerank),
-            mode.recall_at_5,
+            mode.ndcg_at_10,
+            mode.recall_at_10,
             mode.mrr_at_10,
             mode.latency_p50_ms,
             mode.latency_p95_ms
@@ -1163,7 +1164,7 @@ fn format_eval_run_report(report: &EvalRunReport) -> String {
         .iter()
         .flat_map(|mode| {
             mode.queries.iter().filter_map(|query| {
-                let perfect_recall = query.matched_paths.len() == query.expected_paths.len();
+                let perfect_recall = query.matched_paths.len() == relevant_judgment_count(query);
                 let perfect_rank = query.first_relevant_rank == Some(1);
                 if perfect_recall && perfect_rank {
                     return None;
@@ -1177,7 +1178,7 @@ fn format_eval_run_report(report: &EvalRunReport) -> String {
                         .first_relevant_rank
                         .map(|rank| rank.to_string())
                         .unwrap_or_else(|| "none".to_string()),
-                    query.expected_paths.join(", "),
+                    format_eval_judgments(&query.judgments),
                     if query.returned_paths.is_empty() {
                         "none".to_string()
                     } else {
@@ -1196,6 +1197,22 @@ fn format_eval_run_report(report: &EvalRunReport) -> String {
     }
 
     lines.join("\n")
+}
+
+fn relevant_judgment_count(query: &kbolt_types::EvalQueryReport) -> usize {
+    query
+        .judgments
+        .iter()
+        .filter(|judgment| judgment.relevance > 0)
+        .count()
+}
+
+fn format_eval_judgments(judgments: &[kbolt_types::EvalJudgment]) -> String {
+    judgments
+        .iter()
+        .map(|judgment| format!("{}(rel={})", judgment.path, judgment.relevance))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn format_eval_mode_label(mode: &SearchMode, no_rerank: bool) -> &'static str {
@@ -1227,10 +1244,11 @@ mod tests {
     };
     use kbolt_core::engine::Engine;
     use kbolt_types::{
-        AddCollectionRequest, EvalModeReport, EvalQueryReport, EvalRunReport, ScheduleAddResponse,
-        ScheduleBackend, ScheduleDefinition, ScheduleInterval, ScheduleIntervalUnit,
-        ScheduleOrphan, ScheduleRunResult, ScheduleRunState, ScheduleScope, ScheduleState,
-        ScheduleStatusEntry, ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode,
+        AddCollectionRequest, EvalJudgment, EvalModeReport, EvalQueryReport, EvalRunReport,
+        ScheduleAddResponse, ScheduleBackend, ScheduleDefinition, ScheduleInterval,
+        ScheduleIntervalUnit, ScheduleOrphan, ScheduleRunResult, ScheduleRunState, ScheduleScope,
+        ScheduleState, ScheduleStatusEntry, ScheduleStatusResponse, ScheduleTrigger,
+        ScheduleWeekday, SearchMode,
     };
 
     struct EnvRestore {
@@ -1333,7 +1351,8 @@ mod tests {
                 EvalModeReport {
                     mode: SearchMode::Keyword,
                     no_rerank: true,
-                    recall_at_5: 1.0,
+                    ndcg_at_10: 1.0,
+                    recall_at_10: 1.0,
                     mrr_at_10: 1.0,
                     latency_p50_ms: 2,
                     latency_p95_ms: 3,
@@ -1341,7 +1360,10 @@ mod tests {
                         query: "trait object generic".to_string(),
                         space: Some("default".to_string()),
                         collections: vec!["rust".to_string()],
-                        expected_paths: vec!["rust/guides/traits.md".to_string()],
+                        judgments: vec![EvalJudgment {
+                            path: "rust/guides/traits.md".to_string(),
+                            relevance: 1,
+                        }],
                         returned_paths: vec!["rust/guides/traits.md".to_string()],
                         matched_paths: vec!["rust/guides/traits.md".to_string()],
                         first_relevant_rank: Some(1),
@@ -1351,7 +1373,8 @@ mod tests {
                 EvalModeReport {
                     mode: SearchMode::Deep,
                     no_rerank: false,
-                    recall_at_5: 0.0,
+                    ndcg_at_10: 0.0,
+                    recall_at_10: 0.0,
                     mrr_at_10: 0.0,
                     latency_p50_ms: 8,
                     latency_p95_ms: 12,
@@ -1359,7 +1382,10 @@ mod tests {
                         query: "trait object generic".to_string(),
                         space: Some("default".to_string()),
                         collections: vec!["rust".to_string()],
-                        expected_paths: vec!["rust/guides/traits.md".to_string()],
+                        judgments: vec![EvalJudgment {
+                            path: "rust/guides/traits.md".to_string(),
+                            relevance: 1,
+                        }],
                         returned_paths: vec!["rust/overview.md".to_string()],
                         matched_paths: vec![],
                         first_relevant_rank: None,
@@ -1374,8 +1400,10 @@ mod tests {
             }],
         });
 
-        assert!(output.contains("- keyword: recall@5 1.000, mrr@10 1.000, p50 2ms, p95 3ms"));
-        assert!(output.contains("- deep: recall@5 0.000, mrr@10 0.000, p50 8ms, p95 12ms"));
+        assert!(output
+            .contains("- keyword: ndcg@10 1.000, recall@10 1.000, mrr@10 1.000, p50 2ms, p95 3ms"));
+        assert!(output
+            .contains("- deep: ndcg@10 0.000, recall@10 0.000, mrr@10 0.000, p50 8ms, p95 12ms"));
         assert!(output.contains("- semantic: failed (model not available)"));
         assert!(output.contains("queries needing attention:"));
         assert!(output.contains("[deep] trait object generic | first relevant: none"));

@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 use crate::SearchMode;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvalJudgment {
+    pub path: String,
+    pub relevance: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EvalDataset {
     pub cases: Vec<EvalCase>,
 }
@@ -14,7 +20,8 @@ pub struct EvalCase {
     pub space: Option<String>,
     #[serde(default)]
     pub collections: Vec<String>,
-    pub expected_paths: Vec<String>,
+    #[serde(default)]
+    pub judgments: Vec<EvalJudgment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -28,7 +35,8 @@ pub struct EvalRunReport {
 pub struct EvalModeReport {
     pub mode: SearchMode,
     pub no_rerank: bool,
-    pub recall_at_5: f32,
+    pub ndcg_at_10: f32,
+    pub recall_at_10: f32,
     pub mrr_at_10: f32,
     pub latency_p50_ms: u64,
     pub latency_p95_ms: u64,
@@ -47,7 +55,7 @@ pub struct EvalQueryReport {
     pub query: String,
     pub space: Option<String>,
     pub collections: Vec<String>,
-    pub expected_paths: Vec<String>,
+    pub judgments: Vec<EvalJudgment>,
     pub returned_paths: Vec<String>,
     pub matched_paths: Vec<String>,
     pub first_relevant_rank: Option<usize>,
@@ -59,7 +67,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        EvalCase, EvalDataset, EvalModeFailure, EvalModeReport, EvalQueryReport, EvalRunReport,
+        EvalCase, EvalDataset, EvalJudgment, EvalModeFailure, EvalModeReport, EvalQueryReport,
+        EvalRunReport,
     };
     use crate::SearchMode;
 
@@ -70,7 +79,16 @@ mod tests {
                 query: "trait object vs generic".to_string(),
                 space: Some("bench".to_string()),
                 collections: vec!["rust".to_string()],
-                expected_paths: vec!["rust/traits.md".to_string(), "rust/generics.md".to_string()],
+                judgments: vec![
+                    EvalJudgment {
+                        path: "rust/traits.md".to_string(),
+                        relevance: 2,
+                    },
+                    EvalJudgment {
+                        path: "rust/generics.md".to_string(),
+                        relevance: 1,
+                    },
+                ],
             }],
         })
         .expect("serialize eval dataset");
@@ -83,7 +101,10 @@ mod tests {
                         "query": "trait object vs generic",
                         "space": "bench",
                         "collections": ["rust"],
-                        "expected_paths": ["rust/traits.md", "rust/generics.md"]
+                        "judgments": [
+                            {"path": "rust/traits.md", "relevance": 2},
+                            {"path": "rust/generics.md", "relevance": 1}
+                        ]
                     }
                 ]
             })
@@ -97,7 +118,8 @@ mod tests {
             modes: vec![EvalModeReport {
                 mode: SearchMode::Keyword,
                 no_rerank: true,
-                recall_at_5: 1.0,
+                ndcg_at_10: 1.0,
+                recall_at_10: 1.0,
                 mrr_at_10: 1.0,
                 latency_p50_ms: 3,
                 latency_p95_ms: 4,
@@ -105,7 +127,10 @@ mod tests {
                     query: "trait object vs generic".to_string(),
                     space: Some("bench".to_string()),
                     collections: vec!["rust".to_string()],
-                    expected_paths: vec!["rust/traits.md".to_string()],
+                    judgments: vec![EvalJudgment {
+                        path: "rust/traits.md".to_string(),
+                        relevance: 1,
+                    }],
                     returned_paths: vec!["rust/traits.md".to_string()],
                     matched_paths: vec!["rust/traits.md".to_string()],
                     first_relevant_rank: Some(1),
@@ -128,7 +153,8 @@ mod tests {
                     {
                         "mode": "Keyword",
                         "no_rerank": true,
-                        "recall_at_5": 1.0,
+                        "ndcg_at_10": 1.0,
+                        "recall_at_10": 1.0,
                         "mrr_at_10": 1.0,
                         "latency_p50_ms": 3,
                         "latency_p95_ms": 4,
@@ -137,7 +163,12 @@ mod tests {
                                 "query": "trait object vs generic",
                                 "space": "bench",
                                 "collections": ["rust"],
-                                "expected_paths": ["rust/traits.md"],
+                                "judgments": [
+                                    {
+                                        "path": "rust/traits.md",
+                                        "relevance": 1
+                                    }
+                                ],
                                 "returned_paths": ["rust/traits.md"],
                                 "matched_paths": ["rust/traits.md"],
                                 "first_relevant_rank": 1,

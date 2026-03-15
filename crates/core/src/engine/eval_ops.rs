@@ -1,8 +1,8 @@
 use kbolt_types::{
-    EvalCase, EvalModeFailure, EvalModeReport, EvalQueryReport, EvalRunReport, SearchMode,
-    SearchRequest, SearchResult,
+    EvalCase, EvalJudgment, EvalModeFailure, EvalModeReport, EvalQueryReport, EvalRunReport,
+    SearchMode, SearchRequest, SearchResult,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::eval_store::load_eval_dataset;
 
@@ -54,6 +54,7 @@ impl Engine {
         no_rerank: bool,
     ) -> Result<EvalModeReport> {
         let mut query_reports = Vec::with_capacity(cases.len());
+        let mut ndcg_sum = 0.0_f32;
         let mut recall_sum = 0.0_f32;
         let mut mrr_sum = 0.0_f32;
         let mut latencies = Vec::with_capacity(cases.len());
@@ -71,22 +72,28 @@ impl Engine {
             })?;
 
             let returned_paths = dedupe_result_paths(case, &response.results);
-            let expected_paths = case.expected_paths.iter().cloned().collect::<HashSet<_>>();
+            let judgment_map = judgment_map(&case.judgments);
+            let relevant_path_count = case
+                .judgments
+                .iter()
+                .filter(|judgment| judgment.relevance > 0)
+                .count();
             let matched_paths = returned_paths
                 .iter()
-                .filter(|path| expected_paths.contains(path.as_str()))
+                .filter(|path| relevance_for_path(&judgment_map, path.as_str()) > 0)
                 .cloned()
                 .collect::<Vec<_>>();
             let first_relevant_rank = returned_paths
                 .iter()
-                .position(|path| expected_paths.contains(path))
+                .position(|path| relevance_for_path(&judgment_map, path.as_str()) > 0)
                 .map(|index| index + 1);
-            let matched_top_5 = returned_paths
+            let matched_top_10 = returned_paths
                 .iter()
-                .take(5)
-                .filter(|path| expected_paths.contains(path.as_str()))
+                .take(10)
+                .filter(|path| relevance_for_path(&judgment_map, path.as_str()) > 0)
                 .count();
-            recall_sum += matched_top_5 as f32 / case.expected_paths.len() as f32;
+            ndcg_sum += ndcg_at_k(&returned_paths, &judgment_map, 10);
+            recall_sum += matched_top_10 as f32 / relevant_path_count as f32;
             mrr_sum += first_relevant_rank
                 .map(|rank| 1.0_f32 / rank as f32)
                 .unwrap_or(0.0);
@@ -95,7 +102,7 @@ impl Engine {
                 query: case.query.clone(),
                 space: case.space.clone(),
                 collections: case.collections.clone(),
-                expected_paths: case.expected_paths.clone(),
+                judgments: case.judgments.clone(),
                 returned_paths,
                 matched_paths,
                 first_relevant_rank,
@@ -107,7 +114,8 @@ impl Engine {
         Ok(EvalModeReport {
             mode,
             no_rerank,
-            recall_at_5: recall_sum / case_count,
+            ndcg_at_10: ndcg_sum / case_count,
+            recall_at_10: recall_sum / case_count,
             mrr_at_10: mrr_sum / case_count,
             latency_p50_ms: percentile_ms(&latencies, 0.50),
             latency_p95_ms: percentile_ms(&latencies, 0.95),
@@ -133,6 +141,47 @@ fn dedupe_result_paths(case: &EvalCase, results: &[SearchResult]) -> Vec<String>
     }
 
     deduped
+}
+
+fn judgment_map<'a>(judgments: &'a [EvalJudgment]) -> HashMap<&'a str, u8> {
+    judgments
+        .iter()
+        .map(|judgment| (judgment.path.as_str(), judgment.relevance))
+        .collect()
+}
+
+fn relevance_for_path(judgments: &HashMap<&str, u8>, path: &str) -> u8 {
+    judgments.get(path).copied().unwrap_or(0)
+}
+
+fn ndcg_at_k(returned_paths: &[String], judgments: &HashMap<&str, u8>, k: usize) -> f32 {
+    let dcg = dcg_at_k(
+        &returned_paths
+            .iter()
+            .take(k)
+            .map(|path| relevance_for_path(judgments, path.as_str()))
+            .collect::<Vec<_>>(),
+    );
+    let mut ideal_relevances = judgments.values().copied().collect::<Vec<_>>();
+    ideal_relevances.sort_unstable_by(|left, right| right.cmp(left));
+    let ideal_dcg = dcg_at_k(&ideal_relevances.into_iter().take(k).collect::<Vec<_>>());
+    if ideal_dcg == 0.0 {
+        0.0
+    } else {
+        dcg / ideal_dcg
+    }
+}
+
+fn dcg_at_k(relevances: &[u8]) -> f32 {
+    relevances
+        .iter()
+        .enumerate()
+        .map(|(index, relevance)| {
+            let gain = 2_f32.powi(i32::from(*relevance)) - 1.0;
+            let discount = (index as f32 + 2.0).log2();
+            gain / discount
+        })
+        .sum()
 }
 
 fn percentile_ms(samples: &[u64], percentile: f32) -> u64 {
@@ -218,7 +267,7 @@ mod tests {
 query = "trait object generic"
 space = "default"
 collections = ["rust"]
-expected_paths = ["rust/guides/traits.md"]
+judgments = [{ path = "rust/guides/traits.md", relevance = 1 }]
 "#,
         );
 
@@ -262,7 +311,8 @@ expected_paths = ["rust/guides/traits.md"]
         for mode in &report.modes {
             assert_eq!(mode.queries.len(), 1);
             assert_eq!(mode.queries[0].first_relevant_rank, Some(1));
-            assert_eq!(mode.recall_at_5, 1.0);
+            assert_eq!(mode.ndcg_at_10, 1.0);
+            assert_eq!(mode.recall_at_10, 1.0);
             assert_eq!(mode.mrr_at_10, 1.0);
         }
     }
@@ -282,7 +332,7 @@ expected_paths = ["rust/guides/traits.md"]
 query = "trait object generic"
 space = "default"
 collections = ["rust"]
-expected_paths = ["rust/guides/traits.md"]
+judgments = [{ path = "rust/guides/traits.md", relevance = 1 }]
 "#,
         );
 
@@ -318,7 +368,8 @@ expected_paths = ["rust/guides/traits.md"]
             .find(|mode| mode.mode == SearchMode::Semantic)
             .expect("semantic report");
         assert_eq!(semantic.queries[0].first_relevant_rank, Some(1));
-        assert_eq!(semantic.recall_at_5, 1.0);
+        assert_eq!(semantic.ndcg_at_10, 1.0);
+        assert_eq!(semantic.recall_at_10, 1.0);
         assert_eq!(semantic.mrr_at_10, 1.0);
     }
 
@@ -334,7 +385,7 @@ expected_paths = ["rust/guides/traits.md"]
 query = "trait object generic"
 space = "default"
 collections = ["rust"]
-expected_paths = ["rust/guides/traits.md"]
+judgments = [{ path = "rust/guides/traits.md", relevance = 1 }]
 "#,
         );
 
@@ -367,6 +418,103 @@ expected_paths = ["rust/guides/traits.md"]
         assert!(report.failed_modes.iter().any(
             |mode| mode.mode == SearchMode::Deep && mode.error.contains("expander unavailable")
         ));
+    }
+
+    #[test]
+    fn ndcg_at_10_is_zero_for_irrelevant_results() {
+        let cases = [
+            EvalJudgment {
+                path: "rust/a.md".to_string(),
+                relevance: 2,
+            },
+            EvalJudgment {
+                path: "rust/b.md".to_string(),
+                relevance: 1,
+            },
+        ];
+        let judgments = judgment_map(&cases);
+
+        let score = ndcg_at_k(&["rust/c.md".to_string()], &judgments, 10);
+
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn ndcg_at_10_is_one_for_perfect_ranking() {
+        let cases = [
+            EvalJudgment {
+                path: "rust/a.md".to_string(),
+                relevance: 2,
+            },
+            EvalJudgment {
+                path: "rust/b.md".to_string(),
+                relevance: 1,
+            },
+        ];
+        let judgments = judgment_map(&cases);
+
+        let score = ndcg_at_k(
+            &["rust/a.md".to_string(), "rust/b.md".to_string()],
+            &judgments,
+            10,
+        );
+
+        assert!((score - 1.0).abs() < 1e-6, "unexpected score: {score}");
+    }
+
+    #[test]
+    fn ndcg_at_10_uses_graded_relevance_ordering() {
+        let cases = [
+            EvalJudgment {
+                path: "rust/a.md".to_string(),
+                relevance: 2,
+            },
+            EvalJudgment {
+                path: "rust/b.md".to_string(),
+                relevance: 1,
+            },
+        ];
+        let judgments = judgment_map(&cases);
+
+        let perfect = ndcg_at_k(
+            &["rust/a.md".to_string(), "rust/b.md".to_string()],
+            &judgments,
+            10,
+        );
+        let swapped = ndcg_at_k(
+            &["rust/b.md".to_string(), "rust/a.md".to_string()],
+            &judgments,
+            10,
+        );
+
+        assert!(perfect > swapped, "perfect={perfect}, swapped={swapped}");
+    }
+
+    #[test]
+    fn ndcg_at_10_handles_fewer_results_than_k() {
+        let cases = [
+            EvalJudgment {
+                path: "rust/a.md".to_string(),
+                relevance: 2,
+            },
+            EvalJudgment {
+                path: "rust/b.md".to_string(),
+                relevance: 1,
+            },
+            EvalJudgment {
+                path: "rust/c.md".to_string(),
+                relevance: 1,
+            },
+        ];
+        let judgments = judgment_map(&cases);
+
+        let score = ndcg_at_k(
+            &["rust/a.md".to_string(), "rust/b.md".to_string()],
+            &judgments,
+            10,
+        );
+
+        assert!(score > 0.0 && score < 1.0, "unexpected score: {score}");
     }
 
     fn test_engine(

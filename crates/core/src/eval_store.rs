@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use kbolt_types::{EvalDataset, KboltError};
+use kbolt_types::{EvalDataset, EvalJudgment, KboltError};
 
 use crate::error::Result;
 
@@ -50,15 +50,19 @@ fn normalize_dataset(dataset: &mut EvalDataset, eval_file: &Path) -> Result<()> 
             case_number,
             "collections",
         )?;
-        case.expected_paths = normalize_string_list(
-            std::mem::take(&mut case.expected_paths),
-            eval_file,
-            case_number,
-            "expected_paths",
-        )?;
-        if case.expected_paths.is_empty() {
+        case.judgments =
+            normalize_judgments(std::mem::take(&mut case.judgments), eval_file, case_number)?;
+        if case.judgments.is_empty() {
             return Err(KboltError::Config(format!(
-                "invalid eval file {}: case {} must include at least one expected_paths entry",
+                "invalid eval file {}: case {} must include at least one judgments entry",
+                eval_file.display(),
+                case_number
+            ))
+            .into());
+        }
+        if !case.judgments.iter().any(|judgment| judgment.relevance > 0) {
+            return Err(KboltError::Config(format!(
+                "invalid eval file {}: case {} must include at least one judgment with relevance > 0",
                 eval_file.display(),
                 case_number
             ))
@@ -123,11 +127,43 @@ fn normalize_string_list(
     Ok(normalized)
 }
 
+fn normalize_judgments(
+    judgments: Vec<EvalJudgment>,
+    eval_file: &Path,
+    case_number: usize,
+) -> Result<Vec<EvalJudgment>> {
+    let mut seen_paths = HashSet::new();
+    let mut normalized = Vec::with_capacity(judgments.len());
+    for mut judgment in judgments {
+        let trimmed_path = judgment.path.trim();
+        if trimmed_path.is_empty() {
+            return Err(KboltError::Config(format!(
+                "invalid eval file {}: case {} field 'judgments' contains an empty path",
+                eval_file.display(),
+                case_number
+            ))
+            .into());
+        }
+        if !seen_paths.insert(trimmed_path.to_string()) {
+            return Err(KboltError::Config(format!(
+                "invalid eval file {}: case {} field 'judgments' contains duplicate path '{}'",
+                eval_file.display(),
+                case_number,
+                trimmed_path
+            ))
+            .into());
+        }
+        judgment.path = trimmed_path.to_string();
+        normalized.push(judgment);
+    }
+    Ok(normalized)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
-    use kbolt_types::{EvalCase, EvalDataset};
+    use kbolt_types::{EvalCase, EvalDataset, EvalJudgment};
     use tempfile::tempdir;
 
     use super::load_eval_dataset;
@@ -146,7 +182,10 @@ mod tests {
 query = "  trait object vs generic  "
 space = " bench "
 collections = ["rust", "rust"]
-expected_paths = ["rust/traits.md", "rust/traits.md", "rust/generics.md"]
+judgments = [
+  { path = " rust/traits.md ", relevance = 2 },
+  { path = "rust/generics.md", relevance = 1 },
+]
 "#,
         )
         .expect("write eval file");
@@ -160,9 +199,15 @@ expected_paths = ["rust/traits.md", "rust/traits.md", "rust/generics.md"]
                     query: "trait object vs generic".to_string(),
                     space: Some("bench".to_string()),
                     collections: vec!["rust".to_string()],
-                    expected_paths: vec![
-                        "rust/traits.md".to_string(),
-                        "rust/generics.md".to_string()
+                    judgments: vec![
+                        EvalJudgment {
+                            path: "rust/traits.md".to_string(),
+                            relevance: 2,
+                        },
+                        EvalJudgment {
+                            path: "rust/generics.md".to_string(),
+                            relevance: 1,
+                        },
                     ],
                 }]
             }
@@ -199,7 +244,7 @@ expected_paths = ["rust/traits.md", "rust/traits.md", "rust/generics.md"]
     }
 
     #[test]
-    fn load_rejects_empty_expected_path_entries() {
+    fn load_rejects_empty_judgment_path_entries() {
         let tmp = tempdir().expect("create tempdir");
         let config_dir = tmp.path().join("config");
         fs::create_dir_all(&config_dir).expect("create config dir");
@@ -208,16 +253,68 @@ expected_paths = ["rust/traits.md", "rust/traits.md", "rust/generics.md"]
             r#"
 [[cases]]
 query = "trait object vs generic"
-expected_paths = ["rust/traits.md", "   "]
+judgments = [{ path = "rust/traits.md", relevance = 1 }, { path = "   ", relevance = 1 }]
 "#,
         )
         .expect("write eval file");
 
-        let err = load_eval_dataset(&config_dir).expect_err("empty expected path should fail");
+        let err = load_eval_dataset(&config_dir).expect_err("empty judgment path should fail");
 
         assert!(
             err.to_string()
-                .contains("field 'expected_paths' contains an empty value"),
+                .contains("field 'judgments' contains an empty path"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_duplicate_judgment_paths() {
+        let tmp = tempdir().expect("create tempdir");
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        fs::write(
+            config_dir.join(EVAL_FILENAME),
+            r#"
+[[cases]]
+query = "trait object vs generic"
+judgments = [
+  { path = "rust/traits.md", relevance = 2 },
+  { path = "rust/traits.md", relevance = 1 },
+]
+"#,
+        )
+        .expect("write eval file");
+
+        let err = load_eval_dataset(&config_dir).expect_err("duplicate judgments should fail");
+
+        assert!(
+            err.to_string()
+                .contains("contains duplicate path 'rust/traits.md'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_cases_without_positive_judgments() {
+        let tmp = tempdir().expect("create tempdir");
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        fs::write(
+            config_dir.join(EVAL_FILENAME),
+            r#"
+[[cases]]
+query = "trait object vs generic"
+judgments = [{ path = "rust/traits.md", relevance = 0 }]
+"#,
+        )
+        .expect("write eval file");
+
+        let err =
+            load_eval_dataset(&config_dir).expect_err("missing positive judgments should fail");
+
+        assert!(
+            err.to_string()
+                .contains("must include at least one judgment with relevance > 0"),
             "unexpected error: {err}"
         );
     }

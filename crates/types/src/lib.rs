@@ -14,7 +14,8 @@ pub use document::{
 };
 pub use error::{KboltError, Result};
 pub use eval::{
-    EvalCase, EvalDataset, EvalModeFailure, EvalModeReport, EvalQueryReport, EvalRunReport,
+    EvalCase, EvalDataset, EvalJudgment, EvalModeFailure, EvalModeReport, EvalQueryReport,
+    EvalRunReport,
 };
 pub use indexing::{FileError, UpdateDecision, UpdateDecisionKind, UpdateOptions, UpdateReport};
 pub use model::PullReport;
