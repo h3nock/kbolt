@@ -495,8 +495,8 @@ pub struct SearchResult {
 
 pub struct SearchSignals {
     pub bm25: Option<f32>,                 // normalized BM25 score
-    pub dense: Option<f32>,                // cosine similarity
-    pub rrf: f32,                          // RRF fusion score
+    pub dense: Option<f32>,                // dense distance-derived score
+    pub fusion: f32,                       // normalized first-stage fusion score
     pub reranker: Option<f32>,             // raw cross-encoder score used for rerank ordering
 }
 ```
@@ -889,7 +889,22 @@ pub struct RankingConfig {
     pub initial_candidate_limit_min: usize,
     pub rerank_candidates_min: usize,
     pub rerank_candidates_max: usize,
+    pub hybrid_fusion: HybridFusionConfig,
     pub bm25_boosts: Bm25BoostsConfig,
+}
+
+pub struct HybridFusionConfig {
+    pub mode: HybridFusionMode,
+    pub alpha: f32,
+    pub dense_weight: f32,
+    pub bm25_weight: f32,
+    pub agreement_weight: f32,
+}
+
+pub enum HybridFusionMode {
+    Rrf,
+    Alpha,
+    Interaction,
 }
 
 pub fn load(config_path: Option<&Path>) -> Result<Config>;
@@ -1531,32 +1546,56 @@ together.
 Both signals operate on the same unit: individual chunks.
 
 **BM25 via Tantivy**:
-- Query across `body` (1x), `title` (3x), `heading` (2x), `filepath` (2x) with field boosting
-- Top-K=100 candidates, scores normalized to [0, 1]
+- Query across `body` (1.0x), `title` (2.0x), `heading` (1.5x), `filepath` (0.5x) with configurable field boosting
+- Retrieves up to the current candidate limit, then scores are normalized to `[0, 1]`
 
 **Dense via USearch**:
-- Embed query via ONNX, search HNSW for top-K=100 nearest neighbors
-- Score = 1 - cosine_distance
+- Embed query via ONNX/GGUF, search HNSW for up to the current candidate limit nearest neighbors
+- Score = `1 / (1 + distance)` at retrieval time, then query-local normalization is applied during score-based hybrid fusion modes
 
-Both run in parallel threads. Because both operate at chunk granularity, RRF fusion compares equivalent units.
+Both run in parallel threads. Because both operate at chunk granularity, fusion compares equivalent units.
 
 **Cross-space search**: When searching across multiple spaces (no `--space` specified), each space's Tantivy index and USearch file are queried independently. Candidate lists from all spaces are concatenated before entering fusion. Stage 8 then reranks the combined document pool without regard to source space.
 
-### Stage 5: Fusion (RRF)
+### Stage 5: Fusion (Hybrid)
 
-Reciprocal Rank Fusion combines BM25 and dense rankings:
+Default hybrid fusion is score-based alpha fusion:
 
 ```
-RRF(d) = w_bm25 / (k + rank_bm25(d)) + w_dense / (k + rank_dense(d))
+fusion(d) = α * dense_norm(d) + (1 - α) * bm25_norm(d)
 ```
 
-Defaults: `k=60`, `w_bm25=1.0`, `w_dense=1.0`. Agreement bonus: 1.2x multiplier for chunks appearing in both result sets.
+Where `dense_norm` and `bm25_norm` are query-local max-normalized scores in `[0, 1]`.
+After fusion, scores are normalized again so the top fused chunk in the query is `1.0`.
+
+Defaults: `mode = "alpha"`, `alpha = 0.7`.
+
+Weighted interaction fusion is also available:
+
+```
+fusion(d) = wd * dense_norm(d)
+          + wb * bm25_norm(d)
+          + wa * dense_norm(d) * bm25_norm(d)
+```
+
+The `wa` term is a small agreement bonus: it only becomes large when both dense and BM25 are strong.
+As with alpha fusion, the fused scores are normalized again after sorting.
+Defaults for that mode: `dense_weight = 0.7`, `bm25_weight = 0.2`, `agreement_weight = 0.1`.
+
+RRF remains available as an alternative mode:
+
+```
+RRF(d) = 1 / (k + rank_bm25(d)) + 1 / (k + rank_dense(d))
+```
+
+This optional RRF mode is plain equal-weight rank fusion over chunk positions. It does not use BM25 or dense score magnitude, and a chunk missing from one list simply omits that reciprocal term.
+`rrf_k` still controls deep-search variant aggregation and the optional RRF hybrid mode.
 
 ### Stage 6: Candidate Carry-Through
 
 Retrieval remains chunk-based through the ranking pipeline:
 - no document-level deduplication is applied before final result assembly
-- when reranking is enabled, Stage 8 selects one highest-RRF representative chunk per document (MaxP) for reranker input construction only
+- when reranking is enabled, Stage 8 selects one highest-fusion representative chunk per document (MaxP) for reranker input construction only
 - the final result set may still contain multiple chunks from the same document
 
 ### Stage 7: Context Expansion
@@ -1575,8 +1614,8 @@ Cross-encoder (Qwen3-Reranker 0.6B GGUF) scores top-20 candidates:
 - Output: raw query-local relevance score per representative document
 - Score application:
   - reranker rank establishes between-document priority
-  - chunk-level normalized RRF keeps ordering within each reranked document
-  - final result score is the product of a document-rank prior and the chunk's relative RRF within that document
+  - chunk-level normalized fusion keeps ordering within each reranked document
+  - final result score is the product of a document-rank prior and the chunk's relative first-stage fusion score within that document
 - Debug signals keep the raw reranker score and first-stage retrieval signals; the final result score is not a calibrated probability.
 
 ### Stage 9: Result Assembly
@@ -1647,6 +1686,13 @@ deep_variants_max = 4
 initial_candidate_limit_min = 20
 rerank_candidates_min = 10
 rerank_candidates_max = 20
+
+[ranking.hybrid_fusion]
+mode = "alpha" # alpha | interaction | rrf
+alpha = 0.7
+dense_weight = 0.7
+bm25_weight = 0.2
+agreement_weight = 0.1
 
 [ranking.bm25_boosts]
 title = 2.0
@@ -1895,7 +1941,7 @@ under the requested output directory, using the benchmark defaults `space = "ben
 
 ## Verification Plan
 
-**Unit tests**: Each extractor (typed block emission, heading breadcrumbs, source spans, edge cases), chunking (target/soft/hard budget behavior, block-specific forced-split rules, boundary overlap on forced splits only), storage CRUD (all tables including spaces, collections), ignore rules (hardcoded + internal ignore patterns + extensions), RRF scoring, query parsing, neighbor expansion logic, space resolution logic.
+**Unit tests**: Each extractor (typed block emission, heading breadcrumbs, source spans, edge cases), chunking (target/soft/hard budget behavior, block-specific forced-split rules, boundary overlap on forced splits only), storage CRUD (all tables including spaces, collections), ignore rules (hardcoded + internal ignore patterns + extensions), hybrid fusion scoring, query parsing, neighbor expansion logic, space resolution logic.
 
 **Integration tests**: Full ingest pipeline (file on disk → filter → extract → chunk → store → search → result), hybrid search fusion, deep search expansion, cross-space search, space management (add/remove/rename with CASCADE to collections), collection management (add/remove/rename with CASCADE), soft delete + reaping lifecycle, snippet extraction from disk, ignore pattern management.
 
