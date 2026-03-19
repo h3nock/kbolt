@@ -150,7 +150,7 @@ impl Engine {
             ranked.push(RankedChunk {
                 chunk_id: candidate.chunk_id,
                 score: normalized_score,
-                rrf: normalized_score,
+                fusion: normalized_score,
                 reranker: None,
                 bm25: Some(normalized_score),
                 dense: None,
@@ -230,7 +230,7 @@ impl Engine {
             ranked.push(RankedChunk {
                 chunk_id: candidate.chunk_id,
                 score: dense_score,
-                rrf: dense_score,
+                fusion: dense_score,
                 reranker: None,
                 bm25: None,
                 dense: Some(dense_score),
@@ -293,6 +293,7 @@ impl Engine {
             return Ok(fuse_ranked_chunks(
                 keyword,
                 semantic,
+                &self.config.ranking.hybrid_fusion,
                 self.config.ranking.rrf_k,
                 limit,
                 min_score,
@@ -443,6 +444,7 @@ impl Engine {
                         Ok(fuse_ranked_chunks(
                             keyword,
                             semantic,
+                            &self.config.ranking.hybrid_fusion,
                             self.config.ranking.rrf_k,
                             limit,
                             0.0,
@@ -473,7 +475,7 @@ impl Engine {
                     .or_insert_with(|| RankedChunk {
                         chunk_id: item.chunk_id,
                         score: 0.0,
-                        rrf: 0.0,
+                        fusion: 0.0,
                         reranker: None,
                         bm25: None,
                         dense: None,
@@ -484,22 +486,8 @@ impl Engine {
             }
         }
 
-        let mut fused = aggregates.into_values().collect::<Vec<_>>();
-        fused.sort_by(|left, right| right.score.total_cmp(&left.score));
-
-        let max_score = fused.iter().map(|item| item.score).fold(0.0_f32, f32::max);
-        if max_score > 0.0 {
-            for item in &mut fused {
-                item.score /= max_score;
-                item.rrf = item.score;
-            }
-        }
-
-        Ok(fused
-            .into_iter()
-            .filter(|item| item.score >= min_score)
-            .take(limit)
-            .collect())
+        let fused = aggregates.into_values().collect::<Vec<_>>();
+        Ok(finalize_ranked_chunks(fused, limit, min_score))
     }
 
     pub(super) fn assemble_search_results(
@@ -565,7 +553,7 @@ impl Engine {
                 full_path: collection.path.join(&document.path),
                 bm25: ranked.bm25,
                 dense: ranked.dense,
-                rrf: ranked.rrf,
+                fusion: ranked.fusion,
                 reranker: ranked.reranker,
                 final_score: ranked.score,
             });
@@ -689,7 +677,7 @@ struct PendingSearchCandidate {
     full_path: std::path::PathBuf,
     bm25: Option<f32>,
     dense: Option<f32>,
-    rrf: f32,
+    fusion: f32,
     reranker: Option<f32>,
     final_score: f32,
 }
@@ -726,7 +714,7 @@ fn build_rerank_input(
 }
 
 /// Selects one representative candidate per unique document for reranking.
-/// Candidates are already sorted by RRF score, so the first candidate for
+/// Candidates are already sorted by first-stage fusion score, so the first candidate for
 /// each document is its highest-scoring chunk (MaxP strategy).
 fn select_rerank_representatives(
     candidates: &[PendingSearchCandidate],
@@ -750,7 +738,7 @@ fn reranked_doc_prior(doc_rank: usize) -> f32 {
 }
 
 /// Applies doc-level reranker ordering to the candidate pool. Reranked
-/// documents are ranked by reranker score, while chunk-level RRF preserves
+/// documents are ranked by reranker score, while chunk-level fusion preserves
 /// ordering within each document. Chunks from non-reranked documents get a
 /// fallback score below the reranked pool.
 fn apply_reranker_scores(
@@ -763,7 +751,7 @@ fn apply_reranker_scores(
 
     let mut reranked_docs = Vec::new();
     let mut seen_reranked_docs = HashSet::new();
-    let mut max_rrf_by_doc = HashMap::new();
+    let mut max_fusion_by_doc = HashMap::new();
 
     for (index, candidate) in candidates.iter().enumerate() {
         let Some(&reranker_score) = doc_reranker_scores.get(&candidate.doc_id) else {
@@ -774,10 +762,12 @@ fn apply_reranker_scores(
             reranked_docs.push((candidate.doc_id, reranker_score, index));
         }
 
-        max_rrf_by_doc
+        max_fusion_by_doc
             .entry(candidate.doc_id)
-            .and_modify(|max_rrf: &mut f32| *max_rrf = f32::max(*max_rrf, candidate.rrf))
-            .or_insert(candidate.rrf);
+            .and_modify(|max_fusion: &mut f32| {
+                *max_fusion = f32::max(*max_fusion, candidate.fusion)
+            })
+            .or_insert(candidate.fusion);
     }
 
     reranked_docs.sort_by(|left, right| {
@@ -803,11 +793,11 @@ fn apply_reranker_scores(
                 .get(&candidate.doc_id)
                 .expect("reranked document rank missing");
             let doc_prior = reranked_doc_prior(doc_rank);
-            let max_rrf = *max_rrf_by_doc
+            let max_fusion = *max_fusion_by_doc
                 .get(&candidate.doc_id)
-                .expect("reranked document max rrf missing");
-            let chunk_scale = if max_rrf > 0.0 {
-                (candidate.rrf / max_rrf).clamp(0.0, 1.0)
+                .expect("reranked document max fusion missing");
+            let chunk_scale = if max_fusion > 0.0 {
+                (candidate.fusion / max_fusion).clamp(0.0, 1.0)
             } else {
                 1.0
             };
@@ -866,7 +856,7 @@ fn finalize_search_results(
                 Some(SearchSignals {
                     bm25: candidate.bm25,
                     dense: candidate.dense,
-                    rrf: candidate.rrf,
+                    fusion: candidate.fusion,
                     reranker: candidate.reranker,
                 })
             } else {
@@ -918,9 +908,10 @@ fn load_candidate_bytes<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{HybridFusionConfig, HybridFusionMode};
     use crate::ingest::chunk::FinalChunkKind;
 
-    fn candidate(doc_id: i64, chunk_id: i64, rrf: f32) -> PendingSearchCandidate {
+    fn candidate(doc_id: i64, chunk_id: i64, fusion: f32) -> PendingSearchCandidate {
         PendingSearchCandidate {
             chunk_id,
             doc_id,
@@ -942,14 +933,54 @@ mod tests {
             full_path: std::path::PathBuf::from(format!("doc-{doc_id}.md")),
             bm25: None,
             dense: None,
-            rrf,
+            fusion,
             reranker: None,
-            final_score: rrf,
+            final_score: fusion,
+        }
+    }
+
+    fn hybrid_fusion(mode: HybridFusionMode, alpha: f32) -> HybridFusionConfig {
+        HybridFusionConfig {
+            mode,
+            alpha,
+            dense_weight: 0.7,
+            bm25_weight: 0.2,
+            agreement_weight: 0.1,
+        }
+    }
+
+    fn interaction_hybrid_fusion(
+        dense_weight: f32,
+        bm25_weight: f32,
+        agreement_weight: f32,
+    ) -> HybridFusionConfig {
+        HybridFusionConfig {
+            mode: HybridFusionMode::Interaction,
+            alpha: 0.7,
+            dense_weight,
+            bm25_weight,
+            agreement_weight,
+        }
+    }
+
+    fn ranked_chunk(
+        chunk_id: i64,
+        score: f32,
+        bm25: Option<f32>,
+        dense: Option<f32>,
+    ) -> RankedChunk {
+        RankedChunk {
+            chunk_id,
+            score,
+            fusion: score,
+            reranker: None,
+            bm25,
+            dense,
         }
     }
 
     #[test]
-    fn apply_reranker_scores_uses_doc_rank_and_within_doc_rrf_scale() {
+    fn apply_reranker_scores_uses_doc_rank_and_within_doc_fusion_scale() {
         let mut candidates = vec![
             candidate(10, 100, 0.90),
             candidate(20, 200, 1.00),
@@ -970,23 +1001,127 @@ mod tests {
         assert!((candidates[2].final_score - (reranked_doc_prior(2) * 0.5)).abs() < 1e-6);
         assert!(candidates[3].final_score < candidates[2].final_score);
     }
+
+    #[test]
+    fn alpha_fusion_prefers_strong_dense_only_hit_over_weaker_overlap() {
+        let keyword = vec![
+            ranked_chunk(10, 1.0, Some(1.0), None),
+            ranked_chunk(20, 0.6, Some(0.6), None),
+        ];
+        let semantic = vec![
+            ranked_chunk(30, 0.95, None, Some(0.95)),
+            ranked_chunk(10, 0.40, None, Some(0.40)),
+        ];
+
+        let fused = fuse_ranked_chunks(
+            keyword,
+            semantic,
+            &hybrid_fusion(HybridFusionMode::Alpha, 0.7),
+            60,
+            10,
+            0.0,
+        );
+
+        assert_eq!(fused[0].chunk_id, 30);
+        assert_eq!(fused[1].chunk_id, 10);
+        assert!(fused[0].score > fused[1].score);
+        assert_eq!(fused[0].dense, Some(0.95));
+        assert_eq!(fused[1].bm25, Some(1.0));
+        assert_eq!(fused[1].dense, Some(0.40));
+    }
+
+    #[test]
+    fn alpha_fusion_falls_back_to_single_signal_when_dense_is_missing() {
+        let keyword = vec![
+            ranked_chunk(10, 1.0, Some(1.0), None),
+            ranked_chunk(20, 0.5, Some(0.5), None),
+        ];
+
+        let fused = fuse_ranked_chunks(
+            keyword,
+            Vec::new(),
+            &hybrid_fusion(HybridFusionMode::Alpha, 0.7),
+            60,
+            10,
+            0.0,
+        );
+
+        assert_eq!(fused.len(), 2);
+        assert_eq!(fused[0].chunk_id, 10);
+        assert_eq!(fused[0].score, 1.0);
+        assert_eq!(fused[1].chunk_id, 20);
+    }
+
+    #[test]
+    fn interaction_fusion_adds_agreement_bonus_for_strong_overlap() {
+        let keyword = vec![
+            ranked_chunk(10, 1.0, Some(1.0), None),
+            ranked_chunk(30, 0.7, Some(0.7), None),
+        ];
+        let semantic = vec![
+            ranked_chunk(10, 0.8, None, Some(0.8)),
+            ranked_chunk(20, 0.95, None, Some(0.95)),
+        ];
+
+        let fused = fuse_ranked_chunks(
+            keyword,
+            semantic,
+            &interaction_hybrid_fusion(0.7, 0.2, 0.1),
+            60,
+            10,
+            0.0,
+        );
+
+        assert_eq!(fused[0].chunk_id, 10);
+        assert_eq!(fused[1].chunk_id, 20);
+        assert!(fused[0].score > fused[1].score);
+        assert_eq!(fused[0].bm25, Some(1.0));
+        assert_eq!(fused[0].dense, Some(0.8));
+    }
 }
 
 fn fuse_ranked_chunks(
+    keyword: Vec<RankedChunk>,
+    semantic: Vec<RankedChunk>,
+    hybrid_fusion: &config::HybridFusionConfig,
+    rrf_k: usize,
+    limit: usize,
+    min_score: f32,
+) -> Vec<RankedChunk> {
+    if semantic.is_empty() {
+        return finalize_ranked_chunks(keyword, limit, min_score);
+    }
+
+    if keyword.is_empty() {
+        return finalize_ranked_chunks(semantic, limit, min_score);
+    }
+
+    match hybrid_fusion.mode {
+        config::HybridFusionMode::Rrf => {
+            fuse_ranked_chunks_rrf(keyword, semantic, rrf_k, limit, min_score)
+        }
+        config::HybridFusionMode::Alpha => {
+            fuse_ranked_chunks_alpha(keyword, semantic, hybrid_fusion.alpha, limit, min_score)
+        }
+        config::HybridFusionMode::Interaction => fuse_ranked_chunks_interaction(
+            keyword,
+            semantic,
+            hybrid_fusion.dense_weight,
+            hybrid_fusion.bm25_weight,
+            hybrid_fusion.agreement_weight,
+            limit,
+            min_score,
+        ),
+    }
+}
+
+fn fuse_ranked_chunks_rrf(
     keyword: Vec<RankedChunk>,
     semantic: Vec<RankedChunk>,
     rrf_k: usize,
     limit: usize,
     min_score: f32,
 ) -> Vec<RankedChunk> {
-    if semantic.is_empty() {
-        return keyword
-            .into_iter()
-            .filter(|item| item.score >= min_score)
-            .take(limit)
-            .collect();
-    }
-
     let mut bm25_rank = HashMap::new();
     let mut bm25_score = HashMap::new();
     for (index, item) in keyword.iter().enumerate() {
@@ -1011,37 +1146,180 @@ fn fuse_ranked_chunks(
 
     let mut fused = Vec::new();
     for chunk_id in all_chunk_ids {
-        let mut rrf = 0.0_f32;
+        let mut fusion = 0.0_f32;
         if let Some(rank) = bm25_rank.get(&chunk_id) {
-            rrf += 1.0 / (rrf_k as f32 + *rank as f32);
+            fusion += 1.0 / (rrf_k as f32 + *rank as f32);
         }
         if let Some(rank) = dense_rank.get(&chunk_id) {
-            rrf += 1.0 / (rrf_k as f32 + *rank as f32);
+            fusion += 1.0 / (rrf_k as f32 + *rank as f32);
         }
         fused.push(RankedChunk {
             chunk_id,
-            score: rrf,
-            rrf,
+            score: fusion,
+            fusion,
             reranker: None,
             bm25: bm25_score.get(&chunk_id).copied(),
             dense: dense_score.get(&chunk_id).copied(),
         });
     }
-    fused.sort_by(|left, right| right.score.total_cmp(&left.score));
 
-    let max_score = fused.iter().map(|item| item.score).fold(0.0_f32, f32::max);
-    if max_score > 0.0 {
-        for item in &mut fused {
-            item.score /= max_score;
-            item.rrf = item.score;
-        }
+    finalize_ranked_chunks(fused, limit, min_score)
+}
+
+fn fuse_ranked_chunks_alpha(
+    keyword: Vec<RankedChunk>,
+    semantic: Vec<RankedChunk>,
+    alpha: f32,
+    limit: usize,
+    min_score: f32,
+) -> Vec<RankedChunk> {
+    let max_bm25 = keyword
+        .iter()
+        .map(|item| item.score)
+        .fold(0.0_f32, f32::max);
+    let max_dense = semantic
+        .iter()
+        .map(|item| item.score)
+        .fold(0.0_f32, f32::max);
+
+    let bm25_score = keyword
+        .iter()
+        .map(|item| (item.chunk_id, item.score))
+        .collect::<HashMap<_, _>>();
+    let dense_score = semantic
+        .iter()
+        .map(|item| (item.chunk_id, item.score))
+        .collect::<HashMap<_, _>>();
+
+    let mut all_chunk_ids = HashSet::new();
+    for item in &keyword {
+        all_chunk_ids.insert(item.chunk_id);
+    }
+    for item in &semantic {
+        all_chunk_ids.insert(item.chunk_id);
     }
 
-    fused
+    let mut fused = Vec::new();
+    for chunk_id in all_chunk_ids {
+        let bm25_norm = bm25_score
+            .get(&chunk_id)
+            .copied()
+            .map(|score| normalize_score_by_max(score, max_bm25))
+            .unwrap_or(0.0);
+        let dense_norm = dense_score
+            .get(&chunk_id)
+            .copied()
+            .map(|score| normalize_score_by_max(score, max_dense))
+            .unwrap_or(0.0);
+        let fusion = alpha * dense_norm + (1.0 - alpha) * bm25_norm;
+
+        fused.push(RankedChunk {
+            chunk_id,
+            score: fusion,
+            fusion,
+            reranker: None,
+            bm25: bm25_score.get(&chunk_id).copied(),
+            dense: dense_score.get(&chunk_id).copied(),
+        });
+    }
+
+    finalize_ranked_chunks(fused, limit, min_score)
+}
+
+fn fuse_ranked_chunks_interaction(
+    keyword: Vec<RankedChunk>,
+    semantic: Vec<RankedChunk>,
+    dense_weight: f32,
+    bm25_weight: f32,
+    agreement_weight: f32,
+    limit: usize,
+    min_score: f32,
+) -> Vec<RankedChunk> {
+    let max_bm25 = keyword
+        .iter()
+        .map(|item| item.score)
+        .fold(0.0_f32, f32::max);
+    let max_dense = semantic
+        .iter()
+        .map(|item| item.score)
+        .fold(0.0_f32, f32::max);
+
+    let bm25_score = keyword
+        .iter()
+        .map(|item| (item.chunk_id, item.score))
+        .collect::<HashMap<_, _>>();
+    let dense_score = semantic
+        .iter()
+        .map(|item| (item.chunk_id, item.score))
+        .collect::<HashMap<_, _>>();
+
+    let mut all_chunk_ids = HashSet::new();
+    for item in &keyword {
+        all_chunk_ids.insert(item.chunk_id);
+    }
+    for item in &semantic {
+        all_chunk_ids.insert(item.chunk_id);
+    }
+
+    let mut fused = Vec::new();
+    for chunk_id in all_chunk_ids {
+        let bm25_norm = bm25_score
+            .get(&chunk_id)
+            .copied()
+            .map(|score| normalize_score_by_max(score, max_bm25))
+            .unwrap_or(0.0);
+        let dense_norm = dense_score
+            .get(&chunk_id)
+            .copied()
+            .map(|score| normalize_score_by_max(score, max_dense))
+            .unwrap_or(0.0);
+        let fusion = dense_weight * dense_norm
+            + bm25_weight * bm25_norm
+            + agreement_weight * dense_norm * bm25_norm;
+
+        fused.push(RankedChunk {
+            chunk_id,
+            score: fusion,
+            fusion,
+            reranker: None,
+            bm25: bm25_score.get(&chunk_id).copied(),
+            dense: dense_score.get(&chunk_id).copied(),
+        });
+    }
+
+    finalize_ranked_chunks(fused, limit, min_score)
+}
+
+fn finalize_ranked_chunks(
+    mut ranked: Vec<RankedChunk>,
+    limit: usize,
+    min_score: f32,
+) -> Vec<RankedChunk> {
+    ranked.sort_by(|left, right| right.score.total_cmp(&left.score));
+    normalize_ranked_chunks_scores(&mut ranked);
+    ranked
         .into_iter()
         .filter(|item| item.score >= min_score)
         .take(limit)
         .collect()
+}
+
+fn normalize_ranked_chunks_scores(ranked: &mut [RankedChunk]) {
+    let max_score = ranked.iter().map(|item| item.score).fold(0.0_f32, f32::max);
+    if max_score > 0.0 {
+        for item in ranked {
+            item.score /= max_score;
+            item.fusion = item.score;
+        }
+    }
+}
+
+fn normalize_score_by_max(score: f32, max_score: f32) -> f32 {
+    if max_score > 0.0 {
+        score / max_score
+    } else {
+        0.0
+    }
 }
 
 fn rerank_candidate_count(

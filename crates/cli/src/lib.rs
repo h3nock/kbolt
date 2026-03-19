@@ -577,8 +577,8 @@ impl CliAdapter {
             lines.push(format!("text: {}", item.text));
             if let Some(signals) = &item.signals {
                 lines.push(format!(
-                    "signals: bm25={:?} dense={:?} rrf={:.3} reranker={:?}",
-                    signals.bm25, signals.dense, signals.rrf, signals.reranker
+                    "signals: bm25={:?} dense={:?} fusion={:.3} reranker={:?}",
+                    signals.bm25, signals.dense, signals.fusion, signals.reranker
                 ));
             }
         }

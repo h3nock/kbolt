@@ -38,6 +38,10 @@ const DEFAULT_RANKING_DEEP_VARIANTS_MAX: usize = 4;
 const DEFAULT_RANKING_INITIAL_CANDIDATE_LIMIT_MIN: usize = 20;
 const DEFAULT_RANKING_RERANK_CANDIDATES_MIN: usize = 10;
 const DEFAULT_RANKING_RERANK_CANDIDATES_MAX: usize = 20;
+const DEFAULT_RANKING_HYBRID_ALPHA: f32 = 0.7;
+const DEFAULT_RANKING_HYBRID_DENSE_WEIGHT: f32 = 0.7;
+const DEFAULT_RANKING_HYBRID_BM25_WEIGHT: f32 = 0.2;
+const DEFAULT_RANKING_HYBRID_AGREEMENT_WEIGHT: f32 = 0.1;
 const DEFAULT_RANKING_BM25_TITLE_BOOST: f32 = 2.0;
 const DEFAULT_RANKING_BM25_HEADING_BOOST: f32 = 1.5;
 const DEFAULT_RANKING_BM25_BODY_BOOST: f32 = 1.0;
@@ -221,6 +225,8 @@ pub struct RankingConfig {
     #[serde(default = "default_ranking_rerank_candidates_max")]
     pub rerank_candidates_max: usize,
     #[serde(default)]
+    pub hybrid_fusion: HybridFusionConfig,
+    #[serde(default)]
     pub bm25_boosts: Bm25BoostsConfig,
 }
 
@@ -232,7 +238,43 @@ impl Default for RankingConfig {
             initial_candidate_limit_min: default_ranking_initial_candidate_limit_min(),
             rerank_candidates_min: default_ranking_rerank_candidates_min(),
             rerank_candidates_max: default_ranking_rerank_candidates_max(),
+            hybrid_fusion: HybridFusionConfig::default(),
             bm25_boosts: Bm25BoostsConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HybridFusionMode {
+    Rrf,
+    #[default]
+    Alpha,
+    Interaction,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HybridFusionConfig {
+    #[serde(default)]
+    pub mode: HybridFusionMode,
+    #[serde(default = "default_ranking_hybrid_alpha")]
+    pub alpha: f32,
+    #[serde(default = "default_ranking_hybrid_dense_weight")]
+    pub dense_weight: f32,
+    #[serde(default = "default_ranking_hybrid_bm25_weight")]
+    pub bm25_weight: f32,
+    #[serde(default = "default_ranking_hybrid_agreement_weight")]
+    pub agreement_weight: f32,
+}
+
+impl Default for HybridFusionConfig {
+    fn default() -> Self {
+        Self {
+            mode: HybridFusionMode::default(),
+            alpha: default_ranking_hybrid_alpha(),
+            dense_weight: default_ranking_hybrid_dense_weight(),
+            bm25_weight: default_ranking_hybrid_bm25_weight(),
+            agreement_weight: default_ranking_hybrid_agreement_weight(),
         }
     }
 }
@@ -747,6 +789,38 @@ fn validate_ranking(ranking: &RankingConfig) -> Result<()> {
         .into());
     }
 
+    if !ranking.hybrid_fusion.alpha.is_finite()
+        || !(0.0..=1.0).contains(&ranking.hybrid_fusion.alpha)
+    {
+        return Err(KboltError::Config(
+            "ranking.hybrid_fusion.alpha must be finite and between 0.0 and 1.0".to_string(),
+        )
+        .into());
+    }
+
+    validate_nonnegative_finite_weight(
+        "ranking.hybrid_fusion.dense_weight",
+        ranking.hybrid_fusion.dense_weight,
+    )?;
+    validate_nonnegative_finite_weight(
+        "ranking.hybrid_fusion.bm25_weight",
+        ranking.hybrid_fusion.bm25_weight,
+    )?;
+    validate_nonnegative_finite_weight(
+        "ranking.hybrid_fusion.agreement_weight",
+        ranking.hybrid_fusion.agreement_weight,
+    )?;
+    if ranking.hybrid_fusion.dense_weight
+        + ranking.hybrid_fusion.bm25_weight
+        + ranking.hybrid_fusion.agreement_weight
+        <= 0.0
+    {
+        return Err(KboltError::Config(
+            "ranking.hybrid_fusion weights must sum to greater than zero".to_string(),
+        )
+        .into());
+    }
+
     validate_positive_finite_boost("ranking.bm25_boosts.title", ranking.bm25_boosts.title)?;
     validate_positive_finite_boost("ranking.bm25_boosts.heading", ranking.bm25_boosts.heading)?;
     validate_positive_finite_boost("ranking.bm25_boosts.body", ranking.bm25_boosts.body)?;
@@ -760,6 +834,17 @@ fn validate_positive_finite_boost(scope: &str, value: f32) -> Result<()> {
         return Err(
             KboltError::Config(format!("{scope} must be finite and greater than zero")).into(),
         );
+    }
+
+    Ok(())
+}
+
+fn validate_nonnegative_finite_weight(scope: &str, value: f32) -> Result<()> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(KboltError::Config(format!(
+            "{scope} must be finite and greater than or equal to zero"
+        ))
+        .into());
     }
 
     Ok(())
@@ -1126,6 +1211,22 @@ fn default_ranking_rerank_candidates_min() -> usize {
 
 fn default_ranking_rerank_candidates_max() -> usize {
     DEFAULT_RANKING_RERANK_CANDIDATES_MAX
+}
+
+fn default_ranking_hybrid_alpha() -> f32 {
+    DEFAULT_RANKING_HYBRID_ALPHA
+}
+
+fn default_ranking_hybrid_dense_weight() -> f32 {
+    DEFAULT_RANKING_HYBRID_DENSE_WEIGHT
+}
+
+fn default_ranking_hybrid_bm25_weight() -> f32 {
+    DEFAULT_RANKING_HYBRID_BM25_WEIGHT
+}
+
+fn default_ranking_hybrid_agreement_weight() -> f32 {
+    DEFAULT_RANKING_HYBRID_AGREEMENT_WEIGHT
 }
 
 fn default_ranking_bm25_title_boost() -> f32 {

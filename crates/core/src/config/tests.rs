@@ -315,6 +315,13 @@ fn save_writes_index_toml() {
             initial_candidate_limit_min: 24,
             rerank_candidates_min: 12,
             rerank_candidates_max: 28,
+            hybrid_fusion: HybridFusionConfig {
+                mode: HybridFusionMode::Rrf,
+                alpha: 0.4,
+                dense_weight: 0.6,
+                bm25_weight: 0.3,
+                agreement_weight: 0.1,
+            },
             bm25_boosts: Bm25BoostsConfig {
                 title: 2.5,
                 heading: 1.75,
@@ -695,6 +702,125 @@ rerank_candidates_max = 8
         err.to_string()
             .contains("ranking.rerank_candidates_max (8) must be greater than or equal to ranking.rerank_candidates_min (12)"),
         "unexpected error: {err}"
+    );
+
+    fs::write(
+        &config_file,
+        r#"
+[ranking.hybrid_fusion]
+alpha = 1.2
+"#,
+    )
+    .expect("rewrite config file");
+
+    let err = load_from_file(&config_file, &config_dir, &cache_dir)
+        .expect_err("invalid hybrid alpha should fail");
+    assert!(
+        err.to_string()
+            .contains("ranking.hybrid_fusion.alpha must be finite and between 0.0 and 1.0"),
+        "unexpected error: {err}"
+    );
+
+    fs::write(
+        &config_file,
+        r#"
+[ranking.hybrid_fusion]
+dense_weight = -0.1
+"#,
+    )
+    .expect("rewrite config file");
+
+    let err = load_from_file(&config_file, &config_dir, &cache_dir)
+        .expect_err("negative hybrid dense weight should fail");
+    assert!(
+        err.to_string().contains(
+            "ranking.hybrid_fusion.dense_weight must be finite and greater than or equal to zero"
+        ),
+        "unexpected error: {err}"
+    );
+
+    fs::write(
+        &config_file,
+        r#"
+[ranking.hybrid_fusion]
+dense_weight = 0.0
+bm25_weight = 0.0
+agreement_weight = 0.0
+"#,
+    )
+    .expect("rewrite config file");
+
+    let err = load_from_file(&config_file, &config_dir, &cache_dir)
+        .expect_err("all-zero hybrid weights should fail");
+    assert!(
+        err.to_string()
+            .contains("ranking.hybrid_fusion weights must sum to greater than zero"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn load_reads_explicit_hybrid_fusion_config() {
+    let tmp = tempdir().expect("create tempdir");
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    let config_file = config_dir.join(CONFIG_FILENAME);
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        &config_file,
+        r#"
+[ranking.hybrid_fusion]
+mode = "rrf"
+alpha = 0.35
+dense_weight = 0.55
+bm25_weight = 0.25
+agreement_weight = 0.20
+"#,
+    )
+    .expect("write config file");
+
+    let config = load_from_file(&config_file, &config_dir, &cache_dir).expect("load config");
+    assert_eq!(
+        config.ranking.hybrid_fusion,
+        HybridFusionConfig {
+            mode: HybridFusionMode::Rrf,
+            alpha: 0.35,
+            dense_weight: 0.55,
+            bm25_weight: 0.25,
+            agreement_weight: 0.20,
+        }
+    );
+}
+
+#[test]
+fn load_reads_explicit_interaction_hybrid_fusion_config() {
+    let tmp = tempdir().expect("create tempdir");
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    let config_file = config_dir.join(CONFIG_FILENAME);
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        &config_file,
+        r#"
+[ranking.hybrid_fusion]
+mode = "interaction"
+dense_weight = 0.7
+bm25_weight = 0.2
+agreement_weight = 0.1
+"#,
+    )
+    .expect("write config file");
+
+    let config = load_from_file(&config_file, &config_dir, &cache_dir).expect("load config");
+    assert_eq!(
+        config.ranking.hybrid_fusion,
+        HybridFusionConfig {
+            mode: HybridFusionMode::Interaction,
+            alpha: DEFAULT_RANKING_HYBRID_ALPHA,
+            dense_weight: 0.7,
+            bm25_weight: 0.2,
+            agreement_weight: 0.1,
+        }
     );
 }
 

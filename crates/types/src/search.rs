@@ -77,6 +77,6 @@ pub struct SearchResult {
 pub struct SearchSignals {
     pub bm25: Option<f32>,
     pub dense: Option<f32>,
-    pub rrf: f32,
+    pub fusion: f32,
     pub reranker: Option<f32>,
 }

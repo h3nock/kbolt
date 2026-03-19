@@ -51,7 +51,7 @@ fn search_response_roundtrip() {
             signals: Some(SearchSignals {
                 bm25: Some(0.52),
                 dense: Some(0.79),
-                rrf: 0.62,
+                fusion: 0.62,
                 reranker: Some(0.91),
             }),
         }],

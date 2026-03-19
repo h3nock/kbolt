@@ -95,7 +95,7 @@ struct SearchHitCandidate {
 struct RankedChunk {
     chunk_id: i64,
     score: f32,
-    rrf: f32,
+    fusion: f32,
     reranker: Option<f32>,
     bm25: Option<f32>,
     dense: Option<f32>,
