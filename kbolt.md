@@ -1807,9 +1807,11 @@ MODELS
 EVALUATION
   kbolt eval run                    Run the default evaluation suite
     --file <path>                  Run a specific eval manifest instead of ~/.config/kbolt/eval.toml
-  kbolt eval import scifact
-    --source <dir>                 Extracted BEIR SciFact dataset directory
+  kbolt eval import beir
+    --dataset <name>               Dataset identifier used in the report and default collection name
+    --source <dir>                 Extracted canonical BEIR dataset directory
     --output <dir>                 Empty directory where corpus/ + eval.toml will be written
+    --collection <name>            Override the collection name written into eval paths
 
 SCHEDULING
   kbolt schedule add --every <interval>
@@ -1882,7 +1884,7 @@ Models loaded lazily — embedder loads on first `kbolt update` (with embedding)
 ```
 kbolt eval run
 kbolt eval run --file /path/to/eval.toml
-kbolt eval import scifact --source /path/to/scifact --output /path/to/scifact-bench
+kbolt eval import beir --dataset fiqa --source /path/to/fiqa --output /path/to/fiqa-bench
 ```
 
 Retrieval metrics: nDCG@10, Recall@10, MRR@10, latency (p50/p95).
@@ -1907,7 +1909,7 @@ The eval runner compares fixed retrieval modes:
 
 CLI output stays lean: per-mode summary metrics plus the queries that still need attention. JSON output returns the full structured report.
 
-`kbolt eval import scifact` is the first built-in public benchmark workflow. It expects an extracted BEIR SciFact directory with:
+`kbolt eval import beir` imports the canonical BEIR test split from an extracted dataset directory. It expects:
 - `corpus.jsonl`
 - `queries.jsonl`
 - `qrels/test.tsv`
@@ -1916,7 +1918,7 @@ The importer materializes:
 - `corpus/{doc_id}.md`
 - `eval.toml`
 
-under the requested output directory, using the benchmark defaults `space = "bench"` and `collections = ["scifact"]`. The command prints the next steps to register that corpus as a normal collection, run `kbolt update`, and then run `kbolt eval run --file ...`.
+under the requested output directory, using the benchmark default `space = "bench"` and `collections = ["{dataset}"]` unless `--collection` overrides it. The command prints the next steps to register that corpus as a normal collection, run `kbolt update`, and then run `kbolt eval run --file ...`.
 
 ---
 
