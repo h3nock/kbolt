@@ -238,18 +238,22 @@ pub enum EvalCommand {
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum EvalImportCommand {
     #[command(
-        about = "import BEIR SciFact from an extracted dataset directory",
-        long_about = "Import BEIR SciFact from an extracted dataset directory.\n\nExpected source layout:\n  corpus.jsonl\n  queries.jsonl\n  qrels/test.tsv\n\nDataset: https://huggingface.co/datasets/BeIR/scifact"
+        about = "import a canonical BEIR dataset from an extracted directory",
+        long_about = "Import a canonical BEIR dataset from an extracted directory.\n\nExpected source layout:\n  corpus.jsonl\n  queries.jsonl\n  qrels/test.tsv\n\nThis command always imports the test split."
     )]
-    Scifact(EvalImportScifactArgs),
+    Beir(EvalImportBeirArgs),
 }
 
 #[derive(Debug, Args, PartialEq, Eq)]
-pub struct EvalImportScifactArgs {
+pub struct EvalImportBeirArgs {
+    #[arg(long, value_name = "name")]
+    pub dataset: String,
     #[arg(long, value_name = "dir")]
     pub source: PathBuf,
     #[arg(long, value_name = "dir")]
     pub output: PathBuf,
+    #[arg(long, value_name = "name")]
+    pub collection: Option<String>,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -312,8 +316,8 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        Cli, CollectionCommand, Command, EvalCommand, EvalImportArgs, EvalImportCommand,
-        EvalImportScifactArgs, EvalRunArgs, GetArgs, MultiGetArgs, OutputFormat, ScheduleAddArgs,
+        Cli, CollectionCommand, Command, EvalCommand, EvalImportArgs, EvalImportBeirArgs,
+        EvalImportCommand, EvalRunArgs, GetArgs, MultiGetArgs, OutputFormat, ScheduleAddArgs,
         ScheduleCommand, ScheduleDayArg, ScheduleRemoveArgs, SearchArgs, SpaceCommand, UpdateArgs,
     };
 
@@ -643,28 +647,66 @@ mod tests {
     }
 
     #[test]
-    fn parses_eval_import_scifact_with_required_paths() {
+    fn parses_eval_import_beir_with_required_paths() {
         let parsed = parse([
             "kbolt",
             "eval",
             "import",
-            "scifact",
+            "beir",
+            "--dataset",
+            "fiqa",
             "--source",
-            "/tmp/scifact-source",
+            "/tmp/fiqa-source",
             "--output",
-            "/tmp/scifact-bench",
+            "/tmp/fiqa-bench",
         ]);
 
-        assert!(matches!(
-            parsed.command,
-            Command::Eval(eval)
-                if eval.command
-                    == EvalCommand::Import(EvalImportArgs {
-                        dataset: EvalImportCommand::Scifact(EvalImportScifactArgs {
-                            source: PathBuf::from("/tmp/scifact-source"),
-                            output: PathBuf::from("/tmp/scifact-bench"),
-                        })
-                    })
-        ));
+        let Command::Eval(eval) = parsed.command else {
+            panic!("expected eval command");
+        };
+        assert_eq!(
+            eval.command,
+            EvalCommand::Import(EvalImportArgs {
+                dataset: EvalImportCommand::Beir(EvalImportBeirArgs {
+                    dataset: "fiqa".to_string(),
+                    source: PathBuf::from("/tmp/fiqa-source"),
+                    output: PathBuf::from("/tmp/fiqa-bench"),
+                    collection: None,
+                })
+            })
+        );
+    }
+
+    #[test]
+    fn parses_eval_import_beir_with_collection_override() {
+        let parsed = parse([
+            "kbolt",
+            "eval",
+            "import",
+            "beir",
+            "--dataset",
+            "fiqa",
+            "--source",
+            "/tmp/fiqa-source",
+            "--output",
+            "/tmp/fiqa-bench",
+            "--collection",
+            "finance",
+        ]);
+
+        let Command::Eval(eval) = parsed.command else {
+            panic!("expected eval command");
+        };
+        assert_eq!(
+            eval.command,
+            EvalCommand::Import(EvalImportArgs {
+                dataset: EvalImportCommand::Beir(EvalImportBeirArgs {
+                    dataset: "fiqa".to_string(),
+                    source: PathBuf::from("/tmp/fiqa-source"),
+                    output: PathBuf::from("/tmp/fiqa-bench"),
+                    collection: Some("finance".to_string()),
+                })
+            })
+        );
     }
 }

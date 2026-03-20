@@ -515,9 +515,12 @@ fn handle_eval_import(cli: &Cli) -> std::result::Result<bool, RunError> {
     ensure_eval_uses_local_scope(cli.space.as_deref())?;
 
     let report = match &import.dataset {
-        EvalImportCommand::Scifact(args) => {
-            eval_import::import_scifact(&args.source, &args.output)?
-        }
+        EvalImportCommand::Beir(args) => eval_import::import_beir(
+            &args.dataset,
+            &args.source,
+            &args.output,
+            args.collection.as_deref(),
+        )?,
     };
 
     if cli.format == OutputFormat::Json {
