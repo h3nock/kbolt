@@ -12,6 +12,7 @@ use super::*;
 impl Engine {
     pub fn run_eval(&self, eval_file: Option<&Path>) -> Result<EvalRunReport> {
         let dataset = load_eval_dataset_with_file(&self.config.config_dir, eval_file)?;
+        self.validate_eval_cases(&dataset.cases)?;
         let eval_runs = self.eval_runs();
         let total_cases = dataset.cases.len();
         let mut reports = Vec::with_capacity(eval_runs.len());
@@ -33,6 +34,43 @@ impl Engine {
             modes: reports,
             failed_modes,
         })
+    }
+
+    fn validate_eval_cases(&self, cases: &[EvalCase]) -> Result<()> {
+        let mut seen_spaces = HashSet::new();
+        let mut seen_collections = HashSet::new();
+
+        for case in cases {
+            if let Some(space_name) = case.space.as_deref() {
+                if seen_spaces.insert(space_name.to_string()) {
+                    self.resolve_space_row(Some(space_name), None)?;
+                }
+            }
+
+            for collection in &case.collections {
+                let key = (case.space.clone(), collection.clone());
+                if seen_collections.insert(key) {
+                    self.validate_eval_collection(case.space.as_deref(), collection)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_eval_collection(&self, space: Option<&str>, collection: &str) -> Result<()> {
+        let resolved_space = self.resolve_space_row(space, Some(collection))?;
+        let collection_row = self.storage.get_collection(resolved_space.id, collection)?;
+        let chunk_count = self.storage.count_chunks_in_collection(collection_row.id)?;
+        if chunk_count == 0 {
+            return Err(KboltError::InvalidInput(format!(
+                "eval collection '{collection}' in space '{}' has no indexed chunks; run `kbolt --space {} update --collection {collection}`",
+                resolved_space.name, resolved_space.name
+            ))
+            .into());
+        }
+
+        Ok(())
     }
 
     fn eval_runs(&self) -> Vec<(SearchMode, bool)> {
@@ -563,6 +601,70 @@ judgments = [{ path = "rust/guides/traits.md", relevance = 1 }]
 
         assert_eq!(report.total_cases, 1);
         assert!(report.modes.iter().all(|mode| mode.recall_at_10 >= 0.0));
+    }
+
+    #[test]
+    fn run_eval_fails_when_manifest_references_missing_collection() {
+        let engine = test_engine(None, Some(Arc::new(DeterministicExpander)));
+        seed_eval_file(
+            &engine,
+            r#"
+[[cases]]
+query = "trait object generic"
+space = "default"
+collections = ["rust"]
+judgments = [{ path = "rust/guides/traits.md", relevance = 1 }]
+"#,
+        );
+
+        let err = engine
+            .run_eval(None)
+            .expect_err("missing collection should fail");
+        assert!(
+            err.to_string().contains("collection not found: rust"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn run_eval_fails_when_collection_has_not_been_indexed() {
+        let root = tempdir().expect("create temp root");
+        let collection_dir = seed_collection(root.path(), "rust", "guides/traits.md", TRAITS_DOC);
+        let engine = test_engine(None, Some(Arc::new(DeterministicExpander)));
+        seed_eval_file(
+            &engine,
+            r#"
+[[cases]]
+query = "trait object generic"
+space = "default"
+collections = ["rust"]
+judgments = [{ path = "rust/guides/traits.md", relevance = 1 }]
+"#,
+        );
+
+        engine
+            .add_collection(AddCollectionRequest {
+                path: collection_dir,
+                space: Some("default".to_string()),
+                name: Some("rust".to_string()),
+                description: None,
+                extensions: None,
+                no_index: true,
+            })
+            .expect("add collection");
+
+        let err = engine
+            .run_eval(None)
+            .expect_err("unindexed collection should fail");
+        assert!(
+            err.to_string().contains("has no indexed chunks"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string()
+                .contains("kbolt --space default update --collection rust"),
+            "unexpected error: {err}"
+        );
     }
 
     fn test_engine(
