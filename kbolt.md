@@ -1609,7 +1609,7 @@ Neighbor expansion is used for answer context in result assembly. It does not ch
 
 ### Stage 8: Reranking
 
-Cross-encoder (Qwen3-Reranker 0.6B GGUF) scores top-20 candidates:
+Cross-encoder (Qwen3-Reranker 0.6B GGUF) scores top-20–30 candidates:
 - Input: (query, primary-hit-chunk text) pairs — reranker scores one representative chunk per document (optionally with deterministic contextual prefix), not neighbor-expanded context
 - Output: raw query-local relevance score per representative document
 - Score application:
@@ -1683,9 +1683,9 @@ days = 7    # hard-delete documents deactivated longer than this
 [ranking]
 rrf_k = 60
 deep_variants_max = 4
-initial_candidate_limit_min = 20
-rerank_candidates_min = 10
-rerank_candidates_max = 20
+initial_candidate_limit_min = 40
+rerank_candidates_min = 20
+rerank_candidates_max = 30
 
 [ranking.hybrid_fusion]
 mode = "alpha" # alpha | interaction | rrf
