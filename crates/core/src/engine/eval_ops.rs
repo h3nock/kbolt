@@ -82,6 +82,7 @@ impl Engine {
         if self.embedder.is_some() {
             runs.push((SearchMode::Semantic, true));
         }
+        runs.push((SearchMode::Deep, true));
         runs.push((SearchMode::Deep, false));
         runs
     }
@@ -344,6 +345,7 @@ judgments = [{ path = "rust/guides/traits.md", relevance = 1 }]
                 (SearchMode::Keyword, true),
                 (SearchMode::Auto, true),
                 (SearchMode::Auto, false),
+                (SearchMode::Deep, true),
                 (SearchMode::Deep, false),
             ]
         );
