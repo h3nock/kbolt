@@ -2581,7 +2581,7 @@ fn search_auto_mode_keeps_unreranked_tail_below_reranked_pool() {
         std::fs::create_dir_all(&work_path).expect("create collection dir");
         add_collection_fixture(&engine, "work", "api", work_path.clone());
 
-        for index in 0..21 {
+        for index in 0..31 {
             write_text_file(
                 &work_path.join(format!("doc-{index:02}.md")),
                 &format!("shared token document {index}\n"),
@@ -2597,14 +2597,14 @@ fn search_auto_mode_keeps_unreranked_tail_below_reranked_pool() {
                 mode: SearchMode::Auto,
                 space: Some("work".to_string()),
                 collections: vec!["api".to_string()],
-                limit: 21,
+                limit: 31,
                 min_score: 0.0,
                 no_rerank: false,
                 debug: true,
             })
             .expect("run auto search");
 
-        assert_eq!(response.results.len(), 21);
+        assert_eq!(response.results.len(), 31);
 
         let reranked_prefix_len = response
             .results
@@ -2619,7 +2619,7 @@ fn search_auto_mode_keeps_unreranked_tail_below_reranked_pool() {
             })
             .count();
 
-        assert_eq!(reranked_prefix_len, 20);
+        assert_eq!(reranked_prefix_len, 30);
         assert!(
             response.results[reranked_prefix_len..]
                 .iter()
@@ -2634,7 +2634,7 @@ fn search_auto_mode_keeps_unreranked_tail_below_reranked_pool() {
             "expected all non-reranked candidates after the reranked pool"
         );
         assert!(
-            response.results[19].score > response.results[20].score,
+            response.results[29].score > response.results[30].score,
             "expected untouched tail candidate to score below reranked pool"
         );
     });
@@ -2803,16 +2803,16 @@ fn search_deep_mode_fails_when_expansion_model_is_missing() {
 }
 
 #[test]
-fn initial_search_candidate_limit_uses_single_rerank_expansion() {
+fn initial_search_candidate_limit_uses_configured_rerank_expansion() {
     let engine = test_engine();
 
     assert_eq!(
         engine.initial_search_candidate_limit(&SearchMode::Auto, 10, true),
-        20
+        40
     );
     assert_eq!(
         engine.initial_search_candidate_limit(&SearchMode::Deep, 10, true),
-        20
+        40
     );
     assert_eq!(
         engine.initial_search_candidate_limit(&SearchMode::Auto, 10, false),
