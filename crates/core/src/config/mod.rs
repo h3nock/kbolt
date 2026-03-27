@@ -41,7 +41,7 @@ const DEFAULT_RANKING_RERANK_CANDIDATES_MAX: usize = 30;
 const DEFAULT_RANKING_HYBRID_LINEAR_DENSE_WEIGHT: f32 = 0.7;
 const DEFAULT_RANKING_HYBRID_LINEAR_BM25_WEIGHT: f32 = 0.3;
 const DEFAULT_RANKING_HYBRID_DBSF_DENSE_WEIGHT: f32 = 1.0;
-const DEFAULT_RANKING_HYBRID_DBSF_BM25_WEIGHT: f32 = 1.0;
+const DEFAULT_RANKING_HYBRID_DBSF_BM25_WEIGHT: f32 = 0.4;
 const DEFAULT_RANKING_HYBRID_DBSF_STDDEVS: f32 = 3.0;
 const DEFAULT_RANKING_HYBRID_RRF_K: usize = 60;
 const DEFAULT_RANKING_BM25_TITLE_BOOST: f32 = 2.0;
@@ -250,8 +250,8 @@ impl Default for RankingConfig {
 #[serde(rename_all = "snake_case")]
 pub enum HybridFusionMode {
     Rrf,
-    #[default]
     Linear,
+    #[default]
     Dbsf,
 }
 

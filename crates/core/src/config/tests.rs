@@ -464,6 +464,34 @@ fn chunking_config_default_includes_code_profile() {
 }
 
 #[test]
+fn ranking_config_default_uses_tuned_dbsf_hybrid_fusion() {
+    let ranking = RankingConfig::default();
+
+    assert_eq!(ranking.hybrid_fusion.mode, HybridFusionMode::Dbsf);
+    assert_eq!(
+        ranking.hybrid_fusion.linear,
+        LinearHybridFusionConfig {
+            dense_weight: DEFAULT_RANKING_HYBRID_LINEAR_DENSE_WEIGHT,
+            bm25_weight: DEFAULT_RANKING_HYBRID_LINEAR_BM25_WEIGHT,
+        }
+    );
+    assert_eq!(
+        ranking.hybrid_fusion.dbsf,
+        DbsfHybridFusionConfig {
+            dense_weight: DEFAULT_RANKING_HYBRID_DBSF_DENSE_WEIGHT,
+            bm25_weight: 0.4,
+            stddevs: DEFAULT_RANKING_HYBRID_DBSF_STDDEVS,
+        }
+    );
+    assert_eq!(
+        ranking.hybrid_fusion.rrf,
+        RrfHybridFusionConfig {
+            k: DEFAULT_RANKING_HYBRID_RRF_K,
+        }
+    );
+}
+
+#[test]
 fn load_rejects_invalid_chunking_budget_order() {
     let tmp = tempdir().expect("create tempdir");
     let config_dir = tmp.path().join("config");

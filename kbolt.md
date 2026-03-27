@@ -1585,7 +1585,7 @@ fusion(d) = wd * dense_norm(d) + wb * bm25_norm(d)
 Where `dense_norm` and `bm25_norm` are query-local max-normalized scores in `[0, 1]`.
 After fusion, scores are normalized again so the top fused chunk in the query is `1.0`.
 
-Defaults: `mode = "linear"`, `dense_weight = 0.7`, `bm25_weight = 0.3`.
+Defaults: `mode = "dbsf"`, `dense_weight = 1.0`, `bm25_weight = 0.4`, `stddevs = 3.0`.
 
 DBSF fusion (distribution-based score fusion):
 
@@ -1596,7 +1596,7 @@ fusion(d) = wd * dense_dbsf(d) + wb * bm25_dbsf(d)
 Each branch is normalized from its own returned score distribution using `mean ± stddevs * stddev`,
 clipped to `[0, 1]`, then combined with a weighted sum. This reduces the tendency of flat lexical
 result sets to behave like full-strength evidence.
-Defaults for that mode: `dense_weight = 1.0`, `bm25_weight = 1.0`, `stddevs = 3.0`.
+Defaults for that mode: `dense_weight = 1.0`, `bm25_weight = 0.4`, `stddevs = 3.0`.
 
 RRF remains available as an alternative mode:
 
@@ -1705,7 +1705,7 @@ rerank_candidates_min = 20
 rerank_candidates_max = 30
 
 [ranking.hybrid_fusion]
-mode = "linear" # linear | dbsf | rrf
+mode = "dbsf" # linear | dbsf | rrf
 
 [ranking.hybrid_fusion.linear]
 dense_weight = 0.7
@@ -1713,7 +1713,7 @@ bm25_weight = 0.3
 
 [ranking.hybrid_fusion.dbsf]
 dense_weight = 1.0
-bm25_weight = 1.0
+bm25_weight = 0.4
 stddevs = 3.0
 
 [ranking.hybrid_fusion.rrf]
