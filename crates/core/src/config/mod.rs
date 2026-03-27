@@ -33,15 +33,17 @@ const DEFAULT_INFERENCE_MAX_RETRIES: u32 = 2;
 const DEFAULT_LOCAL_INFERENCE_MAX_TOKENS: usize = 256;
 const DEFAULT_LOCAL_EXPANDER_MAX_TOKENS: usize = 600;
 const DEFAULT_LOCAL_INFERENCE_N_CTX: u32 = 2048;
-const DEFAULT_RANKING_RRF_K: usize = 60;
+const DEFAULT_RANKING_DEEP_VARIANT_RRF_K: usize = 60;
 const DEFAULT_RANKING_DEEP_VARIANTS_MAX: usize = 4;
 const DEFAULT_RANKING_INITIAL_CANDIDATE_LIMIT_MIN: usize = 40;
 const DEFAULT_RANKING_RERANK_CANDIDATES_MIN: usize = 20;
 const DEFAULT_RANKING_RERANK_CANDIDATES_MAX: usize = 30;
-const DEFAULT_RANKING_HYBRID_ALPHA: f32 = 0.7;
-const DEFAULT_RANKING_HYBRID_DENSE_WEIGHT: f32 = 0.7;
-const DEFAULT_RANKING_HYBRID_BM25_WEIGHT: f32 = 0.2;
-const DEFAULT_RANKING_HYBRID_AGREEMENT_WEIGHT: f32 = 0.1;
+const DEFAULT_RANKING_HYBRID_LINEAR_DENSE_WEIGHT: f32 = 0.7;
+const DEFAULT_RANKING_HYBRID_LINEAR_BM25_WEIGHT: f32 = 0.3;
+const DEFAULT_RANKING_HYBRID_DBSF_DENSE_WEIGHT: f32 = 1.0;
+const DEFAULT_RANKING_HYBRID_DBSF_BM25_WEIGHT: f32 = 1.0;
+const DEFAULT_RANKING_HYBRID_DBSF_STDDEVS: f32 = 3.0;
+const DEFAULT_RANKING_HYBRID_RRF_K: usize = 60;
 const DEFAULT_RANKING_BM25_TITLE_BOOST: f32 = 2.0;
 const DEFAULT_RANKING_BM25_HEADING_BOOST: f32 = 1.5;
 const DEFAULT_RANKING_BM25_BODY_BOOST: f32 = 1.0;
@@ -214,8 +216,8 @@ pub struct ReapingConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RankingConfig {
-    #[serde(default = "default_ranking_rrf_k")]
-    pub rrf_k: usize,
+    #[serde(default = "default_ranking_deep_variant_rrf_k")]
+    pub deep_variant_rrf_k: usize,
     #[serde(default = "default_ranking_deep_variants_max")]
     pub deep_variants_max: usize,
     #[serde(default = "default_ranking_initial_candidate_limit_min")]
@@ -233,7 +235,7 @@ pub struct RankingConfig {
 impl Default for RankingConfig {
     fn default() -> Self {
         Self {
-            rrf_k: default_ranking_rrf_k(),
+            deep_variant_rrf_k: default_ranking_deep_variant_rrf_k(),
             deep_variants_max: default_ranking_deep_variants_max(),
             initial_candidate_limit_min: default_ranking_initial_candidate_limit_min(),
             rerank_candidates_min: default_ranking_rerank_candidates_min(),
@@ -249,32 +251,80 @@ impl Default for RankingConfig {
 pub enum HybridFusionMode {
     Rrf,
     #[default]
-    Alpha,
-    Interaction,
+    Linear,
+    Dbsf,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HybridFusionConfig {
     #[serde(default)]
     pub mode: HybridFusionMode,
-    #[serde(default = "default_ranking_hybrid_alpha")]
-    pub alpha: f32,
-    #[serde(default = "default_ranking_hybrid_dense_weight")]
-    pub dense_weight: f32,
-    #[serde(default = "default_ranking_hybrid_bm25_weight")]
-    pub bm25_weight: f32,
-    #[serde(default = "default_ranking_hybrid_agreement_weight")]
-    pub agreement_weight: f32,
+    #[serde(default)]
+    pub linear: LinearHybridFusionConfig,
+    #[serde(default)]
+    pub dbsf: DbsfHybridFusionConfig,
+    #[serde(default)]
+    pub rrf: RrfHybridFusionConfig,
 }
 
 impl Default for HybridFusionConfig {
     fn default() -> Self {
         Self {
             mode: HybridFusionMode::default(),
-            alpha: default_ranking_hybrid_alpha(),
-            dense_weight: default_ranking_hybrid_dense_weight(),
-            bm25_weight: default_ranking_hybrid_bm25_weight(),
-            agreement_weight: default_ranking_hybrid_agreement_weight(),
+            linear: LinearHybridFusionConfig::default(),
+            dbsf: DbsfHybridFusionConfig::default(),
+            rrf: RrfHybridFusionConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinearHybridFusionConfig {
+    #[serde(default = "default_ranking_hybrid_linear_dense_weight")]
+    pub dense_weight: f32,
+    #[serde(default = "default_ranking_hybrid_linear_bm25_weight")]
+    pub bm25_weight: f32,
+}
+
+impl Default for LinearHybridFusionConfig {
+    fn default() -> Self {
+        Self {
+            dense_weight: default_ranking_hybrid_linear_dense_weight(),
+            bm25_weight: default_ranking_hybrid_linear_bm25_weight(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DbsfHybridFusionConfig {
+    #[serde(default = "default_ranking_hybrid_dbsf_dense_weight")]
+    pub dense_weight: f32,
+    #[serde(default = "default_ranking_hybrid_dbsf_bm25_weight")]
+    pub bm25_weight: f32,
+    #[serde(default = "default_ranking_hybrid_dbsf_stddevs")]
+    pub stddevs: f32,
+}
+
+impl Default for DbsfHybridFusionConfig {
+    fn default() -> Self {
+        Self {
+            dense_weight: default_ranking_hybrid_dbsf_dense_weight(),
+            bm25_weight: default_ranking_hybrid_dbsf_bm25_weight(),
+            stddevs: default_ranking_hybrid_dbsf_stddevs(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RrfHybridFusionConfig {
+    #[serde(default = "default_ranking_hybrid_rrf_k")]
+    pub k: usize,
+}
+
+impl Default for RrfHybridFusionConfig {
+    fn default() -> Self {
+        Self {
+            k: default_ranking_hybrid_rrf_k(),
         }
     }
 }
@@ -754,10 +804,11 @@ fn validate_chunk_policy(scope: &str, policy: &ChunkPolicy) -> Result<()> {
 }
 
 fn validate_ranking(ranking: &RankingConfig) -> Result<()> {
-    if ranking.rrf_k == 0 {
-        return Err(
-            KboltError::Config("ranking.rrf_k must be greater than zero".to_string()).into(),
-        );
+    if ranking.deep_variant_rrf_k == 0 {
+        return Err(KboltError::Config(
+            "ranking.deep_variant_rrf_k must be greater than zero".to_string(),
+        )
+        .into());
     }
 
     if ranking.deep_variants_max == 0 {
@@ -789,34 +840,26 @@ fn validate_ranking(ranking: &RankingConfig) -> Result<()> {
         .into());
     }
 
-    if !ranking.hybrid_fusion.alpha.is_finite()
-        || !(0.0..=1.0).contains(&ranking.hybrid_fusion.alpha)
+    validate_hybrid_fusion_weights(
+        "ranking.hybrid_fusion.linear",
+        ranking.hybrid_fusion.linear.dense_weight,
+        ranking.hybrid_fusion.linear.bm25_weight,
+    )?;
+    validate_hybrid_fusion_weights(
+        "ranking.hybrid_fusion.dbsf",
+        ranking.hybrid_fusion.dbsf.dense_weight,
+        ranking.hybrid_fusion.dbsf.bm25_weight,
+    )?;
+    if !ranking.hybrid_fusion.dbsf.stddevs.is_finite() || ranking.hybrid_fusion.dbsf.stddevs <= 0.0
     {
         return Err(KboltError::Config(
-            "ranking.hybrid_fusion.alpha must be finite and between 0.0 and 1.0".to_string(),
+            "ranking.hybrid_fusion.dbsf.stddevs must be finite and greater than zero".to_string(),
         )
         .into());
     }
-
-    validate_nonnegative_finite_weight(
-        "ranking.hybrid_fusion.dense_weight",
-        ranking.hybrid_fusion.dense_weight,
-    )?;
-    validate_nonnegative_finite_weight(
-        "ranking.hybrid_fusion.bm25_weight",
-        ranking.hybrid_fusion.bm25_weight,
-    )?;
-    validate_nonnegative_finite_weight(
-        "ranking.hybrid_fusion.agreement_weight",
-        ranking.hybrid_fusion.agreement_weight,
-    )?;
-    if ranking.hybrid_fusion.dense_weight
-        + ranking.hybrid_fusion.bm25_weight
-        + ranking.hybrid_fusion.agreement_weight
-        <= 0.0
-    {
+    if ranking.hybrid_fusion.rrf.k == 0 {
         return Err(KboltError::Config(
-            "ranking.hybrid_fusion weights must sum to greater than zero".to_string(),
+            "ranking.hybrid_fusion.rrf.k must be greater than zero".to_string(),
         )
         .into());
     }
@@ -845,6 +888,18 @@ fn validate_nonnegative_finite_weight(scope: &str, value: f32) -> Result<()> {
             "{scope} must be finite and greater than or equal to zero"
         ))
         .into());
+    }
+
+    Ok(())
+}
+
+fn validate_hybrid_fusion_weights(scope: &str, dense_weight: f32, bm25_weight: f32) -> Result<()> {
+    validate_nonnegative_finite_weight(format!("{scope}.dense_weight").as_str(), dense_weight)?;
+    validate_nonnegative_finite_weight(format!("{scope}.bm25_weight").as_str(), bm25_weight)?;
+    if dense_weight + bm25_weight <= 0.0 {
+        return Err(
+            KboltError::Config(format!("{scope} weights must sum to greater than zero")).into(),
+        );
     }
 
     Ok(())
@@ -1193,8 +1248,8 @@ fn default_local_inference_n_gpu_layers() -> Option<u32> {
     None
 }
 
-fn default_ranking_rrf_k() -> usize {
-    DEFAULT_RANKING_RRF_K
+fn default_ranking_deep_variant_rrf_k() -> usize {
+    DEFAULT_RANKING_DEEP_VARIANT_RRF_K
 }
 
 fn default_ranking_deep_variants_max() -> usize {
@@ -1213,20 +1268,28 @@ fn default_ranking_rerank_candidates_max() -> usize {
     DEFAULT_RANKING_RERANK_CANDIDATES_MAX
 }
 
-fn default_ranking_hybrid_alpha() -> f32 {
-    DEFAULT_RANKING_HYBRID_ALPHA
+fn default_ranking_hybrid_linear_dense_weight() -> f32 {
+    DEFAULT_RANKING_HYBRID_LINEAR_DENSE_WEIGHT
 }
 
-fn default_ranking_hybrid_dense_weight() -> f32 {
-    DEFAULT_RANKING_HYBRID_DENSE_WEIGHT
+fn default_ranking_hybrid_linear_bm25_weight() -> f32 {
+    DEFAULT_RANKING_HYBRID_LINEAR_BM25_WEIGHT
 }
 
-fn default_ranking_hybrid_bm25_weight() -> f32 {
-    DEFAULT_RANKING_HYBRID_BM25_WEIGHT
+fn default_ranking_hybrid_dbsf_dense_weight() -> f32 {
+    DEFAULT_RANKING_HYBRID_DBSF_DENSE_WEIGHT
 }
 
-fn default_ranking_hybrid_agreement_weight() -> f32 {
-    DEFAULT_RANKING_HYBRID_AGREEMENT_WEIGHT
+fn default_ranking_hybrid_dbsf_bm25_weight() -> f32 {
+    DEFAULT_RANKING_HYBRID_DBSF_BM25_WEIGHT
+}
+
+fn default_ranking_hybrid_dbsf_stddevs() -> f32 {
+    DEFAULT_RANKING_HYBRID_DBSF_STDDEVS
+}
+
+fn default_ranking_hybrid_rrf_k() -> usize {
+    DEFAULT_RANKING_HYBRID_RRF_K
 }
 
 fn default_ranking_bm25_title_boost() -> f32 {

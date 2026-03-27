@@ -310,17 +310,23 @@ fn save_writes_index_toml() {
             .collect(),
         },
         ranking: RankingConfig {
-            rrf_k: 75,
+            deep_variant_rrf_k: 75,
             deep_variants_max: 5,
             initial_candidate_limit_min: 24,
             rerank_candidates_min: 12,
             rerank_candidates_max: 28,
             hybrid_fusion: HybridFusionConfig {
-                mode: HybridFusionMode::Rrf,
-                alpha: 0.4,
-                dense_weight: 0.6,
-                bm25_weight: 0.3,
-                agreement_weight: 0.1,
+                mode: HybridFusionMode::Dbsf,
+                linear: LinearHybridFusionConfig {
+                    dense_weight: 0.6,
+                    bm25_weight: 0.4,
+                },
+                dbsf: DbsfHybridFusionConfig {
+                    dense_weight: 0.8,
+                    bm25_weight: 0.2,
+                    stddevs: 2.5,
+                },
+                rrf: RrfHybridFusionConfig { k: 75 },
             },
             bm25_boosts: Bm25BoostsConfig {
                 title: 2.5,
@@ -707,24 +713,24 @@ rerank_candidates_max = 8
     fs::write(
         &config_file,
         r#"
-[ranking.hybrid_fusion]
-alpha = 1.2
+[ranking]
+deep_variant_rrf_k = 0
 "#,
     )
     .expect("rewrite config file");
 
     let err = load_from_file(&config_file, &config_dir, &cache_dir)
-        .expect_err("invalid hybrid alpha should fail");
+        .expect_err("zero deep variant rrf should fail");
     assert!(
         err.to_string()
-            .contains("ranking.hybrid_fusion.alpha must be finite and between 0.0 and 1.0"),
+            .contains("ranking.deep_variant_rrf_k must be greater than zero"),
         "unexpected error: {err}"
     );
 
     fs::write(
         &config_file,
         r#"
-[ranking.hybrid_fusion]
+[ranking.hybrid_fusion.linear]
 dense_weight = -0.1
 "#,
     )
@@ -734,7 +740,7 @@ dense_weight = -0.1
         .expect_err("negative hybrid dense weight should fail");
     assert!(
         err.to_string().contains(
-            "ranking.hybrid_fusion.dense_weight must be finite and greater than or equal to zero"
+            "ranking.hybrid_fusion.linear.dense_weight must be finite and greater than or equal to zero"
         ),
         "unexpected error: {err}"
     );
@@ -742,10 +748,9 @@ dense_weight = -0.1
     fs::write(
         &config_file,
         r#"
-[ranking.hybrid_fusion]
+[ranking.hybrid_fusion.linear]
 dense_weight = 0.0
 bm25_weight = 0.0
-agreement_weight = 0.0
 "#,
     )
     .expect("rewrite config file");
@@ -754,7 +759,24 @@ agreement_weight = 0.0
         .expect_err("all-zero hybrid weights should fail");
     assert!(
         err.to_string()
-            .contains("ranking.hybrid_fusion weights must sum to greater than zero"),
+            .contains("ranking.hybrid_fusion.linear weights must sum to greater than zero"),
+        "unexpected error: {err}"
+    );
+
+    fs::write(
+        &config_file,
+        r#"
+[ranking.hybrid_fusion.dbsf]
+stddevs = 0.0
+"#,
+    )
+    .expect("rewrite config file");
+
+    let err = load_from_file(&config_file, &config_dir, &cache_dir)
+        .expect_err("non-positive dbsf stddevs should fail");
+    assert!(
+        err.to_string()
+            .contains("ranking.hybrid_fusion.dbsf.stddevs must be finite and greater than zero"),
         "unexpected error: {err}"
     );
 }
@@ -770,11 +792,19 @@ fn load_reads_explicit_hybrid_fusion_config() {
         &config_file,
         r#"
 [ranking.hybrid_fusion]
-mode = "rrf"
-alpha = 0.35
+mode = "linear"
+
+[ranking.hybrid_fusion.linear]
 dense_weight = 0.55
-bm25_weight = 0.25
-agreement_weight = 0.20
+bm25_weight = 0.45
+
+[ranking.hybrid_fusion.dbsf]
+dense_weight = 0.8
+bm25_weight = 0.2
+stddevs = 2.75
+
+[ranking.hybrid_fusion.rrf]
+k = 75
 "#,
     )
     .expect("write config file");
@@ -783,17 +813,23 @@ agreement_weight = 0.20
     assert_eq!(
         config.ranking.hybrid_fusion,
         HybridFusionConfig {
-            mode: HybridFusionMode::Rrf,
-            alpha: 0.35,
-            dense_weight: 0.55,
-            bm25_weight: 0.25,
-            agreement_weight: 0.20,
+            mode: HybridFusionMode::Linear,
+            linear: LinearHybridFusionConfig {
+                dense_weight: 0.55,
+                bm25_weight: 0.45,
+            },
+            dbsf: DbsfHybridFusionConfig {
+                dense_weight: 0.8,
+                bm25_weight: 0.2,
+                stddevs: 2.75,
+            },
+            rrf: RrfHybridFusionConfig { k: 75 },
         }
     );
 }
 
 #[test]
-fn load_reads_explicit_interaction_hybrid_fusion_config() {
+fn load_reads_explicit_dbsf_hybrid_fusion_config() {
     let tmp = tempdir().expect("create tempdir");
     let config_dir = tmp.path().join("config");
     let cache_dir = tmp.path().join("cache");
@@ -803,10 +839,15 @@ fn load_reads_explicit_interaction_hybrid_fusion_config() {
         &config_file,
         r#"
 [ranking.hybrid_fusion]
-mode = "interaction"
+mode = "dbsf"
+
+[ranking.hybrid_fusion.linear]
+bm25_weight = 0.25
+
+[ranking.hybrid_fusion.dbsf]
 dense_weight = 0.7
 bm25_weight = 0.2
-agreement_weight = 0.1
+stddevs = 4.0
 "#,
     )
     .expect("write config file");
@@ -815,11 +856,19 @@ agreement_weight = 0.1
     assert_eq!(
         config.ranking.hybrid_fusion,
         HybridFusionConfig {
-            mode: HybridFusionMode::Interaction,
-            alpha: DEFAULT_RANKING_HYBRID_ALPHA,
-            dense_weight: 0.7,
-            bm25_weight: 0.2,
-            agreement_weight: 0.1,
+            mode: HybridFusionMode::Dbsf,
+            linear: LinearHybridFusionConfig {
+                dense_weight: DEFAULT_RANKING_HYBRID_LINEAR_DENSE_WEIGHT,
+                bm25_weight: 0.25,
+            },
+            dbsf: DbsfHybridFusionConfig {
+                dense_weight: 0.7,
+                bm25_weight: 0.2,
+                stddevs: 4.0,
+            },
+            rrf: RrfHybridFusionConfig {
+                k: DEFAULT_RANKING_HYBRID_RRF_K,
+            },
         }
     );
 }

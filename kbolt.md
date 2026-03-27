@@ -884,7 +884,7 @@ pub struct ChunkingConfig {
 }
 
 pub struct RankingConfig {
-    pub rrf_k: usize,
+    pub deep_variant_rrf_k: usize,
     pub deep_variants_max: usize,
     pub initial_candidate_limit_min: usize,
     pub rerank_candidates_min: usize,
@@ -895,16 +895,30 @@ pub struct RankingConfig {
 
 pub struct HybridFusionConfig {
     pub mode: HybridFusionMode,
-    pub alpha: f32,
+    pub linear: LinearHybridFusionConfig,
+    pub dbsf: DbsfHybridFusionConfig,
+    pub rrf: RrfHybridFusionConfig,
+}
+
+pub struct LinearHybridFusionConfig {
     pub dense_weight: f32,
     pub bm25_weight: f32,
-    pub agreement_weight: f32,
+}
+
+pub struct DbsfHybridFusionConfig {
+    pub dense_weight: f32,
+    pub bm25_weight: f32,
+    pub stddevs: f32,
+}
+
+pub struct RrfHybridFusionConfig {
+    pub k: usize,
 }
 
 pub enum HybridFusionMode {
     Rrf,
-    Alpha,
-    Interaction,
+    Dbsf,
+    Linear,
 }
 
 pub fn load(config_path: Option<&Path>) -> Result<Config>;
@@ -1559,28 +1573,30 @@ Both run in parallel threads. Because both operate at chunk granularity, fusion 
 
 ### Stage 5: Fusion (Hybrid)
 
-Default hybrid fusion is score-based alpha fusion:
+Hybrid fusion is configurable per query leg and runs before any optional reranking. Kbolt
+supports three standard fusion modes.
+
+Linear fusion:
 
 ```
-fusion(d) = α * dense_norm(d) + (1 - α) * bm25_norm(d)
+fusion(d) = wd * dense_norm(d) + wb * bm25_norm(d)
 ```
 
 Where `dense_norm` and `bm25_norm` are query-local max-normalized scores in `[0, 1]`.
 After fusion, scores are normalized again so the top fused chunk in the query is `1.0`.
 
-Defaults: `mode = "alpha"`, `alpha = 0.7`.
+Defaults: `mode = "linear"`, `dense_weight = 0.7`, `bm25_weight = 0.3`.
 
-Weighted interaction fusion is also available:
+DBSF fusion (distribution-based score fusion):
 
 ```
-fusion(d) = wd * dense_norm(d)
-          + wb * bm25_norm(d)
-          + wa * dense_norm(d) * bm25_norm(d)
+fusion(d) = wd * dense_dbsf(d) + wb * bm25_dbsf(d)
 ```
 
-The `wa` term is a small agreement bonus: it only becomes large when both dense and BM25 are strong.
-As with alpha fusion, the fused scores are normalized again after sorting.
-Defaults for that mode: `dense_weight = 0.7`, `bm25_weight = 0.2`, `agreement_weight = 0.1`.
+Each branch is normalized from its own returned score distribution using `mean ± stddevs * stddev`,
+clipped to `[0, 1]`, then combined with a weighted sum. This reduces the tendency of flat lexical
+result sets to behave like full-strength evidence.
+Defaults for that mode: `dense_weight = 1.0`, `bm25_weight = 1.0`, `stddevs = 3.0`.
 
 RRF remains available as an alternative mode:
 
@@ -1589,7 +1605,8 @@ RRF(d) = 1 / (k + rank_bm25(d)) + 1 / (k + rank_dense(d))
 ```
 
 This optional RRF mode is plain equal-weight rank fusion over chunk positions. It does not use BM25 or dense score magnitude, and a chunk missing from one list simply omits that reciprocal term.
-`rrf_k` still controls deep-search variant aggregation and the optional RRF hybrid mode.
+Hybrid RRF uses `ranking.hybrid_fusion.rrf.k`.
+Deep-search variant aggregation uses `ranking.deep_variant_rrf_k` and is configured separately.
 
 ### Stage 6: Candidate Carry-Through
 
@@ -1627,7 +1644,7 @@ Per result:
 - Snippet extracted by reading source file at chunk offset/length
 - Short docid (`#` + first 6 chars of document hash)
 
-Return top-10 results (default, configurable via `--limit`).
+Return top results up to `--limit` (default `10`).
 
 ---
 
@@ -1681,18 +1698,26 @@ n_ctx = 2048
 days = 7    # hard-delete documents deactivated longer than this
 
 [ranking]
-rrf_k = 60
+deep_variant_rrf_k = 60
 deep_variants_max = 4
 initial_candidate_limit_min = 40
 rerank_candidates_min = 20
 rerank_candidates_max = 30
 
 [ranking.hybrid_fusion]
-mode = "alpha" # alpha | interaction | rrf
-alpha = 0.7
+mode = "linear" # linear | dbsf | rrf
+
+[ranking.hybrid_fusion.linear]
 dense_weight = 0.7
-bm25_weight = 0.2
-agreement_weight = 0.1
+bm25_weight = 0.3
+
+[ranking.hybrid_fusion.dbsf]
+dense_weight = 1.0
+bm25_weight = 1.0
+stddevs = 3.0
+
+[ranking.hybrid_fusion.rrf]
+k = 60
 
 [ranking.bm25_boosts]
 title = 2.0
