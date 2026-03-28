@@ -99,6 +99,7 @@ struct RankedChunk {
     reranker: Option<f32>,
     bm25: Option<f32>,
     dense: Option<f32>,
+    original_rank: Option<usize>,
 }
 
 impl Engine {
@@ -699,6 +700,7 @@ impl Engine {
             let ranked_len = ranked_chunks.len();
             let results = self.assemble_search_results(
                 query,
+                &requested_mode,
                 ranked_chunks,
                 &collections_by_id,
                 req.debug,

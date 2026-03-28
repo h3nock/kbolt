@@ -1,5 +1,8 @@
 use super::*;
 
+const DEEP_SELECTED_GENERATED_VARIANTS_MAX: usize = 2;
+const DEEP_VARIANT_NEAR_DUPLICATE_SIMILARITY: f32 = 0.98;
+
 impl Engine {
     pub(super) fn initial_search_pipeline(&self, requested_mode: &SearchMode) -> SearchPipeline {
         let mut pipeline = SearchPipeline {
@@ -154,6 +157,7 @@ impl Engine {
                 reranker: None,
                 bm25: Some(normalized_score),
                 dense: None,
+                original_rank: None,
             });
             if ranked.len() >= limit {
                 break;
@@ -234,6 +238,7 @@ impl Engine {
                 reranker: None,
                 bm25: None,
                 dense: Some(dense_score),
+                original_rank: None,
             });
             if ranked.len() >= limit {
                 break;
@@ -381,17 +386,22 @@ impl Engine {
         } else {
             None
         };
+        let selected_variant_indices = select_deep_variant_indices(
+            &variants,
+            variant_vectors.as_deref(),
+            max_generated.min(DEEP_SELECTED_GENERATED_VARIANTS_MAX),
+        );
         let variant_results: Vec<Result<Vec<RankedChunk>>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = variants
+            let handles: Vec<_> = selected_variant_indices
                 .iter()
-                .enumerate()
-                .map(|(index, variant)| {
+                .map(|&variant_index| {
                     let vv = &variant_vectors;
+                    let variant = variants[variant_index].clone();
                     scope.spawn(move || {
-                        let keyword = self.rank_keyword_chunks(targets, variant, limit, 0.0)?;
+                        let keyword = self.rank_keyword_chunks(targets, &variant, limit, 0.0)?;
                         let semantic = vv
                             .as_ref()
-                            .and_then(|vectors| vectors.get(index))
+                            .and_then(|vectors| vectors.get(variant_index))
                             .map(|vector| {
                                 self.rank_semantic_chunks_with_embedding(
                                     targets, vector, limit, 0.0,
@@ -435,6 +445,7 @@ impl Engine {
     pub(super) fn assemble_search_results(
         &self,
         query: &str,
+        mode: &SearchMode,
         ranked_chunks: Vec<RankedChunk>,
         collections_by_id: &HashMap<i64, SearchCollectionMeta>,
         debug: bool,
@@ -497,6 +508,7 @@ impl Engine {
                 dense: ranked.dense,
                 fusion: ranked.fusion,
                 reranker: ranked.reranker,
+                original_rank: ranked.original_rank,
                 final_score: ranked.score,
             });
         }
@@ -514,7 +526,13 @@ impl Engine {
                 self.config.ranking.rerank_candidates_min,
                 self.config.ranking.rerank_candidates_max,
             );
-            let representative_indices = select_rerank_representatives(&candidates, rerank_count);
+            let protected_original_docs = if matches!(mode, SearchMode::Deep) {
+                protected_original_doc_count(rerank_count)
+            } else {
+                0
+            };
+            let representative_indices =
+                select_rerank_representatives(&candidates, rerank_count, protected_original_docs);
             let mut rerank_doc_ids = Vec::new();
             let mut rerank_inputs = Vec::new();
             let mut invalid_chunk_ids = HashSet::new();
@@ -621,6 +639,7 @@ struct PendingSearchCandidate {
     dense: Option<f32>,
     fusion: f32,
     reranker: Option<f32>,
+    original_rank: Option<usize>,
     final_score: f32,
 }
 
@@ -661,9 +680,34 @@ fn build_rerank_input(
 fn select_rerank_representatives(
     candidates: &[PendingSearchCandidate],
     max_docs: usize,
+    protected_original_docs: usize,
 ) -> Vec<usize> {
     let mut seen_docs = HashSet::new();
     let mut indices = Vec::new();
+
+    if protected_original_docs > 0 {
+        let mut original_candidates = candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(index, candidate)| {
+                candidate
+                    .original_rank
+                    .map(|rank| (rank, index, candidate.doc_id))
+            })
+            .collect::<Vec<_>>();
+        original_candidates
+            .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+        for (_, index, doc_id) in original_candidates {
+            if seen_docs.insert(doc_id) {
+                indices.push(index);
+                if indices.len() >= protected_original_docs.min(max_docs) {
+                    break;
+                }
+            }
+        }
+    }
+
     for (i, candidate) in candidates.iter().enumerate() {
         if seen_docs.insert(candidate.doc_id) {
             indices.push(i);
@@ -880,8 +924,20 @@ mod tests {
             dense: None,
             fusion,
             reranker: None,
+            original_rank: None,
             final_score: fusion,
         }
+    }
+
+    fn candidate_with_original_rank(
+        doc_id: i64,
+        chunk_id: i64,
+        fusion: f32,
+        original_rank: usize,
+    ) -> PendingSearchCandidate {
+        let mut candidate = candidate(doc_id, chunk_id, fusion);
+        candidate.original_rank = Some(original_rank);
+        candidate
     }
 
     fn linear_hybrid_fusion(dense_weight: f32, bm25_weight: f32) -> HybridFusionConfig {
@@ -918,6 +974,7 @@ mod tests {
             reranker: None,
             bm25,
             dense,
+            original_rank: None,
         }
     }
 
@@ -942,6 +999,21 @@ mod tests {
         assert!((candidates[0].final_score - reranked_doc_prior(2)).abs() < 1e-6);
         assert!((candidates[2].final_score - (reranked_doc_prior(2) * 0.5)).abs() < 1e-6);
         assert!(candidates[3].final_score < candidates[2].final_score);
+    }
+
+    #[test]
+    fn select_rerank_representatives_protects_original_docs_before_fill() {
+        let candidates = vec![
+            candidate(10, 100, 0.99),
+            candidate(20, 200, 0.98),
+            candidate_with_original_rank(30, 300, 0.70, 1),
+            candidate_with_original_rank(40, 400, 0.60, 2),
+            candidate_with_original_rank(30, 301, 0.55, 3),
+        ];
+
+        let selected = select_rerank_representatives(&candidates, 3, 2);
+
+        assert_eq!(selected, vec![2, 3, 0]);
     }
 
     #[test]
@@ -1037,6 +1109,34 @@ mod tests {
 
         assert_eq!(fused[0].chunk_id, 10);
         assert_eq!(fused.last().map(|item| item.chunk_id), Some(30));
+        assert_eq!(fused[0].original_rank, Some(1));
+        assert_eq!(
+            fused
+                .iter()
+                .find(|item| item.chunk_id == 20)
+                .and_then(|item| item.original_rank),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn select_deep_variant_indices_prefers_non_duplicate_generated_variants() {
+        let variants = vec![
+            "original".to_string(),
+            "close one".to_string(),
+            "close two".to_string(),
+            "diverse".to_string(),
+        ];
+        let vectors = vec![
+            vec![1.0, 0.0],
+            vec![0.99, 0.01],
+            vec![0.98, 0.02],
+            vec![0.0, 1.0],
+        ];
+
+        let selected = select_deep_variant_indices(&variants, Some(&vectors), 2);
+
+        assert_eq!(selected, vec![0, 1, 3]);
     }
 }
 
@@ -1124,6 +1224,7 @@ fn fuse_ranked_chunks_rrf(
             reranker: None,
             bm25: bm25_score.get(&chunk_id).copied(),
             dense: dense_score.get(&chunk_id).copied(),
+            original_rank: None,
         });
     }
 
@@ -1214,6 +1315,7 @@ fn fuse_ranked_chunks_weighted(
             reranker: None,
             bm25: bm25_score.get(&chunk_id).copied(),
             dense: dense_score.get(&chunk_id).copied(),
+            original_rank: None,
         });
     }
 
@@ -1227,7 +1329,7 @@ fn aggregate_deep_variant_rankings(
     min_score: f32,
 ) -> Vec<RankedChunk> {
     let mut aggregates: HashMap<i64, RankedChunk> = HashMap::new();
-    for ranked in variant_results {
+    for (variant_index, ranked) in variant_results.into_iter().enumerate() {
         for (index, item) in ranked.into_iter().enumerate() {
             let variant_rrf = 1.0 / (variant_rrf_k as f32 + (index + 1) as f32);
             let entry = aggregates
@@ -1239,10 +1341,14 @@ fn aggregate_deep_variant_rankings(
                     reranker: None,
                     bm25: None,
                     dense: None,
+                    original_rank: None,
                 });
             entry.score += variant_rrf;
             entry.bm25 = max_option(entry.bm25, item.bm25);
             entry.dense = max_option(entry.dense, item.dense);
+            if variant_index == 0 {
+                entry.original_rank = Some(index + 1);
+            }
         }
     }
 
@@ -1261,6 +1367,96 @@ fn finalize_ranked_chunks(
         .filter(|item| item.score >= min_score)
         .take(limit)
         .collect()
+}
+
+fn select_deep_variant_indices(
+    variants: &[String],
+    variant_vectors: Option<&[Vec<f32>]>,
+    max_selected_generated: usize,
+) -> Vec<usize> {
+    let mut selected = vec![0];
+    if variants.len() <= 1 || max_selected_generated == 0 {
+        return selected;
+    }
+
+    let generated_indices = (1..variants.len()).collect::<Vec<_>>();
+    let selected_generated = match variant_vectors {
+        Some(vectors) if vectors.len() == variants.len() && !vectors[0].is_empty() => {
+            let original = &vectors[0];
+            let mut ranked_generated = generated_indices
+                .iter()
+                .map(|&index| (index, cosine_similarity(original, &vectors[index])))
+                .collect::<Vec<_>>();
+            ranked_generated.sort_by(|left, right| {
+                right
+                    .1
+                    .total_cmp(&left.1)
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+
+            let mut selected_generated: Vec<usize> = Vec::new();
+            for (index, _) in &ranked_generated {
+                let too_close = selected_generated.iter().any(|&selected_index| {
+                    cosine_similarity(
+                        vectors[*index].as_slice(),
+                        vectors[selected_index].as_slice(),
+                    ) >= DEEP_VARIANT_NEAR_DUPLICATE_SIMILARITY
+                });
+                if !too_close {
+                    selected_generated.push(*index);
+                    if selected_generated.len() >= max_selected_generated {
+                        break;
+                    }
+                }
+            }
+
+            if selected_generated.len() < max_selected_generated {
+                for (index, _) in ranked_generated {
+                    if selected_generated.contains(&index) {
+                        continue;
+                    }
+                    selected_generated.push(index);
+                    if selected_generated.len() >= max_selected_generated {
+                        break;
+                    }
+                }
+            }
+
+            selected_generated
+        }
+        _ => generated_indices
+            .into_iter()
+            .take(max_selected_generated)
+            .collect::<Vec<_>>(),
+    };
+
+    selected.extend(selected_generated);
+    selected
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() || left.is_empty() {
+        return 0.0;
+    }
+
+    let mut dot = 0.0_f32;
+    let mut left_norm = 0.0_f32;
+    let mut right_norm = 0.0_f32;
+    for (left_value, right_value) in left.iter().zip(right.iter()) {
+        dot += left_value * right_value;
+        left_norm += left_value * left_value;
+        right_norm += right_value * right_value;
+    }
+
+    if left_norm <= f32::EPSILON || right_norm <= f32::EPSILON {
+        return 0.0;
+    }
+
+    dot / (left_norm.sqrt() * right_norm.sqrt())
+}
+
+fn protected_original_doc_count(rerank_count: usize) -> usize {
+    rerank_count.div_ceil(2)
 }
 
 fn normalize_ranked_chunks_scores(ranked: &mut [RankedChunk]) {
