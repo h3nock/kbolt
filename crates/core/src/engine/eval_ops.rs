@@ -279,18 +279,15 @@ mod tests {
     struct DeterministicExpander;
 
     impl Expander for DeterministicExpander {
-        fn expand(&self, query: &str) -> crate::Result<Vec<crate::models::ExpandedQuery>> {
-            Ok(vec![crate::models::ExpandedQuery {
-                text: format!("explain {query}"),
-                route: crate::models::ExpansionRoute::Both,
-            }])
+        fn expand(&self, query: &str, _max_variants: usize) -> crate::Result<Vec<String>> {
+            Ok(vec![format!("explain {query}")])
         }
     }
 
     struct FailingExpander;
 
     impl Expander for FailingExpander {
-        fn expand(&self, _query: &str) -> crate::Result<Vec<crate::models::ExpandedQuery>> {
+        fn expand(&self, _query: &str, _max_variants: usize) -> crate::Result<Vec<String>> {
             Err(KboltError::Inference("expander unavailable".to_string()).into())
         }
     }

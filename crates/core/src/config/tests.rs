@@ -163,9 +163,7 @@ contextual_prefix = true
                 },
             }),
             expander: Some(ExpanderInferenceConfig {
-                adapter: ExpanderAdapter::JsonVariants,
-                provider: TextInferenceProvider::OpenAiCompatible {
-                    output_mode: TextInferenceOutputMode::JsonObject,
+                provider: ExpanderInferenceProvider::OpenAiCompatible {
                     model: "expand-1".to_string(),
                     base_url: "https://api.openai.com/v1".to_string(),
                     api_key_env: Some("OPENAI_API_KEY".to_string()),
@@ -274,9 +272,7 @@ fn save_writes_index_toml() {
                 },
             }),
             expander: Some(ExpanderInferenceConfig {
-                adapter: ExpanderAdapter::JsonVariants,
-                provider: TextInferenceProvider::OpenAiCompatible {
-                    output_mode: TextInferenceOutputMode::JsonObject,
+                provider: ExpanderInferenceProvider::OpenAiCompatible {
                     model: "expand-1".to_string(),
                     base_url: "https://api.openai.com/v1".to_string(),
                     api_key_env: Some("OPENAI_API_KEY".to_string()),
@@ -376,9 +372,7 @@ fn save_writes_index_toml() {
                 },
             }),
             expander: Some(ExpanderInferenceConfig {
-                adapter: ExpanderAdapter::JsonVariants,
-                provider: TextInferenceProvider::OpenAiCompatible {
-                    output_mode: TextInferenceOutputMode::JsonObject,
+                provider: ExpanderInferenceProvider::OpenAiCompatible {
                     model: "expand-1".to_string(),
                     base_url: "https://api.openai.com/v1".to_string(),
                     api_key_env: Some("OPENAI_API_KEY".to_string()),
@@ -687,7 +681,7 @@ base_url = "api.openai.com/v1"
 }
 
 #[test]
-fn load_rejects_qmd_adapter_with_openai_provider() {
+fn load_rejects_invalid_expander_chat_template_kwargs() {
     let tmp = tempdir().expect("create tempdir");
     let config_dir = tmp.path().join("config");
     let cache_dir = tmp.path().join("cache");
@@ -697,20 +691,17 @@ fn load_rejects_qmd_adapter_with_openai_provider() {
         &config_file,
         r#"
 [inference.expander]
-provider = "openai_compatible"
-adapter = "qmd"
-output_mode = "text"
-model = "expand-1"
-base_url = "https://api.openai.com/v1"
+provider = "local_llama"
+chat_template_kwargs = "[]"
 "#,
     )
     .expect("write config file");
 
     let err = load_from_file(&config_file, &config_dir, &cache_dir)
-        .expect_err("qmd adapter should require local llama");
+        .expect_err("chat_template_kwargs must be a JSON object");
     assert!(err
         .to_string()
-        .contains("inference.expander.adapter=qmd requires provider=local_llama"));
+        .contains("inference.expander.chat_template_kwargs must be a JSON object"));
 }
 
 #[test]
@@ -958,12 +949,15 @@ provider = "local_llama"
     assert_eq!(
         config.inference.expander,
         Some(ExpanderInferenceConfig {
-            adapter: ExpanderAdapter::Qmd,
-            provider: TextInferenceProvider::LocalLlama {
+            provider: ExpanderInferenceProvider::LocalLlama {
                 model_file: None,
                 max_tokens: DEFAULT_LOCAL_EXPANDER_MAX_TOKENS,
                 n_ctx: DEFAULT_LOCAL_INFERENCE_N_CTX,
                 n_gpu_layers: None,
+                enable_thinking: DEFAULT_EXPANDER_ENABLE_THINKING,
+                reasoning_format: Some("none".to_string()),
+                chat_template_kwargs: None,
+                sampling: ExpanderLocalLlamaSamplingConfig::default(),
             },
         })
     );

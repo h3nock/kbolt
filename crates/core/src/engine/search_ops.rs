@@ -320,65 +320,37 @@ impl Engine {
         };
 
         let normalized_query = crate::models::normalize_query_text(query);
-        let mut variants = vec![crate::models::ExpandedQuery {
-            text: normalized_query,
-            route: crate::models::ExpansionRoute::Both,
-        }];
+        let mut variants = vec![normalized_query.clone()];
         let max_generated = self.config.ranking.deep_variants_max.saturating_sub(1);
         if max_generated > 0 {
-            let generated = expander.expand(query)?;
-            let mut variant_index_by_key =
-                HashMap::from([(variants[0].text.to_ascii_lowercase(), 0usize)]);
+            let generated = expander.expand(query, max_generated)?;
+            let mut seen = HashSet::from([normalized_query.to_ascii_lowercase()]);
             for generated_query in generated {
-                let text = crate::models::normalize_query_text(&generated_query.text);
+                let text = crate::models::normalize_query_text(&generated_query);
                 if text.is_empty() {
-                    return Err(KboltError::Inference(
-                        "expander returned an empty deep-search query".to_string(),
-                    )
-                    .into());
-                }
-
-                let key = text.to_ascii_lowercase();
-                if let Some(existing_index) = variant_index_by_key.get(&key).copied() {
-                    variants[existing_index].route = variants[existing_index]
-                        .route
-                        .merged_with(generated_query.route);
                     continue;
                 }
 
-                variant_index_by_key.insert(key, variants.len());
-                variants.push(crate::models::ExpandedQuery {
-                    text,
-                    route: generated_query.route,
-                });
+                let key = text.to_ascii_lowercase();
+                if !seen.insert(key) {
+                    continue;
+                }
+
+                variants.push(text);
                 if variants.len() >= self.config.ranking.deep_variants_max {
                     break;
                 }
             }
         }
         pipeline.expansion = true;
-        let dense_variant_indices = variants
-            .iter()
-            .enumerate()
-            .filter_map(|(index, variant)| variant.route.includes_dense().then_some(index))
-            .collect::<Vec<_>>();
-        let dense_variant_texts = dense_variant_indices
-            .iter()
-            .map(|&index| variants[index].text.clone())
-            .collect::<Vec<_>>();
-        let variant_vectors = if dense_variant_texts.is_empty() {
-            None
-        } else if let Some(embedder) = self.embedder.as_ref() {
-            match embedder.embed_batch(
-                crate::models::EmbeddingInputKind::Query,
-                &dense_variant_texts,
-            ) {
+        let variant_vectors = if let Some(embedder) = self.embedder.as_ref() {
+            match embedder.embed_batch(crate::models::EmbeddingInputKind::Query, &variants) {
                 Ok(vectors) => {
-                    if vectors.len() != dense_variant_texts.len() {
+                    if vectors.len() != variants.len() {
                         return Err(KboltError::Inference(format!(
                             "embedder returned {} vectors for {} deep variants",
                             vectors.len(),
-                            dense_variant_texts.len()
+                            variants.len()
                         ))
                         .into());
                     }
@@ -393,12 +365,7 @@ impl Engine {
                         .into());
                     }
                     pipeline.dense = true;
-                    let mut vectors_by_variant = vec![None; variants.len()];
-                    for (dense_index, vector) in vectors.into_iter().enumerate() {
-                        let variant_index = dense_variant_indices[dense_index];
-                        vectors_by_variant[variant_index] = Some(vector);
-                    }
-                    Some(vectors_by_variant)
+                    Some(vectors)
                 }
                 Err(err) if is_model_not_available_error(&err) => {
                     pipeline.dense = false;
@@ -421,25 +388,17 @@ impl Engine {
                 .map(|(index, variant)| {
                     let vv = &variant_vectors;
                     scope.spawn(move || {
-                        let keyword = if variant.route.includes_keyword() {
-                            self.rank_keyword_chunks(targets, &variant.text, limit, 0.0)?
-                        } else {
-                            Vec::new()
-                        };
-                        let semantic = if variant.route.includes_dense() {
-                            vv.as_ref()
-                                .and_then(|vectors| vectors.get(index))
-                                .and_then(|vector| vector.as_ref())
-                                .map(|vector| {
-                                    self.rank_semantic_chunks_with_embedding(
-                                        targets, vector, limit, 0.0,
-                                    )
-                                })
-                                .transpose()?
-                                .unwrap_or_default()
-                        } else {
-                            Vec::new()
-                        };
+                        let keyword = self.rank_keyword_chunks(targets, variant, limit, 0.0)?;
+                        let semantic = vv
+                            .as_ref()
+                            .and_then(|vectors| vectors.get(index))
+                            .map(|vector| {
+                                self.rank_semantic_chunks_with_embedding(
+                                    targets, vector, limit, 0.0,
+                                )
+                            })
+                            .transpose()?
+                            .unwrap_or_default();
                         Ok(fuse_ranked_chunks(
                             keyword,
                             semantic,

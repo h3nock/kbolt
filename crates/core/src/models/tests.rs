@@ -5,9 +5,9 @@ use serde_json::json;
 use tempfile::tempdir;
 
 use crate::config::{
-    EmbeddingConfig, ExpanderAdapter, ExpanderInferenceConfig, InferenceConfig, ModelConfig,
-    ModelProvider, ModelSourceConfig, TextInferenceConfig, TextInferenceOutputMode,
-    TextInferenceProvider,
+    EmbeddingConfig, ExpanderInferenceConfig, ExpanderInferenceProvider,
+    ExpanderLocalLlamaSamplingConfig, InferenceConfig, ModelConfig, ModelProvider,
+    ModelSourceConfig, TextInferenceConfig, TextInferenceOutputMode, TextInferenceProvider,
 };
 use crate::models::{
     build_embedder, pull_with_downloader, pull_with_downloader_and_progress,
@@ -237,12 +237,15 @@ fn local_runtime_config() -> (EmbeddingConfig, InferenceConfig) {
                 },
             }),
             expander: Some(ExpanderInferenceConfig {
-                adapter: ExpanderAdapter::Qmd,
-                provider: TextInferenceProvider::LocalLlama {
+                provider: ExpanderInferenceProvider::LocalLlama {
                     model_file: None,
                     max_tokens: 128,
                     n_ctx: 2048,
                     n_gpu_layers: Some(0),
+                    enable_thinking: false,
+                    reasoning_format: Some("none".to_string()),
+                    chat_template_kwargs: None,
+                    sampling: ExpanderLocalLlamaSamplingConfig::default(),
                 },
             }),
         },
@@ -556,9 +559,7 @@ fn pull_uses_configured_relative_file_overrides() {
             },
         }),
         expander: Some(ExpanderInferenceConfig {
-            adapter: ExpanderAdapter::JsonVariants,
-            provider: TextInferenceProvider::OpenAiCompatible {
-                output_mode: TextInferenceOutputMode::JsonObject,
+            provider: ExpanderInferenceProvider::OpenAiCompatible {
                 model: "remote".to_string(),
                 base_url: "https://example.com/v1".to_string(),
                 api_key_env: None,

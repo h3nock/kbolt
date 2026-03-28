@@ -7,7 +7,9 @@ use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaChatTemplate, LlamaModel};
+use llama_cpp_2::openai::OpenAIChatTemplateParams;
 use llama_cpp_2::sampling::LlamaSampler;
+use serde_json::json;
 
 use crate::models::completion::CompletionClient;
 use crate::models::text::strip_json_fences;
@@ -16,7 +18,6 @@ use crate::Result;
 use super::llama_backend;
 
 pub(super) enum LocalLlamaPrompt<'a> {
-    Raw(&'a str),
     Chat {
         system_prompt: &'a str,
         user_prompt: &'a str,
@@ -29,6 +30,7 @@ pub(super) struct LocalLlamaGenerationOptions {
     pub sampler: LocalLlamaSamplerConfig,
     pub stop_sequences: Vec<String>,
     pub grammar: Option<LocalLlamaGrammar>,
+    pub template: LocalLlamaChatTemplateOptions,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -44,6 +46,7 @@ pub(super) struct LocalLlamaSamplingParams {
     pub temperature: f32,
     pub top_k: i32,
     pub top_p: f32,
+    pub min_p: f32,
     pub repeat_last_n: i32,
     pub repeat_penalty: f32,
     pub frequency_penalty: f32,
@@ -54,6 +57,14 @@ pub(super) struct LocalLlamaSamplingParams {
 pub(super) struct LocalLlamaGrammar {
     pub grammar: String,
     pub root: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct LocalLlamaChatTemplateOptions {
+    pub use_oaicompat: bool,
+    pub enable_thinking: bool,
+    pub reasoning_format: Option<String>,
+    pub chat_template_kwargs: Option<String>,
 }
 
 pub(super) struct LocalLlamaClient {
@@ -86,10 +97,10 @@ impl LocalLlamaClient {
         options: &LocalLlamaGenerationOptions,
     ) -> Result<String> {
         let backend = llama_backend();
-        let rendered_prompt = self.render_prompt(prompt)?;
+        let rendered_prompt = self.render_prompt(prompt, &options.template)?;
         let prompt_tokens = self
             .model
-            .str_to_token(&rendered_prompt, AddBos::Always)
+            .str_to_token(&rendered_prompt.prompt, AddBos::Always)
             .map_err(|err| KboltError::Inference(format!("llama tokenization failed: {err}")))?;
         let max_tokens = options.max_tokens.unwrap_or(self.max_tokens);
 
@@ -139,12 +150,15 @@ impl LocalLlamaClient {
         }
 
         let mut sampler = self.build_sampler(options)?;
-        let stop_sequences = options
+        let mut stop_sequences = options
             .stop_sequences
             .iter()
+            .chain(rendered_prompt.additional_stops.iter())
             .filter(|sequence| !sequence.is_empty())
             .map(|sequence| sequence.as_bytes().to_vec())
             .collect::<Vec<_>>();
+        stop_sequences.sort();
+        stop_sequences.dedup();
 
         let mut output_bytes = Vec::new();
         let mut cur_pos = prompt_tokens.len() as i32;
@@ -206,6 +220,9 @@ impl LocalLlamaClient {
                 ));
                 samplers.push(LlamaSampler::top_k(params.top_k));
                 samplers.push(LlamaSampler::top_p(params.top_p, 1));
+                if params.min_p > 0.0 {
+                    samplers.push(LlamaSampler::min_p(params.min_p, 1));
+                }
                 samplers.push(LlamaSampler::temp(params.temperature));
                 samplers.push(LlamaSampler::dist(params.seed));
             }
@@ -221,21 +238,31 @@ impl LocalLlamaClient {
         })
     }
 
-    fn render_prompt(&self, prompt: LocalLlamaPrompt<'_>) -> Result<String> {
+    fn render_prompt(
+        &self,
+        prompt: LocalLlamaPrompt<'_>,
+        template: &LocalLlamaChatTemplateOptions,
+    ) -> Result<RenderedPrompt> {
         match prompt {
-            LocalLlamaPrompt::Raw(prompt) => Ok(prompt.to_string()),
             LocalLlamaPrompt::Chat {
                 system_prompt,
                 user_prompt,
-            } => self.format_chat_prompt(system_prompt, user_prompt),
+            } => {
+                if template.use_oaicompat {
+                    self.format_oaicompat_chat_prompt(system_prompt, user_prompt, template)
+                } else {
+                    self.format_chat_prompt(system_prompt, user_prompt)
+                }
+            }
         }
     }
 
-    fn format_chat_prompt(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
+    fn format_chat_prompt(&self, system_prompt: &str, user_prompt: &str) -> Result<RenderedPrompt> {
         let Some(tmpl) = &self.chat_template else {
-            return Ok(format!(
-                "System:\n{system_prompt}\n\nUser:\n{user_prompt}\n\nAssistant:\n"
-            ));
+            return Ok(RenderedPrompt {
+                prompt: format!("System:\n{system_prompt}\n\nUser:\n{user_prompt}\n\nAssistant:\n"),
+                additional_stops: Vec::new(),
+            });
         };
 
         let mut messages = Vec::new();
@@ -252,11 +279,71 @@ impl LocalLlamaClient {
             })?,
         );
 
-        self.model
+        let prompt = self
+            .model
             .apply_chat_template(tmpl, &messages, true)
             .map_err(|err| {
-                KboltError::Inference(format!("failed to apply chat template: {err}")).into()
-            })
+                KboltError::Inference(format!("failed to apply chat template: {err}"))
+            })?;
+
+        Ok(RenderedPrompt {
+            prompt,
+            additional_stops: Vec::new(),
+        })
+    }
+
+    fn format_oaicompat_chat_prompt(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        template: &LocalLlamaChatTemplateOptions,
+    ) -> Result<RenderedPrompt> {
+        let Some(tmpl) = &self.chat_template else {
+            return self.format_chat_prompt(system_prompt, user_prompt);
+        };
+
+        let messages = if system_prompt.is_empty() {
+            json!([{ "role": "user", "content": user_prompt }])
+        } else {
+            json!([
+                { "role": "system", "content": system_prompt },
+                { "role": "user", "content": user_prompt }
+            ])
+        };
+        let messages_json = serde_json::to_string(&messages).map_err(|err| {
+            KboltError::Inference(format!("failed to serialize local llama messages: {err}"))
+        })?;
+        let result = self
+            .model
+            .apply_chat_template_oaicompat(
+                tmpl,
+                &OpenAIChatTemplateParams {
+                    messages_json: &messages_json,
+                    tools_json: None,
+                    tool_choice: None,
+                    json_schema: None,
+                    grammar: None,
+                    reasoning_format: template.reasoning_format.as_deref(),
+                    chat_template_kwargs: template.chat_template_kwargs.as_deref(),
+                    add_generation_prompt: true,
+                    use_jinja: true,
+                    parallel_tool_calls: false,
+                    enable_thinking: template.enable_thinking,
+                    add_bos: true,
+                    add_eos: false,
+                    parse_tool_calls: false,
+                },
+            )
+            .map_err(|err| {
+                KboltError::Inference(format!(
+                    "failed to apply OpenAI-compatible chat template: {err}"
+                ))
+            })?;
+
+        Ok(RenderedPrompt {
+            prompt: result.prompt,
+            additional_stops: result.additional_stops,
+        })
     }
 }
 
@@ -342,6 +429,11 @@ fn n_gpu_layers_for_model_params(n_gpu_layers: Option<u32>) -> Option<u32> {
     n_gpu_layers.filter(|layers| *layers > 0)
 }
 
+struct RenderedPrompt {
+    prompt: String,
+    additional_stops: Vec<String>,
+}
+
 fn validate_sampling_params(params: &LocalLlamaSamplingParams) -> Result<()> {
     if params.temperature <= 0.0 {
         return Err(KboltError::Inference(
@@ -361,6 +453,12 @@ fn validate_sampling_params(params: &LocalLlamaSamplingParams) -> Result<()> {
         )
         .into());
     }
+    if !(0.0..=1.0).contains(&params.min_p) {
+        return Err(KboltError::Inference(
+            "local llama sampling min_p must be in the range [0, 1]".to_string(),
+        )
+        .into());
+    }
     if params.repeat_last_n < -1 {
         return Err(KboltError::Inference(
             "local llama repeat_last_n must be greater than or equal to -1".to_string(),
@@ -370,6 +468,18 @@ fn validate_sampling_params(params: &LocalLlamaSamplingParams) -> Result<()> {
     if params.repeat_penalty <= 0.0 {
         return Err(KboltError::Inference(
             "local llama repeat_penalty must be greater than zero".to_string(),
+        )
+        .into());
+    }
+    if !params.frequency_penalty.is_finite() {
+        return Err(KboltError::Inference(
+            "local llama frequency_penalty must be finite".to_string(),
+        )
+        .into());
+    }
+    if !params.presence_penalty.is_finite() {
+        return Err(KboltError::Inference(
+            "local llama presence_penalty must be finite".to_string(),
         )
         .into());
     }

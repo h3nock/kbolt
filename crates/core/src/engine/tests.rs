@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tempfile::tempdir;
 
 use crate::config::{
-    ChunkingConfig, Config, EmbeddingConfig, ExpanderAdapter, ExpanderInferenceConfig,
-    InferenceConfig, ModelConfig, ModelProvider, ModelSourceConfig, RankingConfig, ReapingConfig,
-    TextInferenceConfig, TextInferenceProvider,
+    ChunkingConfig, Config, EmbeddingConfig, ExpanderInferenceConfig, ExpanderInferenceProvider,
+    ExpanderLocalLlamaSamplingConfig, InferenceConfig, ModelConfig, ModelProvider,
+    ModelSourceConfig, RankingConfig, ReapingConfig, TextInferenceConfig, TextInferenceProvider,
 };
 use crate::engine::{retrieval_text_with_prefix, Engine};
 use crate::ingest::chunk::FinalChunkKind;
@@ -95,20 +95,17 @@ impl crate::models::Reranker for ConstantReranker {
 struct DeterministicExpander;
 
 impl crate::models::Expander for DeterministicExpander {
-    fn expand(&self, query: &str) -> crate::Result<Vec<crate::models::ExpandedQuery>> {
-        Ok(vec![crate::models::ExpandedQuery {
-            text: format!("explain {query}"),
-            route: crate::models::ExpansionRoute::Both,
-        }])
+    fn expand(&self, query: &str, _max_variants: usize) -> crate::Result<Vec<String>> {
+        Ok(vec![format!("explain {query}")])
     }
 }
 
-struct RouteExpander {
-    items: Vec<crate::models::ExpandedQuery>,
+struct StaticExpander {
+    items: Vec<String>,
 }
 
-impl crate::models::Expander for RouteExpander {
-    fn expand(&self, _query: &str) -> crate::Result<Vec<crate::models::ExpandedQuery>> {
+impl crate::models::Expander for StaticExpander {
+    fn expand(&self, _query: &str, _max_variants: usize) -> crate::Result<Vec<String>> {
         Ok(self.items.clone())
     }
 }
@@ -376,12 +373,15 @@ fn local_text_inference_config(model_file: &str) -> TextInferenceConfig {
 
 fn local_expander_config(model_file: &str) -> ExpanderInferenceConfig {
     ExpanderInferenceConfig {
-        adapter: ExpanderAdapter::Qmd,
-        provider: TextInferenceProvider::LocalLlama {
+        provider: ExpanderInferenceProvider::LocalLlama {
             model_file: Some(model_file.to_string()),
             max_tokens: 256,
             n_ctx: 2048,
             n_gpu_layers: Some(0),
+            enable_thinking: false,
+            reasoning_format: Some("none".to_string()),
+            chat_template_kwargs: None,
+            sampling: ExpanderLocalLlamaSamplingConfig::default(),
         },
     }
 }
@@ -430,12 +430,15 @@ fn test_engine_with_local_model_runtime() -> Engine {
                 },
             }),
             expander: Some(ExpanderInferenceConfig {
-                adapter: ExpanderAdapter::Qmd,
-                provider: TextInferenceProvider::LocalLlama {
+                provider: ExpanderInferenceProvider::LocalLlama {
                     model_file: None,
                     max_tokens: 256,
                     n_ctx: 2048,
                     n_gpu_layers: Some(0),
+                    enable_thinking: false,
+                    reasoning_format: Some("none".to_string()),
+                    chat_template_kwargs: None,
+                    sampling: ExpanderLocalLlamaSamplingConfig::default(),
                 },
             }),
         },
@@ -2467,16 +2470,17 @@ fn search_deep_mode_reports_rerank_unavailable_when_model_is_missing() {
 }
 
 #[test]
-fn search_deep_mode_does_not_embed_keyword_only_expansions() {
+fn search_deep_mode_filters_duplicate_and_original_query_expansions() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_search_models(
-            Some(Arc::new(SelectiveFailureEmbedder)),
             None,
-            Some(Arc::new(RouteExpander {
-                items: vec![crate::models::ExpandedQuery {
-                    text: "setup install EMBED_FAIL".to_string(),
-                    route: crate::models::ExpansionRoute::KeywordOnly,
-                }],
+            None,
+            Some(Arc::new(StaticExpander {
+                items: vec![
+                    "unrelated topic".to_string(),
+                    "  setup install guide  ".to_string(),
+                    "setup install guide".to_string(),
+                ],
             })),
         );
         engine.add_space("work", None).expect("add work");
@@ -2505,63 +2509,12 @@ fn search_deep_mode_does_not_embed_keyword_only_expansions() {
                 no_rerank: true,
                 debug: false,
             })
-            .expect("deep search should skip embedding keyword-only expansions");
+            .expect("deep search should filter duplicate and original-query expansions");
 
         assert_eq!(response.effective_mode, SearchMode::Deep);
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].path, "api/guide.md");
-    });
-}
-
-#[test]
-fn search_deep_mode_does_not_send_dense_only_expansions_to_bm25() {
-    with_kbolt_space_env(None, || {
-        let engine = test_engine_with_search_models(
-            None,
-            None,
-            Some(Arc::new(RouteExpander {
-                items: vec![crate::models::ExpandedQuery {
-                    text: "setup install guide".to_string(),
-                    route: crate::models::ExpansionRoute::DenseOnly,
-                }],
-            })),
-        );
-        engine.add_space("work", None).expect("add work");
-
-        let root = tempdir().expect("create temp root");
-        let work_path = root.path().join("work-api");
-        std::fs::create_dir_all(&work_path).expect("create collection dir");
-        add_collection_fixture(&engine, "work", "api", work_path.clone());
-
-        write_text_file(
-            &work_path.join("guide.md"),
-            "# Setup\n\nThis document explains setup install steps.\n",
-        );
-        engine
-            .update(UpdateOptions {
-                space: Some("work".to_string()),
-                collections: vec!["api".to_string()],
-                no_embed: true,
-                dry_run: false,
-                verbose: false,
-            })
-            .expect("index without embeddings");
-
-        let response = engine
-            .search(SearchRequest {
-                query: "totally unrelated".to_string(),
-                mode: SearchMode::Deep,
-                space: Some("work".to_string()),
-                collections: vec!["api".to_string()],
-                limit: 10,
-                min_score: 0.0,
-                no_rerank: true,
-                debug: false,
-            })
-            .expect("deep search should ignore dense-only expansion without embedder");
-
-        assert!(response.results.is_empty());
-        assert!(!response.pipeline.dense);
+        assert!(response.pipeline.expansion);
     });
 }
 

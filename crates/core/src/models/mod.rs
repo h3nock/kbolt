@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::config::{
-    EmbeddingConfig, ExpanderInferenceConfig, InferenceConfig, ModelConfig, ModelProvider,
-    ModelSourceConfig, TextInferenceConfig, TextInferenceProvider,
+    EmbeddingConfig, ExpanderInferenceConfig, ExpanderInferenceProvider, InferenceConfig,
+    ModelConfig, ModelProvider, ModelSourceConfig, TextInferenceConfig, TextInferenceProvider,
 };
 use crate::Result;
 
@@ -27,9 +27,9 @@ mod local_onnx;
 mod local_reranker;
 mod provider;
 mod providers;
-mod qmd_expander;
 mod reranker;
 mod text;
+mod variants_expander;
 
 static LLAMA_BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
 
@@ -47,7 +47,7 @@ const MODEL_DIRNAME_EXPANDER: &str = "expander";
 const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";
 
 pub(crate) use embedder::{Embedder, EmbeddingInputKind};
-pub(crate) use expander::{normalize_query_text, ExpandedQuery, Expander, ExpansionRoute};
+pub(crate) use expander::{normalize_query_text, Expander};
 #[cfg(test)]
 pub(crate) use inference::build_embedder;
 pub(crate) use inference::{
@@ -409,10 +409,24 @@ fn expander_download_requirements(
     config: Option<&ExpanderInferenceConfig>,
     config_field: &'static str,
 ) -> Option<Vec<ModelFileRequirement>> {
-    text_inference_provider_download_requirements(
-        config.map(|config| &config.provider),
-        config_field,
-    )
+    let Some(config) = config else {
+        return None;
+    };
+
+    match &config.provider {
+        ExpanderInferenceProvider::LocalLlama { model_file, .. } => {
+            let configured = configured_repo_path(model_file.as_deref())
+                .map(|path| ModelFileRequirement::ExactPath { path, config_field });
+
+            Some(vec![configured.unwrap_or(
+                ModelFileRequirement::SingleExtension {
+                    extension: "gguf",
+                    config_field,
+                },
+            )])
+        }
+        ExpanderInferenceProvider::OpenAiCompatible { .. } => None,
+    }
 }
 
 fn text_inference_provider_download_requirements(

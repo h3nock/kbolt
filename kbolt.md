@@ -218,7 +218,7 @@ core/
     local_onnx.rs        # local ONNX embedder runtime
     local_gguf.rs        # local GGUF embedder runtime
     local_llama.rs       # local llama generation runtime (raw/chat + sampling + grammar)
-    qmd_expander.rs      # qmd local expander adapter
+    variants_expander.rs # generic query-variants expander
     artifacts.rs         # model artifact file discovery helpers
     text.rs              # shared text normalization helpers
 
@@ -333,19 +333,8 @@ pub trait Reranker: Send + Sync {
     fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<f32>>;
 }
 
-pub enum ExpansionRoute {
-    Both,
-    KeywordOnly,
-    DenseOnly,
-}
-
-pub struct ExpandedQuery {
-    pub text: String,
-    pub route: ExpansionRoute,
-}
-
 pub trait Expander: Send + Sync {
-    fn expand(&self, query: &str) -> Result<Vec<ExpandedQuery>>;
+    fn expand(&self, query: &str, max_variants: usize) -> Result<Vec<String>>;
 }
 
 pub trait Generator: Send + Sync {
@@ -1546,14 +1535,11 @@ Rule-based (no LLM). Auto mode defaults to BM25+dense with reranker off for spee
 ### Stage 3: Query Expansion (--deep only)
 
 Deep search always includes the normalized original query. The expander then adds generated
-queries tagged with retrieval routes:
-- **Keyword-only**: lexical rewrites that go to BM25 only
-- **Dense-only**: semantic rewrites or HyDE-style passages that go to dense retrieval only
-- **Both**: generic rewrites that go to both retrieval signals
+query variants as plain strings. The engine, not the expander, decides how variants are searched.
 
-Each routed query is fed to Stage 4 independently, producing its own candidate list(s). All
-candidates from all routed queries are collected into a single pool, then enter Stage 5 (fusion)
-together.
+In V1, the original query and every generated variant follow the same Stage 4 path independently:
+keyword retrieval plus dense retrieval when embeddings are available. Each variant produces its
+own candidate list, and those lists are then aggregated before reranking.
 
 ### Stage 4: Multi-Signal Retrieval (parallel)
 
@@ -1670,7 +1656,7 @@ id = "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF"
 
 [models.expander]
 provider = "huggingface"
-id = "tobil/qmd-query-expansion-1.7B-gguf"
+id = "Qwen/Qwen3-1.7B-GGUF"
 
 [embeddings]
 provider = "local_gguf"          # V1: openai_compatible | voyage | local_onnx | local_gguf
@@ -1688,10 +1674,19 @@ n_ctx = 2048
 
 [inference.expander]
 provider = "local_llama"
-adapter = "qmd"
-model_file = "qmd-query-expansion-1.7B-q4_k_m.gguf"
+model_file = "Qwen3-1.7B-Q8_0.gguf"
 max_tokens = 600
 n_ctx = 2048
+enable_thinking = false
+reasoning_format = "none"
+temperature = 0.7
+top_k = 20
+top_p = 0.8
+min_p = 0.0
+repeat_last_n = 64
+repeat_penalty = 1.0
+frequency_penalty = 0.0
+presence_penalty = 0.5
 # omit n_gpu_layers to auto-detect acceleration
 
 [reaping]
@@ -1751,9 +1746,8 @@ Notes:
 - `provider = "local_gguf"` loads a GGUF artifact from `~/.cache/kbolt/models/embedder` (or explicit `model_file`) and fails fast when artifact selection is ambiguous.
 - The current `local_gguf` embedding path is tuned for the default EmbeddingGemma model family: query inputs are prefixed with `task: search result | query: `, document inputs with `title: none | text: `, sequence embeddings use mean pooling, and vectors are L2-normalized before storage/search.
 - `provider = "local_llama"` loads GGUF artifacts from role directories (`reranker` / `expander`) and fails fast when artifact selection is ambiguous.
-- `inference.expander` separates runtime `provider` from expander `adapter`. V1 adapters are `json_variants` and `qmd`; `adapter = "qmd"` is currently supported only with `provider = "local_llama"`.
 - The current local reranker path is intentionally Qwen3-specific: it builds the documented Qwen3 reranker prompt contract, uses rank pooling, and should be treated as support for Qwen3-style GGUF rerankers rather than a generic local cross-encoder interface.
-- The current local qmd expander path is intentionally qmd-specific: the adapter owns the `/no_think Expand this search query: ...` prompt, applies the model's GGUF chat template via the local chat prompt path, owns the qmd grammar and non-greedy sampler defaults, and maps `lex` / `vec` / `hyde` into routed `ExpandedQuery` values. `local_llama` remains the reusable runtime underneath it.
+- The current expander path generates plain query variants as a JSON array of strings. The local llama provider owns grammar-constrained generation, non-thinking chat-template controls, and configurable sampler settings; the engine owns how generated variants are searched and aggregated.
 
 ---
 
@@ -1894,7 +1888,7 @@ Injected into LLM system prompt on connection:
 |---|---|---|---|---|
 | Embedding | embeddinggemma 300M | GGUF Q8 | ~314MB | llama-cpp-rs (GPU/CPU) |
 | Reranker | Qwen3-Reranker 0.6B | GGUF Q8 | ~640MB | llama-cpp-rs (GPU/CPU) |
-| Expander | qmd-query-expansion 1.7B | GGUF Q4 | ~1.2GB | llama-cpp-rs (GPU/CPU) |
+| Expander | Qwen3 1.7B | GGUF Q8 | ~1.7GB | llama-cpp-rs (GPU/CPU) |
 
 Download path is provider-agnostic in core: model orchestration depends on a provider abstraction, and artifact download is delegated to provider adapters. Default adapter is HuggingFace Hub via `hf-hub` (resumable downloads, checksum verification, local caching). `kbolt models pull` downloads only required role artifacts (embedder: one ONNX + tokenizer for `local_onnx`, or one GGUF for `local_gguf`; text roles: one GGUF each).
 

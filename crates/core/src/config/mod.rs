@@ -6,12 +6,13 @@ use std::path::{Path, PathBuf};
 use crate::error::Result;
 use kbolt_types::KboltError;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 const APP_NAME: &str = "kbolt";
 const CONFIG_FILENAME: &str = "index.toml";
 const DEFAULT_EMBED_MODEL: &str = "ggml-org/embeddinggemma-300M-GGUF";
 const DEFAULT_RERANKER_MODEL: &str = "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF";
-const DEFAULT_EXPANDER_MODEL: &str = "tobil/qmd-query-expansion-1.7B-gguf";
+const DEFAULT_EXPANDER_MODEL: &str = "Qwen/Qwen3-1.7B-GGUF";
 const DEFAULT_REAP_DAYS: u32 = 7;
 const DEFAULT_CHUNK_TARGET_TOKENS: usize = 450;
 const DEFAULT_CHUNK_SOFT_MAX_TOKENS: usize = 550;
@@ -33,6 +34,16 @@ const DEFAULT_INFERENCE_MAX_RETRIES: u32 = 2;
 const DEFAULT_LOCAL_INFERENCE_MAX_TOKENS: usize = 256;
 const DEFAULT_LOCAL_EXPANDER_MAX_TOKENS: usize = 600;
 const DEFAULT_LOCAL_INFERENCE_N_CTX: u32 = 2048;
+const DEFAULT_EXPANDER_ENABLE_THINKING: bool = false;
+const DEFAULT_EXPANDER_SEED: u32 = 0;
+const DEFAULT_EXPANDER_TEMPERATURE: f32 = 0.7;
+const DEFAULT_EXPANDER_TOP_K: i32 = 20;
+const DEFAULT_EXPANDER_TOP_P: f32 = 0.8;
+const DEFAULT_EXPANDER_MIN_P: f32 = 0.0;
+const DEFAULT_EXPANDER_REPEAT_LAST_N: i32 = 64;
+const DEFAULT_EXPANDER_REPEAT_PENALTY: f32 = 1.0;
+const DEFAULT_EXPANDER_FREQUENCY_PENALTY: f32 = 0.0;
+const DEFAULT_EXPANDER_PRESENCE_PENALTY: f32 = 0.5;
 const DEFAULT_RANKING_DEEP_VARIANT_RRF_K: usize = 60;
 const DEFAULT_RANKING_DEEP_VARIANTS_MAX: usize = 4;
 const DEFAULT_RANKING_INITIAL_CANDIDATE_LIMIT_MIN: usize = 40;
@@ -110,7 +121,7 @@ pub enum EmbeddingConfig {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct InferenceConfig {
     #[serde(default)]
     pub reranker: Option<TextInferenceConfig>,
@@ -124,18 +135,82 @@ pub struct TextInferenceConfig {
     pub provider: TextInferenceProvider,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExpanderInferenceConfig {
-    pub adapter: ExpanderAdapter,
     #[serde(flatten)]
-    pub provider: TextInferenceProvider,
+    pub provider: ExpanderInferenceProvider,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExpanderAdapter {
-    JsonVariants,
-    Qmd,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case")]
+pub enum ExpanderInferenceProvider {
+    #[serde(rename = "openai_compatible")]
+    OpenAiCompatible {
+        model: String,
+        base_url: String,
+        #[serde(default)]
+        api_key_env: Option<String>,
+        #[serde(default = "default_inference_timeout_ms")]
+        timeout_ms: u64,
+        #[serde(default = "default_inference_max_retries")]
+        max_retries: u32,
+    },
+    LocalLlama {
+        #[serde(default)]
+        model_file: Option<String>,
+        #[serde(default = "default_local_expander_max_tokens")]
+        max_tokens: usize,
+        #[serde(default = "default_local_inference_n_ctx")]
+        n_ctx: u32,
+        #[serde(default = "default_local_inference_n_gpu_layers")]
+        n_gpu_layers: Option<u32>,
+        #[serde(default = "default_expander_enable_thinking")]
+        enable_thinking: bool,
+        #[serde(default = "default_expander_reasoning_format")]
+        reasoning_format: Option<String>,
+        #[serde(default)]
+        chat_template_kwargs: Option<String>,
+        #[serde(flatten)]
+        sampling: ExpanderLocalLlamaSamplingConfig,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExpanderLocalLlamaSamplingConfig {
+    #[serde(default = "default_expander_seed")]
+    pub seed: u32,
+    #[serde(default = "default_expander_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_expander_top_k")]
+    pub top_k: i32,
+    #[serde(default = "default_expander_top_p")]
+    pub top_p: f32,
+    #[serde(default = "default_expander_min_p")]
+    pub min_p: f32,
+    #[serde(default = "default_expander_repeat_last_n")]
+    pub repeat_last_n: i32,
+    #[serde(default = "default_expander_repeat_penalty")]
+    pub repeat_penalty: f32,
+    #[serde(default = "default_expander_frequency_penalty")]
+    pub frequency_penalty: f32,
+    #[serde(default = "default_expander_presence_penalty")]
+    pub presence_penalty: f32,
+}
+
+impl Default for ExpanderLocalLlamaSamplingConfig {
+    fn default() -> Self {
+        Self {
+            seed: default_expander_seed(),
+            temperature: default_expander_temperature(),
+            top_k: default_expander_top_k(),
+            top_p: default_expander_top_p(),
+            min_p: default_expander_min_p(),
+            repeat_last_n: default_expander_repeat_last_n(),
+            repeat_penalty: default_expander_repeat_penalty(),
+            frequency_penalty: default_expander_frequency_penalty(),
+            presence_penalty: default_expander_presence_penalty(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -684,15 +759,164 @@ fn validate_expander_inference(
         return Ok(());
     };
 
-    validate_text_inference_provider(scope, &config.provider)?;
+    match &config.provider {
+        ExpanderInferenceProvider::OpenAiCompatible {
+            model,
+            base_url,
+            api_key_env,
+            timeout_ms,
+            ..
+        } => {
+            if model.trim().is_empty() {
+                return Err(KboltError::Config(format!("{scope}.model must not be empty")).into());
+            }
 
-    if matches!(config.adapter, ExpanderAdapter::Qmd)
-        && !matches!(config.provider, TextInferenceProvider::LocalLlama { .. })
-    {
+            if base_url.trim().is_empty() {
+                return Err(
+                    KboltError::Config(format!("{scope}.base_url must not be empty")).into(),
+                );
+            }
+
+            if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+                return Err(KboltError::Config(format!(
+                    "{scope}.base_url must start with http:// or https://"
+                ))
+                .into());
+            }
+
+            if *timeout_ms == 0 {
+                return Err(KboltError::Config(format!(
+                    "{scope}.timeout_ms must be greater than zero"
+                ))
+                .into());
+            }
+
+            if let Some(api_key_env) = api_key_env.as_deref() {
+                if api_key_env.trim().is_empty() {
+                    return Err(KboltError::Config(format!(
+                        "{scope}.api_key_env must not be empty when set"
+                    ))
+                    .into());
+                }
+            }
+
+            Ok(())
+        }
+        ExpanderInferenceProvider::LocalLlama {
+            model_file,
+            max_tokens,
+            n_ctx,
+            reasoning_format,
+            chat_template_kwargs,
+            sampling,
+            ..
+        } => {
+            if *max_tokens == 0 {
+                return Err(KboltError::Config(format!(
+                    "{scope}.max_tokens must be greater than zero"
+                ))
+                .into());
+            }
+
+            if *n_ctx == 0 {
+                return Err(
+                    KboltError::Config(format!("{scope}.n_ctx must be greater than zero")).into(),
+                );
+            }
+
+            if let Some(model_file) = model_file {
+                if model_file.trim().is_empty() {
+                    return Err(KboltError::Config(format!(
+                        "{scope}.model_file must not be empty when set"
+                    ))
+                    .into());
+                }
+            }
+
+            if let Some(reasoning_format) = reasoning_format {
+                if reasoning_format.trim().is_empty() {
+                    return Err(KboltError::Config(format!(
+                        "{scope}.reasoning_format must not be empty when set"
+                    ))
+                    .into());
+                }
+            }
+
+            if let Some(chat_template_kwargs) = chat_template_kwargs {
+                if chat_template_kwargs.trim().is_empty() {
+                    return Err(KboltError::Config(format!(
+                        "{scope}.chat_template_kwargs must not be empty when set"
+                    ))
+                    .into());
+                }
+
+                let parsed: Value = serde_json::from_str(chat_template_kwargs).map_err(|err| {
+                    KboltError::Config(format!(
+                        "{scope}.chat_template_kwargs must be valid JSON: {err}"
+                    ))
+                })?;
+                if !parsed.is_object() {
+                    return Err(KboltError::Config(format!(
+                        "{scope}.chat_template_kwargs must be a JSON object"
+                    ))
+                    .into());
+                }
+            }
+
+            validate_expander_local_llama_sampling(scope, sampling)
+        }
+    }
+}
+
+fn validate_expander_local_llama_sampling(
+    scope: &str,
+    sampling: &ExpanderLocalLlamaSamplingConfig,
+) -> Result<()> {
+    if !sampling.temperature.is_finite() || sampling.temperature <= 0.0 {
         return Err(KboltError::Config(format!(
-            "{scope}.adapter=qmd requires provider=local_llama"
+            "{scope}.temperature must be finite and greater than zero"
         ))
         .into());
+    }
+
+    if sampling.top_k <= 0 {
+        return Err(KboltError::Config(format!("{scope}.top_k must be greater than zero")).into());
+    }
+
+    if !sampling.top_p.is_finite() || sampling.top_p <= 0.0 || sampling.top_p > 1.0 {
+        return Err(KboltError::Config(format!(
+            "{scope}.top_p must be finite and in the range (0, 1]"
+        ))
+        .into());
+    }
+
+    if !sampling.min_p.is_finite() || sampling.min_p < 0.0 || sampling.min_p > 1.0 {
+        return Err(KboltError::Config(format!(
+            "{scope}.min_p must be finite and in the range [0, 1]"
+        ))
+        .into());
+    }
+
+    if sampling.repeat_last_n < -1 {
+        return Err(KboltError::Config(format!(
+            "{scope}.repeat_last_n must be greater than or equal to -1"
+        ))
+        .into());
+    }
+
+    if !sampling.repeat_penalty.is_finite() || sampling.repeat_penalty <= 0.0 {
+        return Err(KboltError::Config(format!(
+            "{scope}.repeat_penalty must be finite and greater than zero"
+        ))
+        .into());
+    }
+
+    if !sampling.frequency_penalty.is_finite() {
+        return Err(KboltError::Config(format!("{scope}.frequency_penalty must be finite")).into());
+    }
+
+    if !sampling.presence_penalty.is_finite() {
+        return Err(KboltError::Config(format!("{scope}.presence_penalty must be finite")).into());
     }
 
     Ok(())
@@ -923,24 +1147,16 @@ struct FileConfig {
     ranking: RankingConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 struct FileInferenceConfig {
     #[serde(default)]
     reranker: Option<FileTextInferenceConfig>,
     #[serde(default)]
-    expander: Option<FileExpanderInferenceConfig>,
+    expander: Option<ExpanderInferenceConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct FileTextInferenceConfig {
-    #[serde(flatten)]
-    provider: FileTextInferenceProvider,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct FileExpanderInferenceConfig {
-    #[serde(default)]
-    adapter: Option<ExpanderAdapter>,
     #[serde(flatten)]
     provider: FileTextInferenceProvider,
 }
@@ -1009,10 +1225,7 @@ impl From<FileInferenceConfig> for InferenceConfig {
                 value.reranker,
                 default_local_inference_max_tokens(),
             ),
-            expander: file_expander_inference_to_runtime(
-                value.expander,
-                default_local_expander_max_tokens(),
-            ),
+            expander: value.expander,
         }
     }
 }
@@ -1021,10 +1234,7 @@ impl From<&InferenceConfig> for FileInferenceConfig {
     fn from(value: &InferenceConfig) -> Self {
         Self {
             reranker: value.reranker.as_ref().map(FileTextInferenceConfig::from),
-            expander: value
-                .expander
-                .as_ref()
-                .map(FileExpanderInferenceConfig::from),
+            expander: value.expander.clone(),
         }
     }
 }
@@ -1064,43 +1274,12 @@ impl From<&TextInferenceConfig> for FileTextInferenceConfig {
     }
 }
 
-impl From<&ExpanderInferenceConfig> for FileExpanderInferenceConfig {
-    fn from(value: &ExpanderInferenceConfig) -> Self {
-        let provider = FileTextInferenceConfig::from(&TextInferenceConfig {
-            provider: value.provider.clone(),
-        })
-        .provider;
-
-        Self {
-            adapter: Some(value.adapter.clone()),
-            provider,
-        }
-    }
-}
-
 fn file_text_inference_to_runtime(
     config: Option<FileTextInferenceConfig>,
     default_max_tokens: usize,
 ) -> Option<TextInferenceConfig> {
     config.map(|config| TextInferenceConfig {
         provider: file_text_inference_provider_to_runtime(config.provider, default_max_tokens),
-    })
-}
-
-fn file_expander_inference_to_runtime(
-    config: Option<FileExpanderInferenceConfig>,
-    default_max_tokens: usize,
-) -> Option<ExpanderInferenceConfig> {
-    config.map(|config| {
-        let adapter = config.adapter.unwrap_or_else(|| match &config.provider {
-            FileTextInferenceProvider::OpenAiCompatible { .. } => ExpanderAdapter::JsonVariants,
-            FileTextInferenceProvider::LocalLlama { .. } => ExpanderAdapter::Qmd,
-        });
-
-        ExpanderInferenceConfig {
-            adapter,
-            provider: file_text_inference_provider_to_runtime(config.provider, default_max_tokens),
-        }
     })
 }
 
@@ -1246,6 +1425,50 @@ fn default_local_inference_n_ctx() -> u32 {
 
 fn default_local_inference_n_gpu_layers() -> Option<u32> {
     None
+}
+
+fn default_expander_enable_thinking() -> bool {
+    DEFAULT_EXPANDER_ENABLE_THINKING
+}
+
+fn default_expander_reasoning_format() -> Option<String> {
+    Some("none".to_string())
+}
+
+fn default_expander_seed() -> u32 {
+    DEFAULT_EXPANDER_SEED
+}
+
+fn default_expander_temperature() -> f32 {
+    DEFAULT_EXPANDER_TEMPERATURE
+}
+
+fn default_expander_top_k() -> i32 {
+    DEFAULT_EXPANDER_TOP_K
+}
+
+fn default_expander_top_p() -> f32 {
+    DEFAULT_EXPANDER_TOP_P
+}
+
+fn default_expander_min_p() -> f32 {
+    DEFAULT_EXPANDER_MIN_P
+}
+
+fn default_expander_repeat_last_n() -> i32 {
+    DEFAULT_EXPANDER_REPEAT_LAST_N
+}
+
+fn default_expander_repeat_penalty() -> f32 {
+    DEFAULT_EXPANDER_REPEAT_PENALTY
+}
+
+fn default_expander_frequency_penalty() -> f32 {
+    DEFAULT_EXPANDER_FREQUENCY_PENALTY
+}
+
+fn default_expander_presence_penalty() -> f32 {
+    DEFAULT_EXPANDER_PRESENCE_PENALTY
 }
 
 fn default_ranking_deep_variant_rrf_k() -> usize {
