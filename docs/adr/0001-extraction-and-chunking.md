@@ -109,18 +109,18 @@ Default ranking behavior keeps reranker scoring on the primary hit chunk; neighb
 
 Markdown profile defaults:
 
-- `target_tokens = 450`
-- `soft_max_tokens = 550`
-- `hard_max_tokens = 750`
+- `target_tokens = 800`
+- `soft_max_tokens = 950`
+- `hard_max_tokens = 1200`
 - `boundary_overlap_tokens = 48`
 - `neighbor_window = 1`
 - `contextual_prefix = true`
 
 Rationale:
 
-- `target_tokens = 450` balances semantic focus with enough local context for dense retrieval.
-- `soft_max_tokens = 550` allows structurally clean boundaries without creating tiny orphan chunks.
-- `hard_max_tokens = 750` caps chunk size to preserve retrieval precision and reranking efficiency.
+- `target_tokens = 800` keeps materially more local context without changing FiQA/SciFact retrieval quality in a meaningful way versus the previous 450-token baseline.
+- `soft_max_tokens = 950` still preserves clean structural packing without forcing small overflow fragments.
+- `hard_max_tokens = 1200` gives the packer enough headroom to avoid unnecessary splits while remaining well below the local embedding truncation ceiling.
 - `boundary_overlap_tokens = 48` protects recall only at forced split boundaries while avoiding broad duplicate indexing.
 
 ## Consequences

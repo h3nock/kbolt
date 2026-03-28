@@ -1296,9 +1296,9 @@ pub struct ChunkPolicy {
 ```
 
 Policy defaults for markdown (`.md`) in V1:
-- `target_tokens = 450`
-- `soft_max_tokens = 550`
-- `hard_max_tokens = 750`
+- `target_tokens = 800`
+- `soft_max_tokens = 950`
+- `hard_max_tokens = 1200`
 - `boundary_overlap_tokens = 48`
 - `neighbor_window = 1`
 - `contextual_prefix = true`
@@ -1736,9 +1736,9 @@ filepath = 0.5
 
 [chunking.defaults]
 # Defaults are tuned for markdown-heavy collections.
-target_tokens = 450
-soft_max_tokens = 550
-hard_max_tokens = 750
+target_tokens = 800
+soft_max_tokens = 950
+hard_max_tokens = 1200
 boundary_overlap_tokens = 48
 neighbor_window = 1
 contextual_prefix = true
