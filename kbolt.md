@@ -766,6 +766,7 @@ pub struct CollectionRow {
 }
 pub struct DocumentRow {
     pub id: i64, pub collection_id: i64, pub path: String, pub title: String,
+    pub title_source: DocumentTitleSource,
     pub hash: String, pub modified: String, pub active: bool,
     pub deactivated_at: Option<String>, pub fts_dirty: bool,
 }
@@ -787,7 +788,8 @@ pub enum ChunkKind {
     Class,                              // code-file class/struct chunk
 }
 pub struct TantivyEntry {
-    pub chunk_id: i64, pub doc_id: i64, pub filepath: String, pub title: String,
+    pub chunk_id: i64, pub doc_id: i64, pub filepath: String,
+    pub semantic_title: Option<String>,
     pub heading: Option<String>, pub body: String,
 }
 pub struct BM25Hit { pub chunk_id: i64, pub score: f32 }
@@ -798,10 +800,16 @@ pub struct FtsDirtyRecord {
     pub doc_id: i64,
     pub doc_path: String,                  // relative path within collection
     pub doc_title: String,
+    pub doc_title_source: DocumentTitleSource,
     pub doc_hash: String,                  // stored hash, for verifying file hasn't changed
     pub collection_path: PathBuf,          // absolute path to collection root
     pub space_name: String,
     pub chunks: Vec<ChunkRow>,             // all chunks for this document
+}
+
+pub enum DocumentTitleSource {
+    Extracted,
+    FilenameFallback,
 }
 
 // Returned by get_unembedded_chunks — everything needed to embed from disk
@@ -997,7 +1005,8 @@ A `default` space always exists, created automatically on first use. It is the i
 | `id` | INTEGER PK | Stable FK target for chunks |
 | `collection_id` | INTEGER FK | References `collections.id`, CASCADE delete |
 | `path` | TEXT | Relative path from collection root (e.g. `rust/error-handling.md`) |
-| `title` | TEXT | Extracted from first heading, or filename if no heading |
+| `title` | TEXT | Display title stored for the document |
+| `title_source` | TEXT | `extracted` for semantic titles, `filename_fallback` when only the basename is available |
 | `hash` | TEXT | SHA-256 of file bytes — used for change detection |
 | `modified` | TEXT | ISO 8601, file modification timestamp |
 | `active` | INTEGER | 1 = live, 0 = deactivated (file disappeared from disk) |
@@ -1005,6 +1014,10 @@ A `default` space always exists, created automatically on first use. It is the i
 | `fts_dirty` | INTEGER | 1 = chunks written to SQLite but Tantivy not yet confirmed, 0 = FTS in sync |
 
 UNIQUE constraint on `(collection_id, path)`. Soft delete with auto-reaping: documents deactivated for longer than the configured reaping period (default: 7 days) are hard-deleted during `kbolt update`. Deactivated documents (`active = 0`) are excluded from the embedding backlog (`get_unembedded_chunks` filters `active = 1`) and from search results (result assembly filters out chunks belonging to inactive documents). Chunks and embeddings are retained during deactivation so that if the file reappears (same hash), re-activation skips re-indexing.
+
+`title` remains the display value surfaced in CLI/file listings. Ranking and rerank contextual prefixes only treat `title` as semantic metadata when `title_source = extracted`. `filepath` stays a separate retrieval signal with its own weight.
+
+Older caches created before `title_source` existed must be refreshed with `kbolt update` to repopulate title provenance accurately. The schema migration adds the column, but it does not infer old provenance heuristically.
 
 The `fts_dirty` flag is a BM25/FTS reconciliation mechanism. It is set to 1 in the same SQLite transaction that writes chunk mutations. It is cleared to 0 only via `batch_clear_fts_dirty()`, which runs after each Tantivy commit point (every N documents and at end of phase). This batched clearing ensures the flag is never cleared before the Tantivy entries are durably committed. On each `kbolt update`, Phase 0 replays any documents with `fts_dirty = 1` through Tantivy indexing before the normal mtime/hash fast path runs. This closes a crash-safety gap: without it, if the process dies after SQLite commits chunks but before Tantivy commits, the next update would skip the file (unchanged hash) and the BM25 entry would stay missing forever. Dense/embedding recovery is handled separately by the existing `embeddings` ledger + USearch sync check.
 
@@ -1070,6 +1083,7 @@ CREATE TABLE documents (
     collection_id   INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
     path            TEXT NOT NULL,
     title           TEXT NOT NULL,
+    title_source    TEXT NOT NULL DEFAULT 'extracted',
     hash            TEXT NOT NULL,
     modified        TEXT NOT NULL,
     active          INTEGER NOT NULL DEFAULT 1,
@@ -1110,7 +1124,7 @@ Each space has its own Tantivy index at `~/.cache/kbolt/spaces/{space}/tantivy/`
 chunk_id:  u64  (stored, fast)          — join key back to SQLite chunks table
 doc_id:    u64  (stored, fast)          — join key back to SQLite documents table, used for delete-by-document
 filepath:  TEXT (stored, indexed, 2x)   — "collection_name/relative/path.md"
-title:     TEXT (stored, indexed, 3x)   — document title (copied from parent Document at index time)
+title:     TEXT (stored, indexed, 3x)   — semantic document title only when `title_source = extracted`
 heading:   TEXT (stored, indexed, 2x)   — chunk heading breadcrumb
 body:      TEXT (indexed, NOT stored)   — chunk text (indexed for BM25, read from disk at query time)
 ```
@@ -1318,7 +1332,7 @@ Each final chunk has two text views:
 1. **source text** — exact file slice from `offset`/`length` for snippets and citation fidelity.
 2. **retrieval text** — optional contextualized prefix + source text for BM25/reranker/embedding.
 
-Contextualized prefixes are deterministic and derived from indexed metadata (document title, heading path, selected frontmatter fields, code language, table header summary). Prefixes never mutate stored source spans.
+Contextualized prefixes are deterministic and derived from indexed metadata (extracted document title only, heading path, selected frontmatter fields, code language, table header summary). Filename fallback titles are display-only and do not participate in semantic prefixing. Prefixes never mutate stored source spans.
 The retrieval text view is computed from source text + metadata at indexing/query time and is not persisted as a second chunks-table text column.
 
 Token counting: baseline V1 uses a deterministic whitespace token counter inside the chunker. Model-tokenizer-based counting is planned as a follow-up.
