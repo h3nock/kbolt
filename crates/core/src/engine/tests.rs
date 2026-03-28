@@ -688,14 +688,21 @@ fn schedule_backend_artifact_paths(engine: &Engine, schedule_id: &str) -> Vec<st
 
 #[test]
 fn retrieval_text_with_prefix_adds_title_and_heading_context() {
-    let text = retrieval_text_with_prefix("body text", "Guide", Some("Setup > Install"), true);
+    let text =
+        retrieval_text_with_prefix("body text", Some("Guide"), Some("Setup > Install"), true);
     assert_eq!(text, "title: Guide\nheading: Setup > Install\n\nbody text");
 }
 
 #[test]
 fn retrieval_text_with_prefix_respects_disabled_flag() {
-    let text = retrieval_text_with_prefix("body text", "Guide", Some("Setup"), false);
+    let text = retrieval_text_with_prefix("body text", Some("Guide"), Some("Setup"), false);
     assert_eq!(text, "body text");
+}
+
+#[test]
+fn retrieval_text_with_prefix_omits_fallback_title_when_absent() {
+    let text = retrieval_text_with_prefix("body text", None, Some("Setup"), true);
+    assert_eq!(text, "heading: Setup\n\nbody text");
 }
 
 const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";
@@ -1821,6 +1828,7 @@ fn get_document_errors_for_deleted_file_and_ambiguous_docid() {
                 collection.id,
                 "a.rs",
                 "a.rs",
+                crate::storage::DocumentTitleSource::Extracted,
                 "abc123000000",
                 "2026-03-01T10:00:00Z",
             )
@@ -1831,6 +1839,7 @@ fn get_document_errors_for_deleted_file_and_ambiguous_docid() {
                 collection.id,
                 "b.rs",
                 "b.rs",
+                crate::storage::DocumentTitleSource::Extracted,
                 "abc123999999",
                 "2026-03-01T10:01:00Z",
             )
@@ -3174,6 +3183,7 @@ fn update_replays_fts_dirty_documents_before_mtime_fast_path() {
                 collection.id,
                 &stored_doc.path,
                 &stored_doc.title,
+                stored_doc.title_source,
                 &stored_doc.hash,
                 &stored_doc.modified,
             )
@@ -3273,6 +3283,7 @@ fn update_replay_skips_hash_mismatch_outside_scoped_targets() {
                 notes_collection.id,
                 &notes_doc.path,
                 &notes_doc.title,
+                notes_doc.title_source,
                 &notes_doc.hash,
                 &notes_doc.modified,
             )
@@ -3814,6 +3825,51 @@ fn update_markdown_uses_structural_chunking_and_heading_metadata() {
                 .iter()
                 .any(|chunk| chunk.heading.as_deref() == Some("Title")),
             "expected heading breadcrumb on narrative chunks"
+        );
+    });
+}
+
+#[test]
+fn update_skipped_hash_preserves_extracted_markdown_title() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("docs/guide.md");
+        write_text_file(&file_path, "# Guide\n\nbody text\n");
+
+        let first = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+        assert_eq!(first.added, 1);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        write_text_file(&file_path, "# Guide\n\nbody text\n");
+
+        let second = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("second update");
+        assert_eq!(second.skipped_hash, 1);
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "docs/guide.md")
+            .expect("query document")
+            .expect("document exists");
+        assert_eq!(doc.title, "Guide");
+        assert_eq!(
+            doc.title_source,
+            crate::storage::DocumentTitleSource::Extracted
         );
     });
 }

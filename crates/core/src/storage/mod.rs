@@ -51,6 +51,7 @@ pub struct DocumentRow {
     pub collection_id: i64,
     pub path: String,
     pub title: String,
+    pub title_source: DocumentTitleSource,
     pub hash: String,
     pub modified: String,
     pub active: bool,
@@ -104,6 +105,7 @@ pub struct FtsDirtyRecord {
     pub doc_id: i64,
     pub doc_path: String,
     pub doc_title: String,
+    pub doc_title_source: DocumentTitleSource,
     pub doc_hash: String,
     pub collection_path: PathBuf,
     pub space_name: String,
@@ -122,9 +124,40 @@ pub struct TantivyEntry {
     pub chunk_id: i64,
     pub doc_id: i64,
     pub filepath: String,
-    pub title: String,
+    pub semantic_title: Option<String>,
     pub heading: Option<String>,
     pub body: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentTitleSource {
+    Extracted,
+    FilenameFallback,
+}
+
+impl DocumentTitleSource {
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            Self::Extracted => "extracted",
+            Self::FilenameFallback => "filename_fallback",
+        }
+    }
+
+    fn from_sql(raw: &str) -> std::result::Result<Self, KboltError> {
+        match raw {
+            "extracted" => Ok(Self::Extracted),
+            "filename_fallback" => Ok(Self::FilenameFallback),
+            other => Err(KboltError::InvalidInput(format!(
+                "invalid stored document title source: {other}"
+            ))),
+        }
+    }
+
+    pub fn semantic_title(self, title: &str) -> Option<&str> {
+        matches!(self, Self::Extracted)
+            .then_some(title.trim())
+            .filter(|title| !title.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -206,6 +239,7 @@ CREATE TABLE IF NOT EXISTS documents (
     collection_id   INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
     path            TEXT NOT NULL,
     title           TEXT NOT NULL,
+    title_source    TEXT NOT NULL DEFAULT 'extracted',
     hash            TEXT NOT NULL,
     modified        TEXT NOT NULL,
     active          INTEGER NOT NULL DEFAULT 1,
@@ -237,6 +271,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
 );
 "#,
         )?;
+        ensure_documents_title_source_column(&conn)?;
 
         conn.execute(
             "INSERT OR IGNORE INTO spaces (name, description) VALUES (?1, NULL)",
@@ -801,6 +836,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
         collection_id: i64,
         path: &str,
         title: &str,
+        title_source: DocumentTitleSource,
         hash: &str,
         modified: &str,
     ) -> Result<i64> {
@@ -811,16 +847,24 @@ CREATE TABLE IF NOT EXISTS embeddings (
         let _collection_name = lookup_collection_name(&conn, collection_id)?;
 
         conn.execute(
-            "INSERT INTO documents (collection_id, path, title, hash, modified, active, deactivated_at, fts_dirty)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1, NULL, 1)
+            "INSERT INTO documents (collection_id, path, title, title_source, hash, modified, active, deactivated_at, fts_dirty)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, NULL, 1)
              ON CONFLICT(collection_id, path) DO UPDATE SET
                  title = excluded.title,
+                 title_source = excluded.title_source,
                  hash = excluded.hash,
                  modified = excluded.modified,
                  active = 1,
                  deactivated_at = NULL,
                  fts_dirty = 1",
-            params![collection_id, path, title, hash, modified],
+            params![
+                collection_id,
+                path,
+                title,
+                title_source.as_sql(),
+                hash,
+                modified
+            ],
         )?;
 
         let id: i64 = conn.query_row(
@@ -842,7 +886,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .map_err(|_| CoreError::poisoned("database"))?;
         let _collection_name = lookup_collection_name(&conn, collection_id)?;
         let mut stmt = conn.prepare(
-            "SELECT id, collection_id, path, title, hash, modified, active, deactivated_at, fts_dirty
+            "SELECT id, collection_id, path, title, title_source, hash, modified, active, deactivated_at, fts_dirty
              FROM documents
              WHERE collection_id = ?1 AND path = ?2",
         )?;
@@ -861,7 +905,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .lock()
             .map_err(|_| CoreError::poisoned("database"))?;
         let mut stmt = conn.prepare(
-            "SELECT id, collection_id, path, title, hash, modified, active, deactivated_at, fts_dirty
+            "SELECT id, collection_id, path, title, title_source, hash, modified, active, deactivated_at, fts_dirty
              FROM documents
              WHERE id = ?1",
         )?;
@@ -889,7 +933,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
         let placeholders = vec!["?"; ids.len()].join(", ");
         let sql = format!(
-            "SELECT id, collection_id, path, title, hash, modified, active, deactivated_at, fts_dirty
+            "SELECT id, collection_id, path, title, title_source, hash, modified, active, deactivated_at, fts_dirty
              FROM documents
              WHERE id IN ({placeholders})"
         );
@@ -899,7 +943,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
         Ok(docs)
     }
 
-    pub fn update_document_metadata(&self, doc_id: i64, title: &str, modified: &str) -> Result<()> {
+    pub fn refresh_document_activity(&self, doc_id: i64, modified: &str) -> Result<()> {
         let conn = self
             .db
             .lock()
@@ -907,12 +951,11 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
         let updated = conn.execute(
             "UPDATE documents
-             SET title = ?1,
-                 modified = ?2,
+             SET modified = ?1,
                  active = 1,
                  deactivated_at = NULL
-             WHERE id = ?3",
-            params![title, modified, doc_id],
+             WHERE id = ?2",
+            params![modified, doc_id],
         )?;
 
         if updated == 0 {
@@ -937,7 +980,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
         let _collection_name = lookup_collection_name(&conn, collection_id)?;
         let active_only = i64::from(active_only);
         let mut stmt = conn.prepare(
-            "SELECT id, collection_id, path, title, hash, modified, active, deactivated_at, fts_dirty
+            "SELECT id, collection_id, path, title, title_source, hash, modified, active, deactivated_at, fts_dirty
              FROM documents
              WHERE collection_id = ?1
                AND (?2 = 0 OR active = 1)
@@ -996,7 +1039,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
         let pattern = format!("{prefix}%");
         let mut stmt = conn.prepare(
-            "SELECT id, collection_id, path, title, hash, modified, active, deactivated_at, fts_dirty
+            "SELECT id, collection_id, path, title, title_source, hash, modified, active, deactivated_at, fts_dirty
              FROM documents
              WHERE hash LIKE ?1
              ORDER BY id ASC",
@@ -1364,7 +1407,9 @@ CREATE TABLE IF NOT EXISTS embeddings (
             doc.add_u64(space_indexes.fields.chunk_id, chunk_id);
             doc.add_u64(space_indexes.fields.doc_id, doc_id);
             doc.add_text(space_indexes.fields.filepath, &entry.filepath);
-            doc.add_text(space_indexes.fields.title, &entry.title);
+            if let Some(title) = &entry.semantic_title {
+                doc.add_text(space_indexes.fields.title, title);
+            }
             if let Some(heading) = &entry.heading {
                 doc.add_text(space_indexes.fields.heading, heading);
             }
@@ -1641,7 +1686,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .map_err(|_| CoreError::poisoned("database"))?;
 
         let mut stmt = conn.prepare(
-            "SELECT d.id, d.path, d.title, d.hash, c.path, s.name
+            "SELECT d.id, d.path, d.title, d.title_source, d.hash, c.path, s.name
              FROM documents d
              JOIN collections c ON c.id = d.collection_id
              JOIN spaces s ON s.id = c.space_id
@@ -1656,18 +1701,29 @@ CREATE TABLE IF NOT EXISTS embeddings (
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
             ))
         })?;
         let headers = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         drop(stmt);
 
         let mut records = Vec::with_capacity(headers.len());
-        for (doc_id, doc_path, doc_title, doc_hash, collection_path, space_name) in headers {
+        for (
+            doc_id,
+            doc_path,
+            doc_title,
+            doc_title_source,
+            doc_hash,
+            collection_path,
+            space_name,
+        ) in headers
+        {
             let chunks = load_chunks_for_doc(&conn, doc_id)?;
             records.push(FtsDirtyRecord {
                 doc_id,
                 doc_path,
                 doc_title,
+                doc_title_source: DocumentTitleSource::from_sql(&doc_title_source)?,
                 doc_hash,
                 collection_path: PathBuf::from(collection_path),
                 space_name,
@@ -2027,6 +2083,23 @@ fn open_or_create_tantivy_index(path: &Path) -> Result<Index> {
     Ok(Index::create_in_dir(path, tantivy_schema())?)
 }
 
+fn ensure_documents_title_source_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(documents)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let columns = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    if columns.iter().any(|column| column == "title_source") {
+        return Ok(());
+    }
+
+    conn.execute(
+        "ALTER TABLE documents ADD COLUMN title_source TEXT NOT NULL DEFAULT 'extracted'",
+        [],
+    )?;
+    Ok(())
+}
+
 fn build_literal_bm25_query(
     index: &Index,
     fields: &[Bm25FieldSpec],
@@ -2222,17 +2295,22 @@ fn decode_collection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Collection
 }
 
 fn decode_document_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentRow> {
-    let active_value: i64 = row.get(6)?;
-    let fts_dirty_value: i64 = row.get(8)?;
+    let raw_title_source: String = row.get(4)?;
+    let title_source = DocumentTitleSource::from_sql(&raw_title_source).map_err(|err| {
+        Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+    let active_value: i64 = row.get(7)?;
+    let fts_dirty_value: i64 = row.get(9)?;
     Ok(DocumentRow {
         id: row.get(0)?,
         collection_id: row.get(1)?,
         path: row.get(2)?,
         title: row.get(3)?,
-        hash: row.get(4)?,
-        modified: row.get(5)?,
+        title_source,
+        hash: row.get(5)?,
+        modified: row.get(6)?,
         active: active_value != 0,
-        deactivated_at: row.get(7)?,
+        deactivated_at: row.get(8)?,
         fts_dirty: fts_dirty_value != 0,
     })
 }

@@ -12,7 +12,8 @@ use crate::lock::{LockMode, OperationLock};
 use crate::models;
 use crate::storage::Storage;
 use crate::storage::{
-    ChunkInsert, ChunkRow, CollectionRow, DocumentRow, SpaceResolution, TantivyEntry,
+    ChunkInsert, ChunkRow, CollectionRow, DocumentRow, DocumentTitleSource, SpaceResolution,
+    TantivyEntry,
 };
 use crate::ModelPullEvent;
 use crate::Result;

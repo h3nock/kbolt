@@ -44,7 +44,7 @@ pub(super) fn search_text_with_neighbors(
 
 pub(crate) fn retrieval_text_with_prefix(
     source_text: &str,
-    title: &str,
+    title: Option<&str>,
     heading: Option<&str>,
     contextual_prefix: bool,
 ) -> String {
@@ -53,9 +53,11 @@ pub(crate) fn retrieval_text_with_prefix(
     }
 
     let mut lines = Vec::new();
-    let normalized_title = title.trim();
-    if !normalized_title.is_empty() {
-        lines.push(format!("title: {normalized_title}"));
+    if let Some(title) = title {
+        let normalized_title = title.trim();
+        if !normalized_title.is_empty() {
+            lines.push(format!("title: {normalized_title}"));
+        }
     }
 
     if let Some(raw_heading) = heading {

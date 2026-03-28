@@ -1,6 +1,6 @@
 use tempfile::tempdir;
 
-use super::Storage;
+use super::{DocumentTitleSource, Storage};
 use crate::ingest::chunk::FinalChunkKind;
 use kbolt_types::KboltError;
 use rusqlite::Connection;
@@ -58,7 +58,7 @@ fn tantivy_index_and_query_returns_ranked_hits() {
                     chunk_id: 11,
                     doc_id: 1,
                     filepath: "api/lib.rs".to_string(),
-                    title: "alpha guide".to_string(),
+                    semantic_title: Some("alpha guide".to_string()),
                     heading: Some("intro".to_string()),
                     body: "alpha token in body".to_string(),
                 },
@@ -66,7 +66,7 @@ fn tantivy_index_and_query_returns_ranked_hits() {
                     chunk_id: 22,
                     doc_id: 2,
                     filepath: "api/main.rs".to_string(),
-                    title: "beta guide".to_string(),
+                    semantic_title: Some("beta guide".to_string()),
                     heading: Some("usage".to_string()),
                     body: "beta token only".to_string(),
                 },
@@ -95,7 +95,7 @@ fn bm25_literal_queries_accept_punctuation_heavy_user_text() {
                 chunk_id: 11,
                 doc_id: 1,
                 filepath: "docs/scifact.md".to_string(),
-                title: "thalassemia note".to_string(),
+                semantic_title: Some("thalassemia note".to_string()),
                 heading: Some("alpha trait".to_string()),
                 body: "high microerythrocyte count raises vulnerability to severe anemia in homozygous alpha thalassemia trait subjects".to_string(),
             }],
@@ -128,7 +128,7 @@ fn bm25_literal_queries_return_empty_hits_for_punctuation_only_input() {
                 chunk_id: 11,
                 doc_id: 1,
                 filepath: "docs/alpha.md".to_string(),
-                title: "alpha guide".to_string(),
+                semantic_title: Some("alpha guide".to_string()),
                 heading: None,
                 body: "alpha token in body".to_string(),
             }],
@@ -156,7 +156,7 @@ fn delete_tantivy_removes_chunk_after_commit() {
                     chunk_id: 11,
                     doc_id: 1,
                     filepath: "api/lib.rs".to_string(),
-                    title: "alpha guide".to_string(),
+                    semantic_title: Some("alpha guide".to_string()),
                     heading: None,
                     body: "alphaunique".to_string(),
                 },
@@ -164,7 +164,7 @@ fn delete_tantivy_removes_chunk_after_commit() {
                     chunk_id: 22,
                     doc_id: 2,
                     filepath: "api/main.rs".to_string(),
-                    title: "beta guide".to_string(),
+                    semantic_title: Some("beta guide".to_string()),
                     heading: None,
                     body: "betaunique".to_string(),
                 },
@@ -207,7 +207,7 @@ fn delete_tantivy_by_doc_removes_all_doc_chunks_after_commit() {
                     chunk_id: 11,
                     doc_id: 1,
                     filepath: "api/lib.rs".to_string(),
-                    title: "alpha one".to_string(),
+                    semantic_title: Some("alpha one".to_string()),
                     heading: None,
                     body: "doconea".to_string(),
                 },
@@ -215,7 +215,7 @@ fn delete_tantivy_by_doc_removes_all_doc_chunks_after_commit() {
                     chunk_id: 12,
                     doc_id: 1,
                     filepath: "api/lib.rs".to_string(),
-                    title: "alpha two".to_string(),
+                    semantic_title: Some("alpha two".to_string()),
                     heading: None,
                     body: "doconeb".to_string(),
                 },
@@ -223,7 +223,7 @@ fn delete_tantivy_by_doc_removes_all_doc_chunks_after_commit() {
                     chunk_id: 21,
                     doc_id: 2,
                     filepath: "api/main.rs".to_string(),
-                    title: "beta".to_string(),
+                    semantic_title: Some("beta".to_string()),
                     heading: None,
                     body: "doctwo".to_string(),
                 },
@@ -476,6 +476,105 @@ fn new_creates_expected_schema_objects() {
             .expect("query sqlite_master for index");
         assert_eq!(exists, 1, "missing expected index: {index}");
     }
+
+    let title_source_exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('documents') WHERE name = 'title_source'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("query documents title_source column");
+    assert_eq!(title_source_exists, 1, "missing documents.title_source");
+}
+
+#[test]
+fn new_migrates_existing_documents_table_with_title_source() {
+    let tmp = tempdir().expect("create tempdir");
+    let cache_dir = tmp.path().join("cache");
+    std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+    let db_path = cache_dir.join("meta.sqlite");
+    let conn = Connection::open(&db_path).expect("open sqlite");
+    conn.execute_batch(
+        r#"
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE spaces (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
+CREATE TABLE collections (
+    id          INTEGER PRIMARY KEY,
+    space_id    INTEGER NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    description TEXT,
+    extensions  TEXT,
+    created     TEXT NOT NULL,
+    updated     TEXT NOT NULL,
+    UNIQUE(space_id, name)
+);
+
+CREATE TABLE documents (
+    id              INTEGER PRIMARY KEY,
+    collection_id   INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+    path            TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    hash            TEXT NOT NULL,
+    modified        TEXT NOT NULL,
+    active          INTEGER NOT NULL DEFAULT 1,
+    deactivated_at  TEXT,
+    fts_dirty       INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(collection_id, path)
+);
+
+CREATE TABLE chunks (
+    id       INTEGER PRIMARY KEY,
+    doc_id   INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    seq      INTEGER NOT NULL,
+    offset   INTEGER NOT NULL,
+    length   INTEGER NOT NULL,
+    heading  TEXT,
+    kind     TEXT NOT NULL DEFAULT 'section',
+    UNIQUE(doc_id, seq)
+);
+
+CREATE TABLE embeddings (
+    chunk_id    INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+    model       TEXT NOT NULL,
+    embedded_at TEXT NOT NULL,
+    PRIMARY KEY (chunk_id, model)
+);
+"#,
+    )
+    .expect("create legacy schema");
+    conn.execute(
+        "INSERT INTO spaces (id, name, description, created) VALUES (1, 'default', NULL, '2026-03-01T00:00:00Z')",
+        [],
+    )
+    .expect("insert space");
+    conn.execute(
+        "INSERT INTO collections (id, space_id, name, path, description, extensions, created, updated)
+         VALUES (1, 1, 'docs', '/tmp/docs', NULL, NULL, '2026-03-01T00:00:00Z', '2026-03-01T00:00:00Z')",
+        [],
+    )
+    .expect("insert collection");
+    conn.execute(
+        "INSERT INTO documents (id, collection_id, path, title, hash, modified, active, deactivated_at, fts_dirty)
+         VALUES (1, 1, 'guide.md', 'Guide', 'hash-1', '2026-03-01T00:00:00Z', 1, NULL, 0)",
+        [],
+    )
+    .expect("insert legacy document");
+    drop(conn);
+
+    let storage = Storage::new(&cache_dir).expect("migrate storage");
+    let doc = storage
+        .get_document_by_path(1, "guide.md")
+        .expect("load document")
+        .expect("document exists");
+    assert_eq!(doc.title_source, DocumentTitleSource::Extracted);
 }
 
 #[test]
@@ -709,6 +808,7 @@ fn upsert_document_inserts_active_dirty_document() {
             collection_id,
             "src/lib.rs",
             "lib",
+            DocumentTitleSource::Extracted,
             "hash-1",
             "2026-03-01T10:00:00Z",
         )
@@ -721,6 +821,7 @@ fn upsert_document_inserts_active_dirty_document() {
         .expect("document should exist");
     assert_eq!(stored.id, doc_id);
     assert_eq!(stored.title, "lib");
+    assert_eq!(stored.title_source, DocumentTitleSource::Extracted);
     assert_eq!(stored.hash, "hash-1");
     assert_eq!(stored.modified, "2026-03-01T10:00:00Z");
     assert!(stored.active);
@@ -750,6 +851,7 @@ fn upsert_document_updates_existing_row_and_reactivates() {
             collection_id,
             "src/lib.rs",
             "lib",
+            DocumentTitleSource::Extracted,
             "hash-1",
             "2026-03-01T10:00:00Z",
         )
@@ -771,6 +873,7 @@ fn upsert_document_updates_existing_row_and_reactivates() {
             collection_id,
             "src/lib.rs",
             "lib-updated",
+            DocumentTitleSource::Extracted,
             "hash-2",
             "2026-03-01T12:00:00Z",
         )
@@ -782,6 +885,7 @@ fn upsert_document_updates_existing_row_and_reactivates() {
         .expect("get document")
         .expect("document should exist");
     assert_eq!(stored.title, "lib-updated");
+    assert_eq!(stored.title_source, DocumentTitleSource::Extracted);
     assert_eq!(stored.hash, "hash-2");
     assert_eq!(stored.modified, "2026-03-01T12:00:00Z");
     assert!(stored.active);
@@ -790,7 +894,7 @@ fn upsert_document_updates_existing_row_and_reactivates() {
 }
 
 #[test]
-fn update_document_metadata_updates_title_modified_and_reactivates_without_dirtying() {
+fn refresh_document_activity_updates_modified_and_reactivates_without_dirtying() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
     let space_id = storage
@@ -811,6 +915,7 @@ fn update_document_metadata_updates_title_modified_and_reactivates_without_dirty
             collection_id,
             "src/lib.rs",
             "lib",
+            DocumentTitleSource::Extracted,
             "hash-1",
             "2026-03-01T10:00:00Z",
         )
@@ -828,14 +933,15 @@ fn update_document_metadata_updates_title_modified_and_reactivates_without_dirty
     }
 
     storage
-        .update_document_metadata(doc_id, "lib-new", "2026-03-01T12:00:00Z")
-        .expect("update metadata");
+        .refresh_document_activity(doc_id, "2026-03-01T12:00:00Z")
+        .expect("refresh document activity");
 
     let stored = storage
         .get_document_by_path(collection_id, "src/lib.rs")
         .expect("get document")
         .expect("document should exist");
-    assert_eq!(stored.title, "lib-new");
+    assert_eq!(stored.title, "lib");
+    assert_eq!(stored.title_source, DocumentTitleSource::Extracted);
     assert_eq!(stored.modified, "2026-03-01T12:00:00Z");
     assert!(stored.active);
     assert_eq!(stored.deactivated_at, None);
@@ -886,10 +992,24 @@ fn list_documents_respects_active_only_filter() {
         .expect("create collection");
 
     let active_doc_id = storage
-        .upsert_document(collection_id, "a.rs", "a", "hash-a", "2026-03-01T10:00:00Z")
+        .upsert_document(
+            collection_id,
+            "a.rs",
+            "a",
+            DocumentTitleSource::Extracted,
+            "hash-a",
+            "2026-03-01T10:00:00Z",
+        )
         .expect("insert active doc");
     let inactive_doc_id = storage
-        .upsert_document(collection_id, "b.rs", "b", "hash-b", "2026-03-01T11:00:00Z")
+        .upsert_document(
+            collection_id,
+            "b.rs",
+            "b",
+            DocumentTitleSource::Extracted,
+            "hash-b",
+            "2026-03-01T11:00:00Z",
+        )
         .expect("insert inactive doc");
     assert!(active_doc_id > 0);
 
@@ -938,6 +1058,7 @@ fn list_collection_file_rows_reports_counts_and_active_filter() {
             collection_id,
             "src/a.rs",
             "a.rs",
+            DocumentTitleSource::Extracted,
             "hash-a",
             "2026-03-01T10:00:00Z",
         )
@@ -947,6 +1068,7 @@ fn list_collection_file_rows_reports_counts_and_active_filter() {
             collection_id,
             "src/b.rs",
             "b.rs",
+            DocumentTitleSource::Extracted,
             "hash-b",
             "2026-03-01T11:00:00Z",
         )
@@ -1035,6 +1157,7 @@ fn get_document_by_hash_prefix_returns_matching_rows() {
             collection_id,
             "src/a.rs",
             "a",
+            DocumentTitleSource::Extracted,
             "abcd0001",
             "2026-03-01T10:00:00Z",
         )
@@ -1044,6 +1167,7 @@ fn get_document_by_hash_prefix_returns_matching_rows() {
             collection_id,
             "src/b.rs",
             "b",
+            DocumentTitleSource::Extracted,
             "abcd0002",
             "2026-03-01T10:01:00Z",
         )
@@ -1053,6 +1177,7 @@ fn get_document_by_hash_prefix_returns_matching_rows() {
             collection_id,
             "src/c.rs",
             "c",
+            DocumentTitleSource::Extracted,
             "ffff0003",
             "2026-03-01T10:02:00Z",
         )
@@ -1088,6 +1213,7 @@ fn reap_documents_deletes_only_old_deactivated_rows() {
             collection_id,
             "old.rs",
             "old",
+            DocumentTitleSource::Extracted,
             "hash-old",
             "2026-03-01T10:00:00Z",
         )
@@ -1097,6 +1223,7 @@ fn reap_documents_deletes_only_old_deactivated_rows() {
             collection_id,
             "recent.rs",
             "recent",
+            DocumentTitleSource::Extracted,
             "hash-recent",
             "2026-03-01T10:01:00Z",
         )
@@ -1106,6 +1233,7 @@ fn reap_documents_deletes_only_old_deactivated_rows() {
             collection_id,
             "active.rs",
             "active",
+            DocumentTitleSource::Extracted,
             "hash-active",
             "2026-03-01T10:02:00Z",
         )
@@ -1172,6 +1300,7 @@ fn insert_and_get_chunks_for_document() {
             collection_id,
             "src/lib.rs",
             "lib",
+            DocumentTitleSource::Extracted,
             "hash-1",
             "2026-03-01T10:00:00Z",
         )
@@ -1233,6 +1362,7 @@ fn get_chunks_for_document_rejects_invalid_stored_chunk_kind() {
             collection_id,
             "src/lib.rs",
             "lib",
+            DocumentTitleSource::Extracted,
             "hash-1",
             "2026-03-01T10:00:00Z",
         )
@@ -1275,6 +1405,7 @@ fn delete_chunks_for_document_returns_deleted_ids() {
             collection_id,
             "src/lib.rs",
             "lib",
+            DocumentTitleSource::Extracted,
             "hash-1",
             "2026-03-01T10:00:00Z",
         )
@@ -1332,6 +1463,7 @@ fn insert_count_and_delete_embeddings_by_model() {
             collection_id,
             "src/lib.rs",
             "lib",
+            DocumentTitleSource::Extracted,
             "hash-1",
             "2026-03-01T10:00:00Z",
         )
@@ -1421,6 +1553,7 @@ fn list_embedding_models_in_space_returns_distinct_sorted_models() {
             work_collection_id,
             "src/lib.rs",
             "lib",
+            DocumentTitleSource::Extracted,
             "hash-work",
             "2026-03-01T10:00:00Z",
         )
@@ -1430,6 +1563,7 @@ fn list_embedding_models_in_space_returns_distinct_sorted_models() {
             notes_collection_id,
             "README.md",
             "readme",
+            DocumentTitleSource::Extracted,
             "hash-notes",
             "2026-03-01T10:01:00Z",
         )
@@ -1514,6 +1648,7 @@ fn get_unembedded_chunks_filters_active_and_model_specific_backlog() {
             collection_id,
             "src/active.rs",
             "active",
+            DocumentTitleSource::Extracted,
             "hash-active",
             "2026-03-01T10:00:00Z",
         )
@@ -1523,6 +1658,7 @@ fn get_unembedded_chunks_filters_active_and_model_specific_backlog() {
             collection_id,
             "src/inactive.rs",
             "inactive",
+            DocumentTitleSource::Extracted,
             "hash-inactive",
             "2026-03-01T10:01:00Z",
         )
@@ -1629,6 +1765,7 @@ fn get_fts_dirty_documents_returns_context_and_chunks() {
             collection_id,
             "src/lib.rs",
             "lib title",
+            DocumentTitleSource::Extracted,
             "hash-abc123",
             "2026-03-01T10:00:00Z",
         )
@@ -1662,6 +1799,7 @@ fn get_fts_dirty_documents_returns_context_and_chunks() {
     assert_eq!(dirty[0].doc_id, doc_id);
     assert_eq!(dirty[0].doc_path, "src/lib.rs");
     assert_eq!(dirty[0].doc_title, "lib title");
+    assert_eq!(dirty[0].doc_title_source, DocumentTitleSource::Extracted);
     assert_eq!(dirty[0].doc_hash, "hash-abc123");
     assert_eq!(
         dirty[0].collection_path,
@@ -1695,6 +1833,7 @@ fn batch_clear_fts_dirty_clears_selected_documents_only() {
             collection_id,
             "src/a.rs",
             "a",
+            DocumentTitleSource::Extracted,
             "hash-a",
             "2026-03-01T10:00:00Z",
         )
@@ -1704,6 +1843,7 @@ fn batch_clear_fts_dirty_clears_selected_documents_only() {
             collection_id,
             "src/b.rs",
             "b",
+            DocumentTitleSource::Extracted,
             "hash-b",
             "2026-03-01T10:01:00Z",
         )
@@ -1759,6 +1899,7 @@ fn count_documents_scopes_by_space_and_counts_inactive_rows() {
             work_collection_id,
             "src/a.rs",
             "a",
+            DocumentTitleSource::Extracted,
             "hash-a",
             "2026-03-01T10:00:00Z",
         )
@@ -1768,6 +1909,7 @@ fn count_documents_scopes_by_space_and_counts_inactive_rows() {
             work_collection_id,
             "src/b.rs",
             "b",
+            DocumentTitleSource::Extracted,
             "hash-b",
             "2026-03-01T10:01:00Z",
         )
@@ -1777,6 +1919,7 @@ fn count_documents_scopes_by_space_and_counts_inactive_rows() {
             notes_collection_id,
             "README.md",
             "readme",
+            DocumentTitleSource::Extracted,
             "hash-readme",
             "2026-03-01T10:02:00Z",
         )
@@ -1844,6 +1987,7 @@ fn count_chunks_scopes_by_space() {
             work_collection_id,
             "src/lib.rs",
             "lib",
+            DocumentTitleSource::Extracted,
             "hash-lib",
             "2026-03-01T10:00:00Z",
         )
@@ -1853,6 +1997,7 @@ fn count_chunks_scopes_by_space() {
             notes_collection_id,
             "README.md",
             "readme",
+            DocumentTitleSource::Extracted,
             "hash-readme",
             "2026-03-01T10:01:00Z",
         )
@@ -1942,6 +2087,7 @@ fn count_embedded_chunks_scopes_by_space_and_deduplicates_models() {
             work_collection_id,
             "src/lib.rs",
             "lib",
+            DocumentTitleSource::Extracted,
             "hash-lib",
             "2026-03-01T10:00:00Z",
         )
@@ -1951,6 +2097,7 @@ fn count_embedded_chunks_scopes_by_space_and_deduplicates_models() {
             notes_collection_id,
             "README.md",
             "readme",
+            DocumentTitleSource::Extracted,
             "hash-readme",
             "2026-03-01T10:01:00Z",
         )
@@ -2036,10 +2183,24 @@ fn per_collection_count_methods_return_expected_values() {
         )
         .expect("create collection");
     let doc_a = storage
-        .upsert_document(collection_id, "a.rs", "a", "hash-a", "2026-03-01T10:00:00Z")
+        .upsert_document(
+            collection_id,
+            "a.rs",
+            "a",
+            DocumentTitleSource::Extracted,
+            "hash-a",
+            "2026-03-01T10:00:00Z",
+        )
         .expect("insert doc a");
     let doc_b = storage
-        .upsert_document(collection_id, "b.rs", "b", "hash-b", "2026-03-01T10:01:00Z")
+        .upsert_document(
+            collection_id,
+            "b.rs",
+            "b",
+            DocumentTitleSource::Extracted,
+            "hash-b",
+            "2026-03-01T10:01:00Z",
+        )
         .expect("insert doc b");
 
     let chunk_ids = storage

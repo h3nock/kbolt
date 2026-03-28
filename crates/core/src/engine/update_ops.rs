@@ -412,11 +412,16 @@ impl Engine {
                         chunk_id: chunk.id,
                         doc_id,
                         filepath: record.doc_path.clone(),
-                        title: record.doc_title.clone(),
+                        semantic_title: record
+                            .doc_title_source
+                            .semantic_title(record.doc_title.as_str())
+                            .map(ToString::to_string),
                         heading: chunk.heading.clone(),
                         body: retrieval_text_with_prefix(
                             source_body,
-                            record.doc_title.as_str(),
+                            record
+                                .doc_title_source
+                                .semantic_title(record.doc_title.as_str()),
                             chunk.heading.as_deref(),
                             self.config.chunking.defaults.contextual_prefix,
                         ),
@@ -701,6 +706,7 @@ impl Engine {
             };
             let hash = sha256_hex(&bytes);
             let mut title = file_title(entry.path());
+            let mut title_source = DocumentTitleSource::FilenameFallback;
 
             let existing = docs_by_path.get(&relative_path).cloned();
             let pending_decision;
@@ -729,8 +735,7 @@ impl Engine {
                     }
 
                     if !options.dry_run {
-                        self.storage
-                            .update_document_metadata(doc.id, &title, &modified)?;
+                        self.storage.refresh_document_activity(doc.id, &modified)?;
                     }
                     continue;
                 }
@@ -772,14 +777,21 @@ impl Engine {
                     continue;
                 }
             };
-            if let Some(extracted_title) = extracted.title.as_deref() {
+            if let Some(extracted_title) = extracted
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+            {
                 title = extracted_title.to_string();
+                title_source = DocumentTitleSource::Extracted;
             }
 
             let doc_id = self.storage.upsert_document(
                 target.collection.id,
                 &relative_path,
                 &title,
+                title_source,
                 &hash,
                 &modified,
             )?;
@@ -839,7 +851,9 @@ impl Engine {
                         chunk_id: *chunk_id,
                         doc_id,
                         filepath: relative_path.clone(),
-                        title: title.clone(),
+                        semantic_title: title_source
+                            .semantic_title(title.as_str())
+                            .map(ToString::to_string),
                         heading: chunk.heading.clone(),
                         body: retrieval_text_with_prefix(
                             if chunk.text.is_empty() {
@@ -847,7 +861,7 @@ impl Engine {
                             } else {
                                 chunk.text.as_str()
                             },
-                            title.as_str(),
+                            title_source.semantic_title(title.as_str()),
                             chunk.heading.as_deref(),
                             policy.contextual_prefix,
                         ),

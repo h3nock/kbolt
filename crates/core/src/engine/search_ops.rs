@@ -499,6 +499,7 @@ impl Engine {
                 docid: short_docid(&document.hash),
                 path: format!("{}/{}", collection.collection, document.path),
                 title: document.title.clone(),
+                title_source: document.title_source,
                 space: collection.space.clone(),
                 collection: collection.collection.clone(),
                 heading: chunk.heading.clone(),
@@ -630,6 +631,7 @@ struct PendingSearchCandidate {
     docid: String,
     path: String,
     title: String,
+    title_source: DocumentTitleSource,
     space: String,
     collection: String,
     heading: Option<String>,
@@ -668,7 +670,9 @@ fn build_rerank_input(
 
     Ok(Some(retrieval_text_with_prefix(
         rerank_body.as_str(),
-        candidate.title.as_str(),
+        candidate
+            .title_source
+            .semantic_title(candidate.title.as_str()),
         candidate.heading.as_deref(),
         contextual_prefix,
     )))
@@ -907,6 +911,7 @@ mod tests {
             docid: format!("#{doc_id}"),
             path: format!("doc-{doc_id}.md"),
             title: format!("Doc {doc_id}"),
+            title_source: DocumentTitleSource::Extracted,
             space: "work".to_string(),
             collection: "docs".to_string(),
             heading: None,
