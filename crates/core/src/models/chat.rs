@@ -2,15 +2,20 @@ use kbolt_types::KboltError;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::config::TextInferenceOutputMode;
 use crate::models::completion::CompletionClient;
 use crate::models::http::{HttpJsonClient, HttpOperation};
 use crate::models::text::strip_json_fences;
 use crate::Result;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChatCompletionOutputMode {
+    JsonObject,
+    Text,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ChatCompletionRequestOptions {
-    pub output_mode: TextInferenceOutputMode,
+    pub output_mode: ChatCompletionOutputMode,
     pub max_tokens: Option<usize>,
     pub seed: Option<u32>,
     pub temperature: Option<f32>,
@@ -26,7 +31,7 @@ pub(super) struct ChatCompletionRequestOptions {
 impl ChatCompletionRequestOptions {
     pub(super) fn json_object() -> Self {
         Self {
-            output_mode: TextInferenceOutputMode::JsonObject,
+            output_mode: ChatCompletionOutputMode::JsonObject,
             max_tokens: None,
             seed: None,
             temperature: Some(0.0),
@@ -43,7 +48,7 @@ impl ChatCompletionRequestOptions {
     #[cfg(test)]
     pub(super) fn text() -> Self {
         Self {
-            output_mode: TextInferenceOutputMode::Text,
+            output_mode: ChatCompletionOutputMode::Text,
             max_tokens: None,
             seed: None,
             temperature: Some(0.0),
@@ -99,8 +104,8 @@ impl CompletionClient for HttpChatClient {
                 .post_json("chat/completions", &payload, HttpOperation::ChatCompletion)?;
         let content = response.into_text()?;
         let normalized = match self.options.output_mode {
-            TextInferenceOutputMode::JsonObject => content.trim(),
-            TextInferenceOutputMode::Text => strip_json_fences(&content),
+            ChatCompletionOutputMode::JsonObject => content.trim(),
+            ChatCompletionOutputMode::Text => strip_json_fences(&content),
         };
         Ok(normalized.to_string())
     }
@@ -155,7 +160,7 @@ pub(super) fn build_chat_payload(
     if let Some(presence_penalty) = options.presence_penalty {
         payload["presence_penalty"] = json!(presence_penalty);
     }
-    if options.output_mode == TextInferenceOutputMode::JsonObject {
+    if options.output_mode == ChatCompletionOutputMode::JsonObject {
         payload["response_format"] = json!({ "type": "json_object" });
     }
     payload

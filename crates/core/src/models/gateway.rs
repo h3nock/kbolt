@@ -14,6 +14,15 @@ pub(crate) enum GatewayProviderKind {
     OpenAiCompatible,
 }
 
+impl GatewayProviderKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::LlamaCppServer => "llama_cpp_server",
+            Self::OpenAiCompatible => "openai_compatible",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProviderDeployment {
     pub kind: GatewayProviderKind,

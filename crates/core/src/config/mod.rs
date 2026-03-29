@@ -229,14 +229,6 @@ impl Default for ExpanderSamplingConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TextInferenceOutputMode {
-    #[serde(rename = "json_object")]
-    JsonObject,
-    #[serde(rename = "text")]
-    Text,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReapingConfig {
     pub days: u32,

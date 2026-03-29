@@ -4,8 +4,8 @@ use kbolt_types::KboltError;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::config::{Config, ProviderOperation, TextInferenceOutputMode};
-use crate::models::chat::{ChatCompletionRequestOptions, HttpChatClient};
+use crate::config::{Config, ProviderOperation};
+use crate::models::chat::{ChatCompletionOutputMode, ChatCompletionRequestOptions, HttpChatClient};
 use crate::models::completion::CompletionClient;
 use crate::models::gateway::{
     resolve_inference_gateway_bindings, EmbedderBinding, ExpanderBinding, GatewayProviderKind,
@@ -99,7 +99,7 @@ fn build_embedder_from_binding(binding: &EmbedderBinding) -> Result<Arc<dyn Embe
             binding.deployment.timeout_ms,
             binding.deployment.max_retries,
             "embedding",
-            provider_kind_label(binding.deployment.kind),
+            binding.deployment.kind.as_str(),
         ),
         model: binding.deployment.model.clone(),
         batch_size: binding.batch_size,
@@ -115,7 +115,7 @@ fn build_reranker_from_binding(binding: &RerankerBinding) -> Result<Arc<dyn Rera
                 binding.deployment.timeout_ms,
                 binding.deployment.max_retries,
                 "reranking",
-                provider_kind_label(binding.deployment.kind),
+                binding.deployment.kind.as_str(),
             ),
             model: binding.deployment.model.clone(),
         })),
@@ -167,20 +167,13 @@ fn build_chat_client(
         deployment.max_retries,
         &deployment.model,
         options,
-        provider_kind_label(deployment.kind),
+        deployment.kind.as_str(),
     )
-}
-
-fn provider_kind_label(kind: GatewayProviderKind) -> &'static str {
-    match kind {
-        GatewayProviderKind::LlamaCppServer => "llama_cpp_server",
-        GatewayProviderKind::OpenAiCompatible => "openai_compatible",
-    }
 }
 
 fn openai_expander_options(binding: &ExpanderBinding) -> ChatCompletionRequestOptions {
     ChatCompletionRequestOptions {
-        output_mode: TextInferenceOutputMode::Text,
+        output_mode: ChatCompletionOutputMode::Text,
         max_tokens: Some(binding.max_tokens),
         seed: Some(binding.sampling.seed),
         temperature: Some(binding.sampling.temperature),
@@ -196,7 +189,7 @@ fn openai_expander_options(binding: &ExpanderBinding) -> ChatCompletionRequestOp
 
 fn llama_cpp_expander_options(binding: &ExpanderBinding) -> ChatCompletionRequestOptions {
     ChatCompletionRequestOptions {
-        output_mode: TextInferenceOutputMode::Text,
+        output_mode: ChatCompletionOutputMode::Text,
         max_tokens: Some(binding.max_tokens),
         seed: Some(binding.sampling.seed),
         temperature: Some(binding.sampling.temperature),

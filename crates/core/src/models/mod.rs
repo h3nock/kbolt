@@ -19,7 +19,7 @@ pub(crate) use expander::{normalize_query_text, Expander};
 pub(crate) use inference::build_inference_clients;
 pub(crate) use reranker::Reranker;
 
-use gateway::{resolve_inference_gateway_bindings, GatewayProviderKind, ProviderDeployment};
+use gateway::{resolve_inference_gateway_bindings, ProviderDeployment};
 use http::HttpJsonClient;
 
 pub fn status(config: &Config) -> Result<ModelStatus> {
@@ -50,25 +50,18 @@ fn readiness_for_binding(profile: &str, deployment: &ProviderDeployment) -> Mode
         deployment.timeout_ms,
         0,
         deployment.operation.as_str(),
-        provider_kind_label(deployment.kind),
+        deployment.kind.as_str(),
     );
     let readiness = client.probe_readiness();
     ModelInfo {
         configured: true,
         ready: readiness.ready,
         profile: Some(profile.to_string()),
-        kind: Some(provider_kind_label(deployment.kind).to_string()),
+        kind: Some(deployment.kind.as_str().to_string()),
         operation: Some(deployment.operation.as_str().to_string()),
         model: Some(deployment.model.clone()),
         endpoint: Some(deployment.base_url.clone()),
         issue: readiness.issue,
-    }
-}
-
-fn provider_kind_label(kind: GatewayProviderKind) -> &'static str {
-    match kind {
-        GatewayProviderKind::LlamaCppServer => "llama_cpp_server",
-        GatewayProviderKind::OpenAiCompatible => "openai_compatible",
     }
 }
 
