@@ -3,11 +3,10 @@ pub mod args;
 use std::path::Path;
 
 use kbolt_core::engine::Engine;
-use kbolt_core::ModelPullEvent;
 use kbolt_core::Result;
 use kbolt_types::{
     ActiveSpaceSource, AddCollectionRequest, AddScheduleRequest, EvalImportReport, EvalRunReport,
-    GetRequest, KboltError, Locator, MultiGetRequest, OmitReason, RemoveScheduleRequest,
+    GetRequest, KboltError, Locator, ModelInfo, MultiGetRequest, OmitReason, RemoveScheduleRequest,
     ScheduleAddResponse, ScheduleBackend, ScheduleInterval, ScheduleIntervalUnit,
     ScheduleRunResult, ScheduleScope, ScheduleState, ScheduleStatusResponse, ScheduleTrigger,
     ScheduleWeekday, SearchMode, SearchPipeline, SearchPipelineNotice, SearchPipelineStep,
@@ -435,59 +434,13 @@ impl CliAdapter {
         lines.push("models:".to_string());
 
         for (label, info) in [
-            ("embedder", status.embedder),
-            ("reranker", status.reranker),
-            ("expander", status.expander),
+            ("embedder", &status.embedder),
+            ("reranker", &status.reranker),
+            ("expander", &status.expander),
         ] {
-            let availability = format_model_availability(info.downloaded, info.path.is_some());
-            let mut line = format!("- {label}: {} ({availability})", info.name);
-            if let Some(size_bytes) = info.size_bytes {
-                line.push_str(&format!(", size_bytes: {size_bytes}"));
-            }
-            if let Some(path) = info.path {
-                line.push_str(&format!(", path: {}", path.display()));
-            }
-            lines.push(line);
+            lines.push(format!("- {label}: {}", format_model_binding_summary(info)));
         }
 
-        Ok(lines.join("\n"))
-    }
-
-    pub fn models_pull(&self) -> Result<String> {
-        let mut lines = Vec::new();
-        let report = self.engine.pull_models_with_progress(|event| match event {
-            ModelPullEvent::DownloadStarted { role, model } => {
-                lines.push(format!("downloading {role}: {model}"));
-            }
-            ModelPullEvent::DownloadCompleted { role, model, bytes } => {
-                lines.push(format!("downloaded {role}: {model} ({bytes} bytes)"));
-            }
-            ModelPullEvent::AlreadyPresent { role, model, bytes } => {
-                lines.push(format!("already present {role}: {model} ({bytes} bytes)"));
-            }
-        })?;
-
-        lines.push(format!("downloaded: {}", report.downloaded.len()));
-        lines.push("downloaded_models:".to_string());
-        if report.downloaded.is_empty() {
-            lines.push("- none".to_string());
-        } else {
-            for model in report.downloaded {
-                lines.push(format!("- {model}"));
-            }
-        }
-
-        lines.push(format!("already_present: {}", report.already_present.len()));
-        lines.push("already_present_models:".to_string());
-        if report.already_present.is_empty() {
-            lines.push("- none".to_string());
-        } else {
-            for model in report.already_present {
-                lines.push(format!("- {model}"));
-            }
-        }
-
-        lines.push(format!("total_bytes: {}", report.total_bytes));
         Ok(lines.join("\n"))
     }
 
@@ -678,28 +631,16 @@ impl CliAdapter {
         lines.push(format!("models_bytes: {}", status.disk_usage.models_bytes));
         lines.push(format!("total_bytes: {}", status.disk_usage.total_bytes));
         lines.push(format!(
-            "model_embedder: {} ({})",
-            status.models.embedder.name,
-            format_model_availability(
-                status.models.embedder.downloaded,
-                status.models.embedder.path.is_some(),
-            )
+            "model_embedder: {}",
+            format_model_binding_summary(&status.models.embedder)
         ));
         lines.push(format!(
-            "model_reranker: {} ({})",
-            status.models.reranker.name,
-            format_model_availability(
-                status.models.reranker.downloaded,
-                status.models.reranker.path.is_some(),
-            )
+            "model_reranker: {}",
+            format_model_binding_summary(&status.models.reranker)
         ));
         lines.push(format!(
-            "model_expander: {} ({})",
-            status.models.expander.name,
-            format_model_availability(
-                status.models.expander.downloaded,
-                status.models.expander.path.is_some(),
-            )
+            "model_expander: {}",
+            format_model_binding_summary(&status.models.expander)
         ));
         lines.push(format!("cache_dir: {}", status.cache_dir.display()));
         lines.push(format!("config_dir: {}", status.config_dir.display()));
@@ -834,14 +775,35 @@ fn format_search_mode(mode: &SearchMode) -> &'static str {
     }
 }
 
-fn format_model_availability(downloaded: bool, has_local_path: bool) -> &'static str {
-    if downloaded {
-        "downloaded"
-    } else if has_local_path {
-        "missing"
+fn format_model_binding_summary(info: &ModelInfo) -> String {
+    let mut parts = vec![if !info.configured {
+        "unconfigured".to_string()
+    } else if info.ready {
+        "ready".to_string()
     } else {
-        "not_applicable"
+        "not_ready".to_string()
+    }];
+
+    if let Some(profile) = info.profile.as_deref() {
+        parts.push(format!("profile={profile}"));
     }
+    if let Some(kind) = info.kind.as_deref() {
+        parts.push(format!("kind={kind}"));
+    }
+    if let Some(operation) = info.operation.as_deref() {
+        parts.push(format!("operation={operation}"));
+    }
+    if let Some(model) = info.model.as_deref() {
+        parts.push(format!("model={model}"));
+    }
+    if let Some(endpoint) = info.endpoint.as_deref() {
+        parts.push(format!("endpoint={endpoint}"));
+    }
+    if let Some(issue) = info.issue.as_deref() {
+        parts.push(format!("issue={issue}"));
+    }
+
+    parts.join(" | ")
 }
 
 fn format_search_pipeline(pipeline: &SearchPipeline) -> String {
@@ -873,7 +835,7 @@ fn format_search_pipeline_notice(notice: &SearchPipelineNotice) -> String {
     };
     let reason = match notice.reason {
         SearchPipelineUnavailableReason::NotConfigured => "not configured",
-        SearchPipelineUnavailableReason::ModelNotAvailable => "required model not downloaded",
+        SearchPipelineUnavailableReason::ModelNotAvailable => "required provider is not ready",
     };
     format!("{step} unavailable: {reason}")
 }
@@ -1464,26 +1426,23 @@ mod tests {
     }
 
     #[test]
-    fn models_list_reports_configured_models() {
+    fn models_list_reports_role_binding_readiness() {
         with_isolated_xdg_dirs(|| {
             let engine = Engine::new(None).expect("create engine");
             let adapter = CliAdapter::new(engine);
-            let embed_model = adapter.engine.config().models.embedder.id.clone();
-            let reranker_model = adapter.engine.config().models.reranker.id.clone();
-            let expander_model = adapter.engine.config().models.expander.id.clone();
 
             let output = adapter.models_list().expect("list models");
             assert!(output.contains("models:"), "unexpected output: {output}");
             assert!(
-                output.contains(&format!("- embedder: {embed_model} (not_applicable)")),
+                output.contains("- embedder: unconfigured"),
                 "unexpected output: {output}"
             );
             assert!(
-                output.contains(&format!("- reranker: {reranker_model} (not_applicable)")),
+                output.contains("- reranker: unconfigured"),
                 "unexpected output: {output}"
             );
             assert!(
-                output.contains(&format!("- expander: {expander_model} (not_applicable)")),
+                output.contains("- expander: unconfigured"),
                 "unexpected output: {output}"
             );
         });

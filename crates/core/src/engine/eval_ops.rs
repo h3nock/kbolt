@@ -245,10 +245,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::config::{
-        ChunkingConfig, Config, EmbeddingConfig, InferenceConfig, ModelConfig, ModelProvider,
-        ModelSourceConfig, RankingConfig, ReapingConfig,
-    };
+    use crate::config::{ChunkingConfig, Config, RankingConfig, ReapingConfig};
     use crate::models::{Embedder, Expander};
     use crate::storage::Storage;
     use kbolt_types::{AddCollectionRequest, SearchMode, UpdateOptions};
@@ -682,34 +679,6 @@ judgments = [{ path = "rust/guides/traits.md", relevance = 1 }]
             default_space: None,
             providers: std::collections::HashMap::new(),
             roles: crate::config::RoleBindingsConfig::default(),
-            models: ModelConfig {
-                embedder: ModelSourceConfig {
-                    provider: ModelProvider::HuggingFace,
-                    id: "embed-model".to_string(),
-                    revision: None,
-                },
-                reranker: ModelSourceConfig {
-                    provider: ModelProvider::HuggingFace,
-                    id: "reranker-model".to_string(),
-                    revision: None,
-                },
-                expander: ModelSourceConfig {
-                    provider: ModelProvider::HuggingFace,
-                    id: "expander-model".to_string(),
-                    revision: None,
-                },
-            },
-            embeddings: embedder
-                .as_ref()
-                .map(|_| EmbeddingConfig::OpenAiCompatible {
-                    model: "embed-model".to_string(),
-                    base_url: "https://example.test/v1".to_string(),
-                    api_key_env: None,
-                    timeout_ms: 30_000,
-                    batch_size: 32,
-                    max_retries: 0,
-                }),
-            inference: InferenceConfig::default(),
             reaping: ReapingConfig { days: 7 },
             chunking: ChunkingConfig::default(),
             ranking: RankingConfig::default(),

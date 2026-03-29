@@ -226,7 +226,6 @@ pub enum IgnoreCommand {
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum ModelsCommand {
     List,
-    Pull,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]

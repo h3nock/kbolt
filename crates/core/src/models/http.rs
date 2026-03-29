@@ -12,6 +12,7 @@ const MAX_RETRY_AFTER_SECONDS: u64 = 30;
 #[derive(Debug, Clone, Copy)]
 pub(super) enum HttpOperation {
     Embedding,
+    Reranking,
     ChatCompletion,
 }
 
@@ -19,6 +20,7 @@ impl HttpOperation {
     fn label(self) -> &'static str {
         match self {
             Self::Embedding => "embedding",
+            Self::Reranking => "reranking",
             Self::ChatCompletion => "chat completion",
         }
     }
@@ -32,6 +34,12 @@ pub(super) struct HttpJsonClient {
     max_retries: u32,
     api_key_scope: &'static str,
     provider_name: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct HttpEndpointReadiness {
+    pub ready: bool,
+    pub issue: Option<String>,
 }
 
 impl HttpJsonClient {
@@ -52,6 +60,41 @@ impl HttpJsonClient {
             max_retries,
             api_key_scope,
             provider_name,
+        }
+    }
+
+    pub(super) fn probe_readiness(&self) -> HttpEndpointReadiness {
+        let endpoint = self.base_url.trim_end_matches('/').to_string();
+        let mut request = self.agent.get(&endpoint);
+
+        if let Some(api_key_env) = self.api_key_env.as_deref() {
+            let api_key = match std::env::var(api_key_env) {
+                Ok(value) => value,
+                Err(_) => {
+                    return HttpEndpointReadiness {
+                        ready: false,
+                        issue: Some(format!(
+                            "{} API key env var is not set: {api_key_env}",
+                            self.api_key_scope
+                        )),
+                    };
+                }
+            };
+            request = request.set("authorization", &format!("Bearer {api_key}"));
+        }
+
+        match request.call() {
+            Ok(_) | Err(ureq::Error::Status(_, _)) => HttpEndpointReadiness {
+                ready: true,
+                issue: None,
+            },
+            Err(ureq::Error::Transport(err)) => HttpEndpointReadiness {
+                ready: false,
+                issue: Some(format!(
+                    "{} endpoint is unreachable: {err}",
+                    self.provider_name
+                )),
+            },
         }
     }
 

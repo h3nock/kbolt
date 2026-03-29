@@ -1,31 +1,19 @@
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use kbolt_types::KboltError;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::config::{
-    EmbeddingConfig, ExpanderInferenceConfig, ExpanderInferenceProvider,
-    ExpanderLocalLlamaSamplingConfig, LlamaFlashAttentionMode, ModelConfig, TextInferenceConfig,
-    TextInferenceOutputMode, TextInferenceProvider,
-};
-use crate::models::artifacts::resolve_file_with_extension;
-use crate::models::chat::HttpChatClient;
+use crate::config::{Config, ProviderOperation, TextInferenceOutputMode};
+use crate::models::chat::{ChatCompletionRequestOptions, HttpChatClient};
 use crate::models::completion::CompletionClient;
+use crate::models::gateway::{
+    resolve_inference_gateway_bindings, EmbedderBinding, ExpanderBinding, GatewayProviderKind,
+    InferenceGatewayBindings, ProviderDeployment, RerankerBinding,
+};
 use crate::models::http::{HttpJsonClient, HttpOperation};
-use crate::models::local_gguf::build_local_gguf_embedder;
-use crate::models::local_llama::{
-    build_local_llama_client_shared, build_local_llama_completion_client,
-    load_local_llama_model_and_template, LocalLlamaChatTemplateOptions,
-    LocalLlamaGenerationOptions, LocalLlamaSamplerConfig, LocalLlamaSamplingParams,
-};
-use crate::models::local_onnx::build_local_onnx_embedder;
-use crate::models::local_reranker::LocalQwen3Reranker;
-use crate::models::variants_expander::{ChatVariantsExpander, LocalLlamaVariantsExpander};
-use crate::models::{
-    resolve_model_artifact, Embedder, EmbeddingInputKind, Expander, ModelRole, Reranker,
-};
+use crate::models::variants_expander::ChatVariantsExpander;
+use crate::models::{Embedder, EmbeddingInputKind, Expander, Reranker};
 use crate::Result;
 
 #[cfg(test)]
@@ -45,433 +33,202 @@ struct ChatBackedReranker {
     chat: Arc<dyn CompletionClient>,
 }
 
-type LazyBuilder<T> = dyn Fn() -> Result<Arc<T>> + Send + Sync;
-
-struct LazyArc<T: ?Sized> {
-    label: &'static str,
-    value: Mutex<Option<Arc<T>>>,
-    builder: Box<LazyBuilder<T>>,
-}
-
-#[cfg(test)]
-pub(crate) fn build_embedder(
-    config: Option<&EmbeddingConfig>,
-) -> Result<Option<Arc<dyn Embedder>>> {
-    build_embedder_inner(config, None)
-}
-
-pub(crate) fn build_embedder_with_local_runtime(
-    config: Option<&EmbeddingConfig>,
-    model_config: &ModelConfig,
-    model_dir: &Path,
-) -> Result<Option<Arc<dyn Embedder>>> {
-    build_embedder_inner(
-        config,
-        Some(LocalRuntimeContext::new(model_config, model_dir)),
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn build_reranker(
-    config: Option<&TextInferenceConfig>,
-) -> Result<Option<Arc<dyn Reranker>>> {
-    build_reranker_inner(config, None)
-}
-
-pub(crate) fn build_reranker_with_local_runtime(
-    config: Option<&TextInferenceConfig>,
-    model_config: &ModelConfig,
-    model_dir: &Path,
-) -> Result<Option<Arc<dyn Reranker>>> {
-    build_reranker_inner(
-        config,
-        Some(LocalRuntimeContext::new(model_config, model_dir)),
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn build_expander(
-    config: Option<&ExpanderInferenceConfig>,
-) -> Result<Option<Arc<dyn Expander>>> {
-    build_expander_inner(config, None)
-}
-
-pub(crate) fn build_expander_with_local_runtime(
-    config: Option<&ExpanderInferenceConfig>,
-    model_config: &ModelConfig,
-    model_dir: &Path,
-) -> Result<Option<Arc<dyn Expander>>> {
-    build_expander_inner(
-        config,
-        Some(LocalRuntimeContext::new(model_config, model_dir)),
-    )
-}
-
 #[derive(Debug, Clone)]
-struct LocalRuntimeContext {
-    model_config: ModelConfig,
-    model_dir: PathBuf,
+struct HttpEndpointReranker {
+    client: HttpJsonClient,
+    model: String,
 }
 
-impl LocalRuntimeContext {
-    fn new(model_config: &ModelConfig, model_dir: &Path) -> Self {
-        Self {
-            model_config: model_config.clone(),
-            model_dir: model_dir.to_path_buf(),
-        }
+pub(crate) struct BuiltInferenceClients {
+    pub embedder: Option<Arc<dyn Embedder>>,
+    pub reranker: Option<Arc<dyn Reranker>>,
+    pub expander: Option<Arc<dyn Expander>>,
+}
+
+impl std::fmt::Debug for BuiltInferenceClients {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuiltInferenceClients")
+            .field("embedder", &self.embedder.is_some())
+            .field("reranker", &self.reranker.is_some())
+            .field("expander", &self.expander.is_some())
+            .finish()
     }
 }
 
-fn build_embedder_inner(
-    config: Option<&EmbeddingConfig>,
-    local_runtime: Option<LocalRuntimeContext>,
-) -> Result<Option<Arc<dyn Embedder>>> {
-    let Some(config) = config else {
-        return Ok(None);
-    };
-
-    let (provider_name, model, base_url, api_key_env, timeout_ms, max_retries, batch_size) =
-        match config {
-            EmbeddingConfig::OpenAiCompatible {
-                model,
-                base_url,
-                api_key_env,
-                timeout_ms,
-                max_retries,
-                batch_size,
-            } => (
-                "openai_compatible",
-                model.clone(),
-                base_url.as_str(),
-                api_key_env.as_deref(),
-                *timeout_ms,
-                *max_retries,
-                *batch_size,
-            ),
-            EmbeddingConfig::Voyage {
-                model,
-                base_url,
-                api_key_env,
-                timeout_ms,
-                max_retries,
-                batch_size,
-            } => (
-                "voyage",
-                model.clone(),
-                base_url.as_str(),
-                api_key_env.as_deref(),
-                *timeout_ms,
-                *max_retries,
-                *batch_size,
-            ),
-            EmbeddingConfig::LocalOnnx {
-                onnx_file,
-                tokenizer_file,
-                max_length,
-            } => {
-                let runtime = local_runtime.ok_or_else(|| {
-                    KboltError::Inference(
-                        "local_onnx embedder requires local runtime context".to_string(),
-                    )
-                })?;
-                let onnx_file = onnx_file.clone();
-                let tokenizer_file = tokenizer_file.clone();
-                let max_length = *max_length;
-                let embedder: Arc<dyn Embedder> =
-                    Arc::new(LazyArc::new("local onnx embedder", move || {
-                        let artifact = resolve_model_artifact(
-                            &runtime.model_config,
-                            &runtime.model_dir,
-                            ModelRole::Embedder,
-                        )?;
-                        let embedder = build_local_onnx_embedder(
-                            &artifact.path,
-                            onnx_file.as_deref(),
-                            tokenizer_file.as_deref(),
-                            max_length,
-                        )?;
-                        let embedder: Arc<dyn Embedder> = Arc::new(embedder);
-                        Ok(embedder)
-                    }));
-                return Ok(Some(embedder));
-            }
-            EmbeddingConfig::LocalGguf {
-                model_file,
-                batch_size,
-                flash_attention,
-                n_threads,
-                n_threads_batch,
-            } => {
-                let runtime = local_runtime.ok_or_else(|| {
-                    KboltError::Inference(
-                        "local_gguf embedder requires local runtime context".to_string(),
-                    )
-                })?;
-                let model_file = model_file.clone();
-                let batch_size = *batch_size;
-                let flash_attention = *flash_attention;
-                let n_threads = *n_threads;
-                let n_threads_batch = *n_threads_batch;
-                let embedder: Arc<dyn Embedder> =
-                    Arc::new(LazyArc::new("local gguf embedder", move || {
-                        build_local_gguf_embedder_with_runtime(
-                            &runtime.model_config,
-                            &runtime.model_dir,
-                            model_file.as_deref(),
-                            batch_size,
-                            flash_attention,
-                            n_threads,
-                            n_threads_batch,
-                        )
-                    }));
-                return Ok(Some(embedder));
-            }
-        };
-    let client = HttpJsonClient::new(
-        base_url,
-        api_key_env,
-        timeout_ms,
-        max_retries,
-        "embedding",
-        provider_name,
-    );
-    let embedder: Arc<dyn Embedder> = Arc::new(HttpApiEmbedder {
-        client,
-        model,
-        batch_size,
-    });
-    Ok(Some(embedder))
+pub(crate) fn build_inference_clients(config: &Config) -> Result<BuiltInferenceClients> {
+    let bindings = resolve_inference_gateway_bindings(config)?;
+    build_provider_bound_clients(&bindings)
 }
 
-fn build_reranker_inner(
-    config: Option<&TextInferenceConfig>,
-    local_runtime: Option<LocalRuntimeContext>,
-) -> Result<Option<Arc<dyn Reranker>>> {
-    let Some(config) = config else {
-        return Ok(None);
-    };
-
-    let reranker: Arc<dyn Reranker> = match &config.provider {
-        TextInferenceProvider::LocalLlama {
-            model_file,
-            n_ctx,
-            n_gpu_layers,
-            flash_attention,
-            ..
-        } => {
-            let runtime = local_runtime.ok_or_else(|| {
-                KboltError::Inference(
-                    "local_llama reranker requires local runtime context".to_string(),
-                )
-            })?;
-            let model_file = model_file.clone();
-            let n_ctx = *n_ctx;
-            let n_gpu_layers = *n_gpu_layers;
-            let flash_attention = *flash_attention;
-            Arc::new(LazyArc::new("local qwen3 reranker", move || {
-                build_local_qwen3_reranker(
-                    &runtime.model_config,
-                    &runtime.model_dir,
-                    model_file.as_deref(),
-                    n_ctx,
-                    n_gpu_layers,
-                    flash_attention,
-                )
-            }))
-        }
-        TextInferenceProvider::OpenAiCompatible { .. } => Arc::new(ChatBackedReranker {
-            chat: build_completion_client_for_role(
-                &config.provider,
-                local_runtime,
-                ModelRole::Reranker,
-                "reranker",
-            )?,
-        }),
-    };
-    Ok(Some(reranker))
+fn build_provider_bound_clients(
+    bindings: &InferenceGatewayBindings,
+) -> Result<BuiltInferenceClients> {
+    Ok(BuiltInferenceClients {
+        embedder: bindings
+            .embedder
+            .as_ref()
+            .map(build_embedder_from_binding)
+            .transpose()?,
+        reranker: bindings
+            .reranker
+            .as_ref()
+            .map(build_reranker_from_binding)
+            .transpose()?,
+        expander: bindings
+            .expander
+            .as_ref()
+            .map(build_expander_from_binding)
+            .transpose()?,
+    })
 }
 
-fn build_expander_inner(
-    config: Option<&ExpanderInferenceConfig>,
-    local_runtime: Option<LocalRuntimeContext>,
-) -> Result<Option<Arc<dyn Expander>>> {
-    let Some(config) = config else {
-        return Ok(None);
-    };
-
-    let expander: Arc<dyn Expander> = match &config.provider {
-        ExpanderInferenceProvider::OpenAiCompatible {
-            model,
-            base_url,
-            api_key_env,
-            timeout_ms,
-            max_retries,
-        } => Arc::new(ChatVariantsExpander::new(Arc::new(HttpChatClient::new(
-            base_url,
-            api_key_env.as_deref(),
-            *timeout_ms,
-            *max_retries,
-            model,
-            TextInferenceOutputMode::Text,
-            "openai_compatible",
-        )))),
-        ExpanderInferenceProvider::LocalLlama {
-            model_file,
-            max_tokens,
-            n_ctx,
-            n_gpu_layers,
-            flash_attention,
-            enable_thinking,
-            reasoning_format,
-            chat_template_kwargs,
-            sampling,
-        } => {
-            let runtime = local_runtime.ok_or_else(|| {
-                KboltError::Inference(
-                    "local_llama expander requires local runtime context".to_string(),
-                )
-            })?;
-            let model_file = model_file.clone();
-            let max_tokens = *max_tokens;
-            let n_ctx = *n_ctx;
-            let n_gpu_layers = *n_gpu_layers;
-            let flash_attention = *flash_attention;
-            let enable_thinking = *enable_thinking;
-            let reasoning_format = reasoning_format.clone();
-            let chat_template_kwargs = chat_template_kwargs.clone();
-            let sampling = sampling.clone();
-            Arc::new(LazyArc::new("local llama expander", move || {
-                build_local_llama_variants_expander(
-                    &runtime.model_config,
-                    &runtime.model_dir,
-                    model_file.as_deref(),
-                    max_tokens,
-                    n_ctx,
-                    n_gpu_layers,
-                    flash_attention,
-                    enable_thinking,
-                    reasoning_format.clone(),
-                    chat_template_kwargs.clone(),
-                    &sampling,
-                )
-            }))
-        }
-    };
-    Ok(Some(expander))
-}
-
-fn build_completion_client_for_role(
-    provider: &TextInferenceProvider,
-    local_runtime: Option<LocalRuntimeContext>,
-    role: ModelRole,
-    role_label: &str,
-) -> Result<Arc<dyn CompletionClient>> {
-    match provider {
-        TextInferenceProvider::OpenAiCompatible {
-            output_mode,
-            model,
-            base_url,
-            api_key_env,
-            timeout_ms,
-            max_retries,
-        } => Ok(Arc::new(HttpChatClient::new(
-            base_url,
-            api_key_env.as_deref(),
-            *timeout_ms,
-            *max_retries,
-            model,
-            output_mode.clone(),
-            "openai_compatible",
-        ))),
-        TextInferenceProvider::LocalLlama {
-            model_file,
-            max_tokens,
-            n_ctx,
-            n_gpu_layers,
-            ..
-        } => {
-            let runtime = local_runtime.ok_or_else(|| {
-                KboltError::Inference(format!(
-                    "local_llama {role_label} requires local runtime context"
-                ))
-            })?;
-            let model_file = model_file.clone();
-            let max_tokens = *max_tokens;
-            let n_ctx = *n_ctx;
-            let n_gpu_layers = *n_gpu_layers;
-            Ok(Arc::new(LazyArc::new("local llama client", move || {
-                build_local_llama_client(
-                    &runtime.model_config,
-                    &runtime.model_dir,
-                    role,
-                    model_file.as_deref(),
-                    max_tokens,
-                    n_ctx,
-                    n_gpu_layers,
-                )
-            })))
-        }
+fn build_embedder_from_binding(binding: &EmbedderBinding) -> Result<Arc<dyn Embedder>> {
+    if binding.deployment.operation != ProviderOperation::Embedding {
+        return Err(KboltError::Inference(format!(
+            "provider profile '{}' uses incompatible operation '{}' for embedder bindings",
+            binding.provider_name,
+            binding.deployment.operation.as_str()
+        ))
+        .into());
     }
+
+    Ok(Arc::new(HttpApiEmbedder {
+        client: HttpJsonClient::new(
+            &binding.deployment.base_url,
+            binding.deployment.api_key_env.as_deref(),
+            binding.deployment.timeout_ms,
+            binding.deployment.max_retries,
+            "embedding",
+            provider_kind_label(binding.deployment.kind),
+        ),
+        model: binding.deployment.model.clone(),
+        batch_size: binding.batch_size,
+    }))
+}
+
+fn build_reranker_from_binding(binding: &RerankerBinding) -> Result<Arc<dyn Reranker>> {
+    match binding.deployment.operation {
+        ProviderOperation::Reranking => Ok(Arc::new(HttpEndpointReranker {
+            client: HttpJsonClient::new(
+                &binding.deployment.base_url,
+                binding.deployment.api_key_env.as_deref(),
+                binding.deployment.timeout_ms,
+                binding.deployment.max_retries,
+                "reranking",
+                provider_kind_label(binding.deployment.kind),
+            ),
+            model: binding.deployment.model.clone(),
+        })),
+        ProviderOperation::ChatCompletion => Ok(Arc::new(ChatBackedReranker {
+            chat: Arc::new(build_chat_client(
+                &binding.deployment,
+                ChatCompletionRequestOptions::json_object(),
+            )),
+        })),
+        ProviderOperation::Embedding => Err(KboltError::Inference(format!(
+            "provider profile '{}' uses incompatible operation 'embedding' for reranker bindings",
+            binding.provider_name
+        ))
+        .into()),
+    }
+}
+
+fn build_expander_from_binding(binding: &ExpanderBinding) -> Result<Arc<dyn Expander>> {
+    if binding.deployment.operation != ProviderOperation::ChatCompletion {
+        return Err(KboltError::Inference(format!(
+            "provider profile '{}' uses incompatible operation '{}' for expander bindings",
+            binding.provider_name,
+            binding.deployment.operation.as_str()
+        ))
+        .into());
+    }
+
+    let options = match binding.deployment.kind {
+        GatewayProviderKind::OpenAiCompatible => {
+            validate_openai_expander_sampling(binding)?;
+            openai_expander_options(binding)
+        }
+        GatewayProviderKind::LlamaCppServer => llama_cpp_expander_options(binding),
+    };
+
+    Ok(Arc::new(ChatVariantsExpander::new(Arc::new(
+        build_chat_client(&binding.deployment, options),
+    ))))
+}
+
+fn build_chat_client(
+    deployment: &ProviderDeployment,
+    options: ChatCompletionRequestOptions,
+) -> HttpChatClient {
+    HttpChatClient::new(
+        &deployment.base_url,
+        deployment.api_key_env.as_deref(),
+        deployment.timeout_ms,
+        deployment.max_retries,
+        &deployment.model,
+        options,
+        provider_kind_label(deployment.kind),
+    )
+}
+
+fn provider_kind_label(kind: GatewayProviderKind) -> &'static str {
+    match kind {
+        GatewayProviderKind::LlamaCppServer => "llama_cpp_server",
+        GatewayProviderKind::OpenAiCompatible => "openai_compatible",
+    }
+}
+
+fn openai_expander_options(binding: &ExpanderBinding) -> ChatCompletionRequestOptions {
+    ChatCompletionRequestOptions {
+        output_mode: TextInferenceOutputMode::Text,
+        max_tokens: Some(binding.max_tokens),
+        seed: Some(binding.sampling.seed),
+        temperature: Some(binding.sampling.temperature),
+        top_k: None,
+        top_p: Some(binding.sampling.top_p),
+        min_p: None,
+        repeat_last_n: None,
+        repeat_penalty: None,
+        frequency_penalty: Some(binding.sampling.frequency_penalty),
+        presence_penalty: Some(binding.sampling.presence_penalty),
+    }
+}
+
+fn llama_cpp_expander_options(binding: &ExpanderBinding) -> ChatCompletionRequestOptions {
+    ChatCompletionRequestOptions {
+        output_mode: TextInferenceOutputMode::Text,
+        max_tokens: Some(binding.max_tokens),
+        seed: Some(binding.sampling.seed),
+        temperature: Some(binding.sampling.temperature),
+        top_k: Some(binding.sampling.top_k),
+        top_p: Some(binding.sampling.top_p),
+        min_p: Some(binding.sampling.min_p),
+        repeat_last_n: Some(binding.sampling.repeat_last_n),
+        repeat_penalty: Some(binding.sampling.repeat_penalty),
+        frequency_penalty: Some(binding.sampling.frequency_penalty),
+        presence_penalty: Some(binding.sampling.presence_penalty),
+    }
+}
+
+fn validate_openai_expander_sampling(binding: &ExpanderBinding) -> Result<()> {
+    let defaults = crate::config::ExpanderSamplingConfig::default();
+    if binding.sampling.top_k != defaults.top_k
+        || binding.sampling.min_p != defaults.min_p
+        || binding.sampling.repeat_last_n != defaults.repeat_last_n
+        || binding.sampling.repeat_penalty != defaults.repeat_penalty
+    {
+        return Err(KboltError::Config(format!(
+            "provider profile '{}' uses openai_compatible chat completion for expander bindings, which does not support top_k, min_p, repeat_last_n, or repeat_penalty overrides",
+            binding.provider_name
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 impl Embedder for HttpApiEmbedder {
     fn embed_batch(&self, _kind: EmbeddingInputKind, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         embed_with_http_api(&self.client, &self.model, self.batch_size, texts)
-    }
-}
-
-impl Embedder for LazyArc<dyn Embedder> {
-    fn embed_batch(&self, kind: EmbeddingInputKind, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        let embedder = self.get()?;
-        embedder.embed_batch(kind, texts)
-    }
-}
-
-impl CompletionClient for LazyArc<dyn CompletionClient> {
-    fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
-        let client = self.get()?;
-        client.complete(system_prompt, user_prompt)
-    }
-}
-
-impl Reranker for LazyArc<dyn Reranker> {
-    fn rerank(&self, query: &str, docs: &[String]) -> Result<Vec<f32>> {
-        let reranker = self.get()?;
-        reranker.rerank(query, docs)
-    }
-}
-
-impl Expander for LazyArc<dyn Expander> {
-    fn expand(&self, query: &str, max_variants: usize) -> Result<Vec<String>> {
-        let expander = self.get()?;
-        expander.expand(query, max_variants)
-    }
-}
-
-impl<T: ?Sized> LazyArc<T> {
-    fn new(
-        label: &'static str,
-        builder: impl Fn() -> Result<Arc<T>> + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            label,
-            value: Mutex::new(None),
-            builder: Box::new(builder),
-        }
-    }
-
-    fn get(&self) -> Result<Arc<T>> {
-        let mut guard = self
-            .value
-            .lock()
-            .map_err(|_| KboltError::Inference(format!("{} mutex poisoned", self.label)))?;
-        if let Some(value) = guard.as_ref() {
-            return Ok(Arc::clone(value));
-        }
-
-        let built = (self.builder)()?;
-        *guard = Some(Arc::clone(&built));
-        Ok(built)
     }
 }
 
@@ -507,6 +264,48 @@ impl Reranker for ChatBackedReranker {
     }
 }
 
+impl Reranker for HttpEndpointReranker {
+    fn rerank(&self, query: &str, docs: &[String]) -> Result<Vec<f32>> {
+        if docs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let payload = json!({
+            "model": self.model,
+            "query": query,
+            "documents": docs,
+            "top_n": docs.len(),
+            "return_text": false,
+        });
+        let mut scored = self
+            .client
+            .post_json::<RerankResponseEnvelope>("rerank", &payload, HttpOperation::Reranking)?
+            .into_items()?;
+        if scored.len() != docs.len() {
+            return Err(KboltError::Inference(format!(
+                "rerank response size mismatch: expected {}, got {}",
+                docs.len(),
+                scored.len()
+            ))
+            .into());
+        }
+
+        scored.sort_by_key(|item| item.index);
+        let mut scores = Vec::with_capacity(scored.len());
+        for (expected, item) in scored.into_iter().enumerate() {
+            if item.index != expected {
+                return Err(KboltError::Inference(format!(
+                    "rerank response index mismatch: expected {expected}, got {}",
+                    item.index
+                ))
+                .into());
+            }
+            scores.push(item.score);
+        }
+        Ok(scores)
+    }
+}
+
 fn embed_with_http_api(
     client: &HttpJsonClient,
     model: &str,
@@ -529,126 +328,6 @@ fn embed_with_http_api(
         vectors.extend(response_vectors);
     }
     Ok(vectors)
-}
-
-fn build_local_gguf_embedder_with_runtime(
-    model_config: &ModelConfig,
-    model_dir: &Path,
-    model_file: Option<&str>,
-    batch_size: usize,
-    flash_attention: LlamaFlashAttentionMode,
-    n_threads: Option<u32>,
-    n_threads_batch: Option<u32>,
-) -> Result<Arc<dyn Embedder>> {
-    let artifact = resolve_model_artifact(model_config, model_dir, ModelRole::Embedder)?;
-    let gguf_path =
-        resolve_file_with_extension(&artifact.path, model_file, "gguf", "embeddings.model_file")?;
-    let embedder = build_local_gguf_embedder(
-        &gguf_path,
-        batch_size,
-        flash_attention,
-        n_threads,
-        n_threads_batch,
-    )?;
-    Ok(Arc::new(embedder))
-}
-
-fn build_local_llama_client(
-    model_config: &ModelConfig,
-    model_dir: &Path,
-    role: ModelRole,
-    model_file: Option<&str>,
-    max_tokens: usize,
-    n_ctx: u32,
-    n_gpu_layers: Option<u32>,
-) -> Result<Arc<dyn CompletionClient>> {
-    let artifact = resolve_model_artifact(model_config, model_dir, role)?;
-    let gguf_path = resolve_file_with_extension(
-        &artifact.path,
-        model_file,
-        "gguf",
-        local_llama_model_field(role),
-    )?;
-    build_local_llama_completion_client(&gguf_path, max_tokens, n_ctx, n_gpu_layers)
-}
-
-fn local_llama_model_field(role: ModelRole) -> &'static str {
-    match role {
-        ModelRole::Reranker => "inference.reranker.model_file",
-        ModelRole::Expander => "inference.expander.model_file",
-        ModelRole::Embedder => "inference.model_file",
-    }
-}
-
-fn build_local_qwen3_reranker(
-    model_config: &ModelConfig,
-    model_dir: &Path,
-    model_file: Option<&str>,
-    n_ctx: u32,
-    n_gpu_layers: Option<u32>,
-    flash_attention: LlamaFlashAttentionMode,
-) -> Result<Arc<dyn Reranker>> {
-    let artifact = resolve_model_artifact(model_config, model_dir, ModelRole::Reranker)?;
-    let gguf_path = resolve_file_with_extension(
-        &artifact.path,
-        model_file,
-        "gguf",
-        "inference.reranker.model_file",
-    )?;
-
-    let (model, _) = load_local_llama_model_and_template(&gguf_path, n_gpu_layers)?;
-
-    Ok(Arc::new(LocalQwen3Reranker::new(
-        model,
-        n_ctx,
-        flash_attention,
-    )))
-}
-
-fn build_local_llama_variants_expander(
-    model_config: &ModelConfig,
-    model_dir: &Path,
-    model_file: Option<&str>,
-    max_tokens: usize,
-    n_ctx: u32,
-    n_gpu_layers: Option<u32>,
-    flash_attention: LlamaFlashAttentionMode,
-    enable_thinking: bool,
-    reasoning_format: Option<String>,
-    chat_template_kwargs: Option<String>,
-    sampling: &ExpanderLocalLlamaSamplingConfig,
-) -> Result<Arc<dyn Expander>> {
-    let artifact = resolve_model_artifact(model_config, model_dir, ModelRole::Expander)?;
-    let gguf_path = resolve_file_with_extension(
-        &artifact.path,
-        model_file,
-        "gguf",
-        "inference.expander.model_file",
-    )?;
-    let client = build_local_llama_client_shared(&gguf_path, max_tokens, n_ctx, n_gpu_layers)?;
-    let options = LocalLlamaGenerationOptions {
-        max_tokens: Some(max_tokens),
-        sampler: LocalLlamaSamplerConfig::Sample(LocalLlamaSamplingParams {
-            seed: sampling.seed,
-            temperature: sampling.temperature,
-            top_k: sampling.top_k,
-            top_p: sampling.top_p,
-            min_p: sampling.min_p,
-            repeat_last_n: sampling.repeat_last_n,
-            repeat_penalty: sampling.repeat_penalty,
-            frequency_penalty: sampling.frequency_penalty,
-            presence_penalty: sampling.presence_penalty,
-        }),
-        flash_attention,
-        template: LocalLlamaChatTemplateOptions {
-            use_oaicompat: true,
-            enable_thinking,
-            reasoning_format,
-            chat_template_kwargs,
-        },
-        ..LocalLlamaGenerationOptions::default()
-    };
-    Ok(Arc::new(LocalLlamaVariantsExpander::new(client, options)))
 }
 
 fn parse_json_payload<T>(label: &str, content: &str) -> Result<T>
@@ -676,6 +355,29 @@ enum EmbeddingResponseEnvelope {
 enum RerankerResponse {
     Scores(Vec<f32>),
     Wrapped { scores: Vec<f32> },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RerankResponseEnvelope {
+    Items(Vec<RerankItem>),
+    Wrapped { results: Vec<RerankItem> },
+}
+
+impl RerankResponseEnvelope {
+    fn into_items(self) -> Result<Vec<RerankItem>> {
+        let items = match self {
+            Self::Items(items) => items,
+            Self::Wrapped { results } => results,
+        };
+        if items.iter().any(|item| !item.score.is_finite()) {
+            return Err(KboltError::Inference(
+                "rerank response contains non-finite score".to_string(),
+            )
+            .into());
+        }
+        Ok(items)
+    }
 }
 
 impl RerankerResponse {
@@ -740,6 +442,12 @@ struct EmbeddingItem {
 }
 
 #[derive(Debug, Deserialize)]
+struct RerankItem {
+    index: usize,
+    score: f32,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum EmbeddingVector {
     Direct(Vec<f32>),
@@ -757,105 +465,29 @@ impl EmbeddingVector {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Barrier};
+    use std::path::PathBuf;
     use std::time::Duration;
 
-    use tempfile::tempdir;
-
     use super::*;
+    use crate::config::{
+        ChunkingConfig, Config, EmbedderRoleConfig, ExpanderRoleConfig, ExpanderSamplingConfig,
+        ProviderProfileConfig, RankingConfig, ReapingConfig, RerankerRoleConfig,
+        RoleBindingsConfig,
+    };
 
-    fn base_openai_config(base_url: String) -> EmbeddingConfig {
-        EmbeddingConfig::OpenAiCompatible {
-            model: "embed-model".to_string(),
-            base_url,
-            api_key_env: None,
-            timeout_ms: 5_000,
-            batch_size: 64,
-            max_retries: 0,
-        }
-    }
-
-    fn base_voyage_config(base_url: String) -> EmbeddingConfig {
-        EmbeddingConfig::Voyage {
-            model: "embed-model".to_string(),
-            base_url,
-            api_key_env: None,
-            timeout_ms: 5_000,
-            batch_size: 64,
-            max_retries: 0,
-        }
-    }
-
-    fn base_text_config(
-        base_url: String,
-        output_mode: TextInferenceOutputMode,
-    ) -> TextInferenceConfig {
-        TextInferenceConfig {
-            provider: TextInferenceProvider::OpenAiCompatible {
-                output_mode,
-                model: "text-model".to_string(),
-                base_url,
-                api_key_env: None,
-                timeout_ms: 5_000,
-                max_retries: 0,
-            },
-        }
-    }
-
-    fn base_expander_config(base_url: String) -> ExpanderInferenceConfig {
-        ExpanderInferenceConfig {
-            provider: ExpanderInferenceProvider::OpenAiCompatible {
-                model: "text-model".to_string(),
-                base_url,
-                api_key_env: None,
-                timeout_ms: 5_000,
-                max_retries: 0,
-            },
-        }
-    }
-
-    fn base_local_llama_text_config() -> TextInferenceConfig {
-        TextInferenceConfig {
-            provider: TextInferenceProvider::LocalLlama {
-                model_file: None,
-                max_tokens: 128,
-                n_ctx: 2048,
-                n_gpu_layers: Some(0),
-                flash_attention: LlamaFlashAttentionMode::Disabled,
-            },
-        }
-    }
-
-    fn base_local_gguf_embedding_config() -> EmbeddingConfig {
-        EmbeddingConfig::LocalGguf {
-            model_file: None,
-            batch_size: 4,
-            flash_attention: LlamaFlashAttentionMode::Disabled,
-            n_threads: Some(4),
-            n_threads_batch: Some(4),
-        }
-    }
-
-    fn test_model_config() -> ModelConfig {
-        ModelConfig {
-            embedder: crate::config::ModelSourceConfig {
-                provider: crate::config::ModelProvider::HuggingFace,
-                id: "embed-model".to_string(),
-                revision: None,
-            },
-            reranker: crate::config::ModelSourceConfig {
-                provider: crate::config::ModelProvider::HuggingFace,
-                id: "rerank-model".to_string(),
-                revision: None,
-            },
-            expander: crate::config::ModelSourceConfig {
-                provider: crate::config::ModelProvider::HuggingFace,
-                id: "expand-model".to_string(),
-                revision: None,
-            },
+    fn base_config() -> Config {
+        Config {
+            config_dir: PathBuf::from("/tmp/kbolt-config"),
+            cache_dir: PathBuf::from("/tmp/kbolt-cache"),
+            default_space: None,
+            providers: HashMap::new(),
+            roles: RoleBindingsConfig::default(),
+            reaping: ReapingConfig { days: 7 },
+            chunking: ChunkingConfig::default(),
+            ranking: RankingConfig::default(),
         }
     }
 
@@ -865,13 +497,13 @@ mod tests {
         let payload = body.to_string();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept client");
-
             let _ = read_full_request(&mut stream);
 
             let status_line = match status_code {
                 200 => "HTTP/1.1 200 OK",
+                401 => "HTTP/1.1 401 Unauthorized",
+                404 => "HTTP/1.1 404 Not Found",
                 429 => "HTTP/1.1 429 Too Many Requests",
-                400 => "HTTP/1.1 400 Bad Request",
                 500 => "HTTP/1.1 500 Internal Server Error",
                 other => panic!("unsupported status code in test server: {other}"),
             };
@@ -904,7 +536,6 @@ mod tests {
                 let status_line = match response_spec.status_code {
                     200 => "HTTP/1.1 200 OK",
                     429 => "HTTP/1.1 429 Too Many Requests",
-                    400 => "HTTP/1.1 400 Bad Request",
                     500 => "HTTP/1.1 500 Internal Server Error",
                     other => panic!("unsupported status code in test server: {other}"),
                 };
@@ -968,294 +599,61 @@ mod tests {
     }
 
     #[test]
-    fn build_embedder_returns_none_when_not_configured() {
-        let embedder = build_embedder(None).expect("build embedder");
-        assert!(embedder.is_none());
-    }
-
-    #[test]
-    fn openai_compatible_embedder_parses_openai_style_response() {
-        let body = r#"{
-  "data": [
-    {"index": 1, "embedding": [0.3, 0.4]},
-    {"index": 0, "embedding": [0.1, 0.2]}
-  ]
-}"#;
-        let base_url = serve_once(200, body);
-        let config = base_openai_config(base_url);
-        let embedder = build_embedder(Some(&config))
-            .expect("build embedder")
-            .expect("embedder should exist");
-
-        let vectors = embedder
-            .embed_batch(
-                EmbeddingInputKind::Document,
-                &["a".to_string(), "b".to_string()],
-            )
-            .expect("embed");
-        assert_eq!(vectors, vec![vec![0.1, 0.2], vec![0.3, 0.4]]);
-    }
-
-    #[test]
-    fn openai_compatible_embedder_parses_openai_style_response_without_index() {
-        let body = r#"{
-  "data": [
-    {"embedding": [0.51, 0.52]},
-    {"embedding": [0.61, 0.62]}
-  ]
-}"#;
-        let base_url = serve_once(200, body);
-        let config = base_openai_config(base_url);
-        let embedder = build_embedder(Some(&config))
-            .expect("build embedder")
-            .expect("embedder should exist");
-
-        let vectors = embedder
-            .embed_batch(
-                EmbeddingInputKind::Document,
-                &["a".to_string(), "b".to_string()],
-            )
-            .expect("embed");
-        assert_eq!(vectors, vec![vec![0.51, 0.52], vec![0.61, 0.62]]);
-    }
-
-    #[test]
-    fn openai_compatible_embedder_parses_wrapped_embedding_values() {
-        let body = r#"{
-  "data": [
-    {"index": 0, "embedding": {"values": [0.15, 0.25]}}
-  ]
-}"#;
-        let base_url = serve_once(200, body);
-        let config = base_openai_config(base_url);
-        let embedder = build_embedder(Some(&config))
-            .expect("build embedder")
-            .expect("embedder should exist");
-
-        let vectors = embedder
-            .embed_batch(EmbeddingInputKind::Document, &["a".to_string()])
-            .expect("embed");
-        assert_eq!(vectors, vec![vec![0.15, 0.25]]);
-    }
-
-    #[test]
-    fn voyage_embedder_parses_voyage_style_response() {
-        let body = r#"{
-  "embeddings": [
-    [0.11, 0.22],
-    [0.33, 0.44]
-  ]
-}"#;
-        let base_url = serve_once(200, body);
-        let config = base_voyage_config(base_url);
-        let embedder = build_embedder(Some(&config))
-            .expect("build embedder")
-            .expect("embedder should exist");
-
-        let vectors = embedder
-            .embed_batch(
-                EmbeddingInputKind::Document,
-                &["a".to_string(), "b".to_string()],
-            )
-            .expect("embed");
-        assert_eq!(vectors, vec![vec![0.11, 0.22], vec![0.33, 0.44]]);
-    }
-
-    #[test]
-    fn embedder_errors_when_api_key_env_is_missing() {
+    fn provider_profile_embedder_builds_and_embeds() {
         let body = r#"{"data":[{"index":0,"embedding":[0.1,0.2]}]}"#;
-        let base_url = serve_once(200, body);
-        let config = EmbeddingConfig::OpenAiCompatible {
-            model: "embed-model".to_string(),
-            base_url,
-            api_key_env: Some("KBOLT_TEST_MISSING_API_KEY".to_string()),
-            timeout_ms: 5_000,
+        let mut config = base_config();
+        config.providers.insert(
+            "remote_embed".to_string(),
+            ProviderProfileConfig::OpenAiCompatible {
+                operation: ProviderOperation::Embedding,
+                base_url: serve_once(200, body),
+                model: "embed-model".to_string(),
+                api_key_env: None,
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        );
+        config.roles.embedder = Some(EmbedderRoleConfig {
+            provider: "remote_embed".to_string(),
             batch_size: 64,
-            max_retries: 0,
-        };
-        let embedder: Arc<dyn Embedder> = build_embedder(Some(&config))
-            .expect("build embedder")
-            .expect("embedder should exist");
+        });
 
-        std::env::remove_var("KBOLT_TEST_MISSING_API_KEY");
-        let err = embedder
+        let built = build_inference_clients(&config).expect("build clients");
+        let embedder = built.embedder.expect("embedder should exist");
+        let vectors = embedder
             .embed_batch(EmbeddingInputKind::Document, &["hello".to_string()])
-            .expect_err("missing key should fail");
-        assert!(err
-            .to_string()
-            .contains("embedding API key env var is not set"));
+            .expect("embed");
+        assert_eq!(vectors, vec![vec![0.1, 0.2]]);
     }
 
     #[test]
-    fn local_onnx_embedder_requires_local_runtime_context() {
-        let config = EmbeddingConfig::LocalOnnx {
-            onnx_file: None,
-            tokenizer_file: None,
-            max_length: 256,
-        };
-        let err = match build_embedder(Some(&config)) {
-            Ok(_) => panic!("local runtime context should be required"),
-            Err(err) => err,
-        };
-        assert!(err
-            .to_string()
-            .contains("local_onnx embedder requires local runtime context"));
-    }
-
-    #[test]
-    fn local_onnx_embedder_initializes_lazily() {
-        let root = tempdir().expect("create tempdir");
-        let model_config = test_model_config();
-        let config = EmbeddingConfig::LocalOnnx {
-            onnx_file: None,
-            tokenizer_file: None,
-            max_length: 256,
-        };
-
-        let embedder = build_embedder_with_local_runtime(Some(&config), &model_config, root.path())
-            .expect("build embedder")
-            .expect("embedder should exist");
-        let err = embedder
-            .embed_batch(EmbeddingInputKind::Document, &["a".to_string()])
-            .expect_err("missing local model should fail on first use");
-        assert!(err.to_string().contains("model not available"));
-    }
-
-    #[test]
-    fn local_gguf_embedder_requires_local_runtime_context() {
-        let config = base_local_gguf_embedding_config();
-        let err = match build_embedder(Some(&config)) {
-            Ok(_) => panic!("local runtime context should be required"),
-            Err(err) => err,
-        };
-        assert!(err
-            .to_string()
-            .contains("local_gguf embedder requires local runtime context"));
-    }
-
-    #[test]
-    fn local_gguf_embedder_initializes_lazily() {
-        let root = tempfile::tempdir().expect("create tempdir");
-        let model_config = test_model_config();
-        let config = base_local_gguf_embedding_config();
-
-        let embedder = build_embedder_with_local_runtime(Some(&config), &model_config, root.path())
-            .expect("build embedder")
-            .expect("embedder should exist");
-        let err = embedder
-            .embed_batch(EmbeddingInputKind::Document, &["a".to_string()])
-            .expect_err("missing local model should fail on first use");
-        assert!(err.to_string().contains("model not available"));
-    }
-
-    #[test]
-    fn build_reranker_returns_none_when_inference_config_is_missing() {
-        let reranker = build_reranker(None).expect("build reranker");
-        assert!(reranker.is_none());
-    }
-
-    #[test]
-    fn local_llama_reranker_requires_local_runtime_context() {
-        let config = base_local_llama_text_config();
-        let err = match build_reranker(Some(&config)) {
-            Ok(_) => panic!("local runtime context should be required"),
-            Err(err) => err,
-        };
-        assert!(err
-            .to_string()
-            .contains("local_llama reranker requires local runtime context"));
-    }
-
-    #[test]
-    fn local_llama_reranker_initializes_lazily() {
-        let root = tempdir().expect("create tempdir");
-        let model_config = test_model_config();
-        let config = base_local_llama_text_config();
-
-        let reranker = build_reranker_with_local_runtime(Some(&config), &model_config, root.path())
-            .expect("build reranker");
-        let reranker = reranker.expect("reranker should exist");
-        let err = reranker
-            .rerank("query", &["doc".to_string()])
-            .expect_err("missing local model should fail on first use");
-        assert!(err.to_string().contains("model not available"));
-    }
-
-    #[test]
-    fn lazy_arc_reuses_cached_value() {
-        let build_calls = Arc::new(AtomicUsize::new(0));
-        let lazy = LazyArc::new("test lazy", {
-            let build_calls = Arc::clone(&build_calls);
-            move || {
-                build_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(Arc::new("ready".to_string()))
-            }
+    fn provider_profile_reranker_supports_native_rerank_endpoint() {
+        let body = r#"{"results":[{"index":1,"score":0.9},{"index":0,"score":0.2}]}"#;
+        let mut config = base_config();
+        config.providers.insert(
+            "local_rerank".to_string(),
+            ProviderProfileConfig::LlamaCppServer {
+                operation: ProviderOperation::Reranking,
+                base_url: serve_once(200, body),
+                model: "qwen3-reranker".to_string(),
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        );
+        config.roles.reranker = Some(RerankerRoleConfig {
+            provider: "local_rerank".to_string(),
         });
 
-        let first = lazy.get().expect("first get");
-        let second = lazy.get().expect("second get");
-
-        assert_eq!(build_calls.load(Ordering::SeqCst), 1);
-        assert!(Arc::ptr_eq(&first, &second));
+        let built = build_inference_clients(&config).expect("build clients");
+        let reranker = built.reranker.expect("reranker should exist");
+        let scores = reranker
+            .rerank("query", &["doc one".to_string(), "doc two".to_string()])
+            .expect("rerank");
+        assert_eq!(scores, vec![0.2, 0.9]);
     }
 
     #[test]
-    fn lazy_arc_retries_after_failed_initialization() {
-        let build_calls = Arc::new(AtomicUsize::new(0));
-        let lazy = LazyArc::new("test lazy", {
-            let build_calls = Arc::clone(&build_calls);
-            move || {
-                let attempt = build_calls.fetch_add(1, Ordering::SeqCst);
-                if attempt == 0 {
-                    return Err(KboltError::Inference("not ready".to_string()).into());
-                }
-                Ok(Arc::new("ready".to_string()))
-            }
-        });
-
-        let err = lazy.get().expect_err("first init should fail");
-        assert!(err.to_string().contains("not ready"));
-
-        let second = lazy.get().expect("second init should retry");
-        let third = lazy.get().expect("cached get should succeed");
-
-        assert_eq!(build_calls.load(Ordering::SeqCst), 2);
-        assert!(Arc::ptr_eq(&second, &third));
-    }
-
-    #[test]
-    fn lazy_arc_initializes_once_under_concurrency() {
-        let build_calls = Arc::new(AtomicUsize::new(0));
-        let start = Arc::new(Barrier::new(3));
-        let lazy = Arc::new(LazyArc::new("test lazy", {
-            let build_calls = Arc::clone(&build_calls);
-            move || {
-                build_calls.fetch_add(1, Ordering::SeqCst);
-                std::thread::sleep(Duration::from_millis(50));
-                Ok(Arc::new("ready".to_string()))
-            }
-        }));
-
-        let mut handles = Vec::new();
-        for _ in 0..2 {
-            let lazy = Arc::clone(&lazy);
-            let start = Arc::clone(&start);
-            handles.push(std::thread::spawn(move || {
-                start.wait();
-                lazy.get().expect("concurrent get")
-            }));
-        }
-
-        start.wait();
-        let first = handles.remove(0).join().expect("first join");
-        let second = handles.remove(0).join().expect("second join");
-
-        assert_eq!(build_calls.load(Ordering::SeqCst), 1);
-        assert!(Arc::ptr_eq(&first, &second));
-    }
-
-    #[test]
-    fn openai_compatible_reranker_parses_json_scores() {
+    fn provider_profile_reranker_supports_chat_backed_mode() {
         let body = r#"{
   "choices": [
     {
@@ -1265,25 +663,32 @@ mod tests {
     }
   ]
 }"#;
-        let base_url = serve_once(200, body);
-        let config = base_text_config(base_url, TextInferenceOutputMode::JsonObject);
-        let reranker = build_reranker(Some(&config)).expect("build reranker");
-        let reranker = reranker.expect("reranker should exist");
+        let mut config = base_config();
+        config.providers.insert(
+            "remote_rerank".to_string(),
+            ProviderProfileConfig::OpenAiCompatible {
+                operation: ProviderOperation::ChatCompletion,
+                base_url: serve_once(200, body),
+                model: "gpt-5-mini".to_string(),
+                api_key_env: None,
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        );
+        config.roles.reranker = Some(RerankerRoleConfig {
+            provider: "remote_rerank".to_string(),
+        });
 
+        let built = build_inference_clients(&config).expect("build clients");
+        let reranker = built.reranker.expect("reranker should exist");
         let scores = reranker
             .rerank("query", &["doc one".to_string(), "doc two".to_string()])
-            .expect("rerank docs");
+            .expect("rerank");
         assert_eq!(scores, vec![0.2, 0.9]);
     }
 
     #[test]
-    fn build_expander_returns_none_when_inference_config_is_missing() {
-        let expander = build_expander(None).expect("build expander");
-        assert!(expander.is_none());
-    }
-
-    #[test]
-    fn openai_compatible_expander_parses_json_variants() {
+    fn provider_profile_expander_uses_role_sampling() {
         let body = r#"{
   "choices": [
     {
@@ -1293,12 +698,26 @@ mod tests {
     }
   ]
 }"#;
-        let base_url = serve_once(200, body);
-        let config = base_expander_config(base_url);
-        let expander = build_expander(Some(&config)).expect("build expander");
-        let expander = expander.expect("expander should exist");
+        let mut config = base_config();
+        config.providers.insert(
+            "local_expand".to_string(),
+            ProviderProfileConfig::LlamaCppServer {
+                operation: ProviderOperation::ChatCompletion,
+                base_url: serve_once(200, body),
+                model: "qwen3-1.7b".to_string(),
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        );
+        config.roles.expander = Some(ExpanderRoleConfig {
+            provider: "local_expand".to_string(),
+            max_tokens: 256,
+            sampling: ExpanderSamplingConfig::default(),
+        });
 
-        let variants = expander.expand("rust traits", 4).expect("expand query");
+        let built = build_inference_clients(&config).expect("build clients");
+        let expander = built.expander.expect("expander should exist");
+        let variants = expander.expand("rust traits", 4).expect("expand");
         assert_eq!(
             variants,
             vec![
@@ -1309,66 +728,44 @@ mod tests {
     }
 
     #[test]
-    fn json_object_mode_sets_response_format_in_chat_payload() {
-        let payload = build_chat_payload(
-            "model",
-            "system",
-            "user",
-            TextInferenceOutputMode::JsonObject,
+    fn openai_expander_rejects_llama_only_sampling_overrides() {
+        let mut config = base_config();
+        config.providers.insert(
+            "remote_expand".to_string(),
+            ProviderProfileConfig::OpenAiCompatible {
+                operation: ProviderOperation::ChatCompletion,
+                base_url: "https://api.openai.com/v1".to_string(),
+                model: "gpt-5-mini".to_string(),
+                api_key_env: Some("OPENAI_API_KEY".to_string()),
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
         );
+        config.roles.expander = Some(ExpanderRoleConfig {
+            provider: "remote_expand".to_string(),
+            max_tokens: 512,
+            sampling: ExpanderSamplingConfig {
+                top_k: 99,
+                ..ExpanderSamplingConfig::default()
+            },
+        });
+
+        let err = build_inference_clients(&config).expect_err("unsupported sampling should fail");
+        assert!(err.to_string().contains("does not support top_k"));
+    }
+
+    #[test]
+    fn build_chat_payload_uses_json_response_format_for_reranker() {
+        let options = ChatCompletionRequestOptions::json_object();
+        let payload = build_chat_payload("model", "system", "user", &options);
         assert_eq!(payload["response_format"]["type"], "json_object");
     }
 
     #[test]
-    fn text_mode_omits_response_format_in_chat_payload() {
-        let payload = build_chat_payload("model", "system", "user", TextInferenceOutputMode::Text);
+    fn build_chat_payload_omits_response_format_for_text_generation() {
+        let options = ChatCompletionRequestOptions::text();
+        let payload = build_chat_payload("model", "system", "user", &options);
         assert!(payload.get("response_format").is_none());
-    }
-
-    #[test]
-    fn text_mode_parses_fenced_json() {
-        let body = r#"{
-  "choices": [
-    {
-      "message": {
-        "content": "```json\n{\"scores\":[0.2,0.9]}\n```"
-      }
-    }
-  ]
-}"#;
-        let base_url = serve_once(200, body);
-        let config = base_text_config(base_url, TextInferenceOutputMode::Text);
-        let reranker = build_reranker(Some(&config)).expect("build reranker");
-        let reranker = reranker.expect("reranker should exist");
-
-        let scores = reranker
-            .rerank("query", &["doc one".to_string(), "doc two".to_string()])
-            .expect("rerank docs");
-        assert_eq!(scores, vec![0.2, 0.9]);
-    }
-
-    #[test]
-    fn text_mode_fails_fast_when_content_is_not_json() {
-        let body = r#"{
-  "choices": [
-    {
-      "message": {
-        "content": "this is not json"
-      }
-    }
-  ]
-}"#;
-        let base_url = serve_once(200, body);
-        let config = base_text_config(base_url, TextInferenceOutputMode::Text);
-        let reranker = build_reranker(Some(&config)).expect("build reranker");
-        let reranker = reranker.expect("reranker should exist");
-
-        let err = reranker
-            .rerank("query", &["doc one".to_string(), "doc two".to_string()])
-            .expect_err("non-json payload should fail");
-        assert!(err
-            .to_string()
-            .contains("failed to parse reranker response as JSON"));
     }
 
     #[test]
@@ -1385,18 +782,26 @@ mod tests {
                 retry_after: None,
             },
         ]);
-        let config = EmbeddingConfig::OpenAiCompatible {
-            model: "embed-model".to_string(),
-            base_url,
-            api_key_env: None,
-            timeout_ms: 5_000,
-            batch_size: 64,
-            max_retries: 1,
-        };
-        let embedder = build_embedder(Some(&config))
-            .expect("build embedder")
-            .expect("embedder should exist");
 
+        let mut config = base_config();
+        config.providers.insert(
+            "remote_embed".to_string(),
+            ProviderProfileConfig::OpenAiCompatible {
+                operation: ProviderOperation::Embedding,
+                base_url,
+                model: "embed-model".to_string(),
+                api_key_env: None,
+                timeout_ms: 5_000,
+                max_retries: 1,
+            },
+        );
+        config.roles.embedder = Some(EmbedderRoleConfig {
+            provider: "remote_embed".to_string(),
+            batch_size: 64,
+        });
+
+        let built = build_inference_clients(&config).expect("build clients");
+        let embedder = built.embedder.expect("embedder should exist");
         let vectors = embedder
             .embed_batch(EmbeddingInputKind::Document, &["hello".to_string()])
             .expect("embed should retry then succeed");

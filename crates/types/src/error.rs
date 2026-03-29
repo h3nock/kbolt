@@ -43,7 +43,7 @@ pub enum KboltError {
     #[error("file deleted since indexing: {0}. Run `kbolt update` to refresh.")]
     FileDeleted(PathBuf),
 
-    #[error("model not available: {name}. Run `kbolt models pull` to download.")]
+    #[error("model not available: {name}")]
     ModelNotAvailable { name: String },
 
     #[error("model download failed: {0}")]

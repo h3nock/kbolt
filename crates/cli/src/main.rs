@@ -46,7 +46,7 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
     if handle_eval_import(&cli)? {
         return Ok(());
     }
-    maybe_print_first_run_models_hint(&cli.command, cli.format);
+    maybe_print_first_run_inference_hint(&cli.command, cli.format);
 
     if matches!(cli.command, Command::Mcp) {
         let engine = Engine::new(None)?;
@@ -57,7 +57,6 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
 
     let output_format = cli.format;
     let wants_json = output_format == OutputFormat::Json;
-    let interactive_output = supports_interactive_output(output_format, stdin_stdout_are_tty());
     let engine = Engine::new(None)?;
     let mut adapter = CliAdapter::new(engine);
     let print_text = |line: &str| emit_text_output(output_format, line);
@@ -145,28 +144,9 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
                         no_index,
                     )
                 };
-                match run_collection_add() {
-                    Ok(line) => {
-                        print_message(&line);
-                    }
-                    Err(err)
-                        if should_offer_model_pull_for_collection_add(
-                            no_index,
-                            interactive_output,
-                            &err,
-                        ) =>
-                    {
-                        if prompt_pull_models()? {
-                            let pull_report = adapter.models_pull()?;
-                            print_message(&pull_report);
-                            let retried = run_collection_add()?;
-                            print_message(&retried);
-                        } else {
-                            return Err(with_collection_add_model_missing_guidance(err).into());
-                        }
-                    }
-                    Err(err) => return Err(with_collection_add_model_missing_guidance(err).into()),
-                }
+                let line =
+                    run_collection_add().map_err(with_collection_add_model_missing_guidance)?;
+                print_message(&line);
             }
             CollectionCommand::List => {
                 if wants_json {
@@ -265,10 +245,6 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
                     print_text(&line);
                 }
             }
-            ModelsCommand::Pull => {
-                let line = adapter.models_pull()?;
-                print_message(&line);
-            }
         },
         Command::Eval(eval) => {
             ensure_eval_uses_local_scope(cli.space.as_deref())?;
@@ -362,22 +338,8 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
                     })
                 };
 
-                match run_search(search.deep, search.keyword, search.semantic) {
-                    Ok(line) => {
-                        print_text(&line);
-                    }
-                    Err(err) if is_model_not_available_error(&err) && interactive_output => {
-                        if prompt_pull_models()? {
-                            let pull_report = adapter.models_pull()?;
-                            print_message(&pull_report);
-                            let retried = run_search(search.deep, search.keyword, search.semantic)?;
-                            print_text(&retried);
-                        } else {
-                            return Err(err.into());
-                        }
-                    }
-                    Err(err) => return Err(err.into()),
-                }
+                let line = run_search(search.deep, search.keyword, search.semantic)?;
+                print_text(&line);
             }
         }
         Command::Update(update) => {
@@ -405,28 +367,9 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
                     )
                 };
 
-                match run_update(update.no_embed) {
-                    Ok(line) => {
-                        print_message(&line);
-                    }
-                    Err(err)
-                        if should_offer_model_pull_for_update(
-                            update.no_embed,
-                            interactive_output,
-                            &err,
-                        ) =>
-                    {
-                        if prompt_pull_models()? {
-                            let pull_report = adapter.models_pull()?;
-                            print_message(&pull_report);
-                            let retried = run_update(false)?;
-                            print_message(&retried);
-                        } else {
-                            return Err(with_update_model_missing_guidance(err).into());
-                        }
-                    }
-                    Err(err) => return Err(with_update_model_missing_guidance(err).into()),
-                }
+                let line =
+                    run_update(update.no_embed).map_err(with_update_model_missing_guidance)?;
+                print_message(&line);
             }
         }
         Command::Status => {
@@ -815,10 +758,6 @@ fn ensure_supported_output_format(
     Ok(())
 }
 
-fn supports_interactive_output(format: OutputFormat, is_tty: bool) -> bool {
-    format == OutputFormat::Cli && is_tty
-}
-
 fn emit_text_output(format: OutputFormat, line: &str) {
     println!("{}", render_text_output(format, line));
 }
@@ -931,24 +870,25 @@ fn json_error_kind(err: &RunError) -> &'static str {
     }
 }
 
-fn maybe_print_first_run_models_hint(command: &Command, format: OutputFormat) {
+fn maybe_print_first_run_inference_hint(command: &Command, format: OutputFormat) {
     let config_file = match config::default_config_file_path() {
         Ok(path) => path,
         Err(_) => return,
     };
-    if should_show_first_run_models_hint(
+    if should_show_first_run_inference_hint(
         command,
         format,
         stdin_stdout_are_tty(),
         config_file.exists(),
     ) {
         eprintln!(
-            "hint: run `kbolt models pull` to download semantic/rerank models. keyword search works without models."
+            "hint: configure [providers] and [roles.*] in {} to enable embedding, reranking, and expansion. keyword search works without provider bindings.",
+            config_file.display()
         );
     }
 }
 
-fn should_show_first_run_models_hint(
+fn should_show_first_run_inference_hint(
     command: &Command,
     format: OutputFormat,
     is_tty: bool,
@@ -962,38 +902,10 @@ fn stdin_stdout_are_tty() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
-fn prompt_pull_models() -> std::result::Result<bool, CoreError> {
-    use std::io::Write;
-
-    print!("Models not downloaded. Download now and continue? (Y/n) ");
-    std::io::stdout().flush()?;
-
-    let mut response = String::new();
-    std::io::stdin().read_line(&mut response)?;
-    Ok(parse_pull_confirmation(&response))
-}
-
-fn parse_pull_confirmation(input: &str) -> bool {
-    let normalized = input.trim().to_ascii_lowercase();
-    normalized.is_empty() || normalized == "y" || normalized == "yes"
-}
-
-fn should_offer_model_pull_for_update(no_embed: bool, is_tty: bool, err: &CoreError) -> bool {
-    !no_embed && is_tty && is_model_not_available_error(err)
-}
-
-fn should_offer_model_pull_for_collection_add(
-    no_index: bool,
-    is_tty: bool,
-    err: &CoreError,
-) -> bool {
-    !no_index && is_tty && is_model_not_available_error(err)
-}
-
 fn with_update_model_missing_guidance(err: CoreError) -> CoreError {
     if is_model_not_available_error(&err) {
         return CoreError::Domain(KboltError::InvalidInput(format!(
-            "{err}. for update, run `kbolt models pull` or re-run with `--no-embed`"
+            "{err}. configure [roles.embedder] to an embedding provider profile in index.toml or re-run with `--no-embed`"
         )));
     }
     err
@@ -1002,7 +914,7 @@ fn with_update_model_missing_guidance(err: CoreError) -> CoreError {
 fn with_collection_add_model_missing_guidance(err: CoreError) -> CoreError {
     if is_model_not_available_error(&err) {
         return CoreError::Domain(KboltError::InvalidInput(format!(
-            "{err}. for collection add, run `kbolt models pull` or re-run with `--no-index`"
+            "{err}. configure [roles.embedder] to an embedding provider profile in index.toml or re-run with `--no-index`"
         )));
     }
     err
@@ -1018,13 +930,11 @@ mod tests {
     use super::{
         ensure_eval_uses_local_scope, ensure_schedule_uses_local_scope,
         ensure_supported_output_format, is_model_not_available_error, parse_internal_schedule_run,
-        parse_pull_confirmation, parse_schedule_interval, render_error_output,
-        render_message_output, render_structured_output, requested_output_format_from_args,
-        schedule_add_request, schedule_remove_request, should_offer_model_pull_for_collection_add,
-        should_offer_model_pull_for_update, should_show_first_run_models_hint,
-        supports_interactive_output, with_collection_add_model_missing_guidance,
-        with_update_model_missing_guidance, DefaultSpaceJsonResponse, IgnoreShowJsonResponse,
-        RunError, INTERNAL_SCHEDULE_RUN_COMMAND,
+        parse_schedule_interval, render_error_output, render_message_output,
+        render_structured_output, requested_output_format_from_args, schedule_add_request,
+        schedule_remove_request, should_show_first_run_inference_hint,
+        with_collection_add_model_missing_guidance, with_update_model_missing_guidance,
+        DefaultSpaceJsonResponse, IgnoreShowJsonResponse, RunError, INTERNAL_SCHEDULE_RUN_COMMAND,
     };
     use kbolt_cli::args::{
         Cli, Command, OutputFormat, ScheduleAddArgs, ScheduleDayArg, ScheduleRemoveArgs,
@@ -1045,21 +955,6 @@ mod tests {
             "unexpected error: {err}"
         );
         ensure_eval_uses_local_scope(None).expect("no top-level scope");
-    }
-
-    #[test]
-    fn parse_pull_confirmation_accepts_default_yes_and_explicit_yes() {
-        assert!(parse_pull_confirmation(""));
-        assert!(parse_pull_confirmation("   "));
-        assert!(parse_pull_confirmation("y"));
-        assert!(parse_pull_confirmation("YES"));
-    }
-
-    #[test]
-    fn parse_pull_confirmation_rejects_non_yes_answers() {
-        assert!(!parse_pull_confirmation("n"));
-        assert!(!parse_pull_confirmation("no"));
-        assert!(!parse_pull_confirmation("anything else"));
     }
 
     #[test]
@@ -1224,13 +1119,6 @@ mod tests {
     }
 
     #[test]
-    fn interactive_output_requires_cli_format_and_tty() {
-        assert!(supports_interactive_output(OutputFormat::Cli, true));
-        assert!(!supports_interactive_output(OutputFormat::Cli, false));
-        assert!(!supports_interactive_output(OutputFormat::Json, true));
-    }
-
-    #[test]
     fn render_message_output_wraps_json_success_envelope() {
         let rendered = render_message_output(OutputFormat::Json, "space added: work");
         let value: serde_json::Value =
@@ -1387,54 +1275,18 @@ mod tests {
     }
 
     #[test]
-    fn update_model_pull_prompt_offer_requires_embed_and_tty_and_model_error() {
-        let missing = CoreError::Domain(KboltError::ModelNotAvailable {
-            name: "test-model".to_string(),
-        });
-        assert!(should_offer_model_pull_for_update(false, true, &missing));
-
-        assert!(!should_offer_model_pull_for_update(true, true, &missing));
-        assert!(!should_offer_model_pull_for_update(false, false, &missing));
-
-        let other = CoreError::Domain(KboltError::InvalidInput("bad input".to_string()));
-        assert!(!should_offer_model_pull_for_update(false, true, &other));
-    }
-
-    #[test]
     fn update_model_missing_guidance_adds_no_embed_hint() {
         let missing = CoreError::Domain(KboltError::ModelNotAvailable {
             name: "test-model".to_string(),
         });
         let rewritten = with_update_model_missing_guidance(missing);
         let message = rewritten.to_string();
-        assert!(message.contains("kbolt models pull"));
+        assert!(message.contains("[roles.embedder]"));
         assert!(message.contains("--no-embed"));
 
         let unchanged = CoreError::Domain(KboltError::InvalidInput("bad input".to_string()));
         let rewritten_other = with_update_model_missing_guidance(unchanged);
         assert_eq!(rewritten_other.to_string(), "invalid input: bad input");
-    }
-
-    #[test]
-    fn collection_add_model_pull_prompt_offer_requires_index_and_tty_and_model_error() {
-        let missing = CoreError::Domain(KboltError::ModelNotAvailable {
-            name: "test-model".to_string(),
-        });
-        assert!(should_offer_model_pull_for_collection_add(
-            false, true, &missing
-        ));
-
-        assert!(!should_offer_model_pull_for_collection_add(
-            true, true, &missing
-        ));
-        assert!(!should_offer_model_pull_for_collection_add(
-            false, false, &missing
-        ));
-
-        let other = CoreError::Domain(KboltError::InvalidInput("bad input".to_string()));
-        assert!(!should_offer_model_pull_for_collection_add(
-            false, true, &other
-        ));
     }
 
     #[test]
@@ -1444,7 +1296,7 @@ mod tests {
         });
         let rewritten = with_collection_add_model_missing_guidance(missing);
         let message = rewritten.to_string();
-        assert!(message.contains("kbolt models pull"));
+        assert!(message.contains("[roles.embedder]"));
         assert!(message.contains("--no-index"));
 
         let unchanged = CoreError::Domain(KboltError::InvalidInput("bad input".to_string()));
@@ -1453,32 +1305,32 @@ mod tests {
     }
 
     #[test]
-    fn first_run_models_hint_visibility_respects_context() {
-        assert!(should_show_first_run_models_hint(
+    fn first_run_inference_hint_visibility_respects_context() {
+        assert!(should_show_first_run_inference_hint(
             &Command::Status,
             OutputFormat::Cli,
             true,
             false
         ));
-        assert!(!should_show_first_run_models_hint(
+        assert!(!should_show_first_run_inference_hint(
             &Command::Status,
             OutputFormat::Cli,
             true,
             true
         ));
-        assert!(!should_show_first_run_models_hint(
+        assert!(!should_show_first_run_inference_hint(
             &Command::Status,
             OutputFormat::Cli,
             false,
             false
         ));
-        assert!(!should_show_first_run_models_hint(
+        assert!(!should_show_first_run_inference_hint(
             &Command::Mcp,
             OutputFormat::Cli,
             true,
             false
         ));
-        assert!(!should_show_first_run_models_hint(
+        assert!(!should_show_first_run_inference_hint(
             &Command::Status,
             OutputFormat::Json,
             true,

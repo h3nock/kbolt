@@ -786,18 +786,21 @@ mod tests {
     }
 
     #[test]
-    fn model_status_wrapper_exposes_configured_models() {
+    fn model_status_wrapper_reports_role_readiness() {
         with_isolated_xdg_dirs(|| {
             let engine = Engine::new(None).expect("create engine");
             let adapter = McpAdapter::new(engine);
 
             let status = adapter.model_status().expect("read model status");
-            assert!(!status.embedder.name.is_empty());
-            assert!(!status.reranker.name.is_empty());
-            assert!(!status.expander.name.is_empty());
-            assert!(!status.embedder.downloaded);
-            assert!(!status.reranker.downloaded);
-            assert!(!status.expander.downloaded);
+            assert!(!status.embedder.configured);
+            assert!(!status.embedder.ready);
+            assert!(status.embedder.profile.is_none());
+            assert!(!status.reranker.configured);
+            assert!(!status.reranker.ready);
+            assert!(status.reranker.profile.is_none());
+            assert!(!status.expander.configured);
+            assert!(!status.expander.ready);
+            assert!(status.expander.profile.is_none());
         });
     }
 

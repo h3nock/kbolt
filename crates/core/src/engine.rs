@@ -15,15 +15,14 @@ use crate::storage::{
     ChunkInsert, ChunkRow, CollectionRow, DocumentRow, DocumentTitleSource, SpaceResolution,
     TantivyEntry,
 };
-use crate::ModelPullEvent;
 use crate::Result;
 use kbolt_types::{
     ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, CollectionStatus,
     DocumentResponse, FileEntry, GetRequest, KboltError, Locator, ModelStatus, MultiGetRequest,
-    MultiGetResponse, OmitReason, OmittedFile, PullReport, SearchMode, SearchPipeline,
-    SearchPipelineNotice, SearchPipelineStep, SearchPipelineUnavailableReason, SearchRequest,
-    SearchResponse, SearchResult, SearchSignals, SpaceInfo, SpaceStatus, StatusResponse,
-    UpdateOptions, UpdateReport,
+    MultiGetResponse, OmitReason, OmittedFile, SearchMode, SearchPipeline, SearchPipelineNotice,
+    SearchPipelineStep, SearchPipelineUnavailableReason, SearchRequest, SearchResponse,
+    SearchResult, SearchSignals, SpaceInfo, SpaceStatus, StatusResponse, UpdateOptions,
+    UpdateReport,
 };
 use walkdir::WalkDir;
 
@@ -107,28 +106,13 @@ impl Engine {
     pub fn new(config_path: Option<&Path>) -> Result<Self> {
         let config = config::load(config_path)?;
         let storage = Storage::new(&config.cache_dir)?;
-        let model_dir = config.cache_dir.join("models");
-        let embedder = models::build_embedder_with_local_runtime(
-            config.embeddings.as_ref(),
-            &config.models,
-            &model_dir,
-        )?;
-        let reranker = models::build_reranker_with_local_runtime(
-            config.inference.reranker.as_ref(),
-            &config.models,
-            &model_dir,
-        )?;
-        let expander = models::build_expander_with_local_runtime(
-            config.inference.expander.as_ref(),
-            &config.models,
-            &model_dir,
-        )?;
+        let built_models = models::build_inference_clients(&config)?;
         Ok(Self {
             storage,
             config,
-            embedder,
-            reranker,
-            expander,
+            embedder: built_models.embedder,
+            reranker: built_models.reranker,
+            expander: built_models.expander,
         })
     }
 
@@ -154,29 +138,14 @@ impl Engine {
         reranker: Option<Arc<dyn models::Reranker>>,
         expander: Option<Arc<dyn models::Expander>>,
     ) -> Self {
-        let model_dir = config.cache_dir.join("models");
-        let reranker = reranker.or_else(|| {
-            models::build_reranker_with_local_runtime(
-                config.inference.reranker.as_ref(),
-                &config.models,
-                &model_dir,
-            )
-            .expect("build reranker for test engine")
-        });
-        let expander = expander.or_else(|| {
-            models::build_expander_with_local_runtime(
-                config.inference.expander.as_ref(),
-                &config.models,
-                &model_dir,
-            )
-            .expect("build expander for test engine")
-        });
+        let built_models =
+            models::build_inference_clients(&config).expect("build inference models");
         Self {
             storage,
             config,
-            embedder,
-            reranker,
-            expander,
+            embedder: embedder.or(built_models.embedder),
+            reranker: reranker.or(built_models.reranker),
+            expander: expander.or(built_models.expander),
         }
     }
 
@@ -822,36 +791,7 @@ impl Engine {
     }
 
     fn model_status_unlocked(&self) -> Result<ModelStatus> {
-        models::status(
-            &self.config.models,
-            self.config.embeddings.as_ref(),
-            &self.config.inference,
-            &self.model_dir(),
-        )
-    }
-
-    pub fn pull_models(&self) -> Result<PullReport> {
-        let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
-        models::pull(
-            &self.config.models,
-            self.config.embeddings.as_ref(),
-            &self.config.inference,
-            &self.model_dir(),
-        )
-    }
-
-    pub fn pull_models_with_progress<F>(&self, on_event: F) -> Result<PullReport>
-    where
-        F: FnMut(ModelPullEvent),
-    {
-        let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
-        models::pull_with_progress(
-            &self.config.models,
-            self.config.embeddings.as_ref(),
-            &self.config.inference,
-            &self.model_dir(),
-            on_event,
-        )
+        models::status(&self.config)
     }
 
     pub fn config(&self) -> &Config {
@@ -864,19 +804,12 @@ impl Engine {
 
     fn embedding_model_key(&self) -> &str {
         self.config
-            .embeddings
+            .roles
+            .embedder
             .as_ref()
-            .and_then(|config| match config {
-                config::EmbeddingConfig::OpenAiCompatible { model, .. }
-                | config::EmbeddingConfig::Voyage { model, .. } => Some(model.as_str()),
-                config::EmbeddingConfig::LocalOnnx { .. }
-                | config::EmbeddingConfig::LocalGguf { .. } => None,
-            })
-            .unwrap_or(self.config.models.embedder.id.as_str())
-    }
-
-    fn model_dir(&self) -> std::path::PathBuf {
-        self.config.cache_dir.join("models")
+            .and_then(|role| self.config.providers.get(&role.provider))
+            .map(|profile| profile.model())
+            .unwrap_or("embedder")
     }
 
     fn acquire_operation_lock(&self, mode: LockMode) -> Result<OperationLock> {

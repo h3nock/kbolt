@@ -420,10 +420,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::Engine;
-    use crate::config::{
-        ChunkingConfig, Config, EmbeddingConfig, InferenceConfig, ModelConfig, ModelProvider,
-        ModelSourceConfig, RankingConfig, ReapingConfig,
-    };
+    use crate::config::{ChunkingConfig, Config, RankingConfig, ReapingConfig};
     use crate::schedule_state_store::ScheduleRunStateStore;
     use crate::schedule_store::ScheduleCatalog;
     use crate::storage::Storage;
@@ -533,25 +530,6 @@ mod tests {
             default_space: None,
             providers: std::collections::HashMap::new(),
             roles: crate::config::RoleBindingsConfig::default(),
-            models: ModelConfig {
-                embedder: ModelSourceConfig {
-                    provider: ModelProvider::HuggingFace,
-                    id: "embed-model".to_string(),
-                    revision: None,
-                },
-                reranker: ModelSourceConfig {
-                    provider: ModelProvider::HuggingFace,
-                    id: "reranker-model".to_string(),
-                    revision: None,
-                },
-                expander: ModelSourceConfig {
-                    provider: ModelProvider::HuggingFace,
-                    id: "expander-model".to_string(),
-                    revision: None,
-                },
-            },
-            embeddings: None::<EmbeddingConfig>,
-            inference: InferenceConfig::default(),
             reaping: ReapingConfig { days: 7 },
             chunking: ChunkingConfig::default(),
             ranking: RankingConfig::default(),

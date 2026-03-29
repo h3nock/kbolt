@@ -6,24 +6,11 @@ use serde::Deserialize;
 use serde_json::from_str;
 
 use crate::models::completion::CompletionClient;
-use crate::models::local_llama::{
-    LocalLlamaClient, LocalLlamaGenerationOptions, LocalLlamaGrammar, LocalLlamaPrompt,
-};
 use crate::models::text::strip_json_fences;
 use crate::models::{normalize_query_text, Expander};
 use crate::Result;
 
 const VARIANTS_SYSTEM_PROMPT: &str = "You generate retrieval query variants. Return JSON only as an array of strings. Preserve the original intent, named entities, numbers, abbreviations, error text, config keys, and file paths. Keep each variant specific and retrieval-focused. Do not answer the query. Do not explain anything.";
-
-const VARIANTS_GRAMMAR: &str = r#"root ::= ws array ws
-array ::= "[" ws elements? ws "]"
-elements ::= string (ws "," ws string)*
-string ::= "\"" chars "\""
-chars ::= char*
-char ::= [^"\\\x00-\x1F] | escape
-escape ::= "\\" (["\\/bfnrt] | "u" hex hex hex hex)
-hex ::= [0-9a-fA-F]
-ws ::= [ \t\n\r]*"#;
 
 #[derive(Clone)]
 pub(super) struct ChatVariantsExpander {
@@ -36,25 +23,6 @@ impl ChatVariantsExpander {
     }
 }
 
-#[derive(Clone)]
-pub(super) struct LocalLlamaVariantsExpander {
-    client: Arc<LocalLlamaClient>,
-    options: LocalLlamaGenerationOptions,
-}
-
-impl LocalLlamaVariantsExpander {
-    pub(super) fn new(
-        client: Arc<LocalLlamaClient>,
-        mut options: LocalLlamaGenerationOptions,
-    ) -> Self {
-        options.grammar = Some(LocalLlamaGrammar {
-            grammar: VARIANTS_GRAMMAR.to_string(),
-            root: "root".to_string(),
-        });
-        Self { client, options }
-    }
-}
-
 impl Expander for ChatVariantsExpander {
     fn expand(&self, query: &str, max_variants: usize) -> Result<Vec<String>> {
         let normalized = normalize_query_text(query);
@@ -64,25 +32,6 @@ impl Expander for ChatVariantsExpander {
 
         let prompt = variants_user_prompt(&normalized, max_variants);
         let content = self.chat.complete(VARIANTS_SYSTEM_PROMPT, &prompt)?;
-        parse_variants_output(&normalized, &content, max_variants)
-    }
-}
-
-impl Expander for LocalLlamaVariantsExpander {
-    fn expand(&self, query: &str, max_variants: usize) -> Result<Vec<String>> {
-        let normalized = normalize_query_text(query);
-        if normalized.is_empty() || max_variants == 0 {
-            return Ok(Vec::new());
-        }
-
-        let prompt = variants_user_prompt(&normalized, max_variants);
-        let content = self.client.generate(
-            LocalLlamaPrompt::Chat {
-                system_prompt: VARIANTS_SYSTEM_PROMPT,
-                user_prompt: &prompt,
-            },
-            &self.options,
-        )?;
         parse_variants_output(&normalized, &content, max_variants)
     }
 }

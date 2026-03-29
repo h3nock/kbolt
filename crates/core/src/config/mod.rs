@@ -6,13 +6,9 @@ use std::path::{Path, PathBuf};
 use crate::error::Result;
 use kbolt_types::KboltError;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 const APP_NAME: &str = "kbolt";
 const CONFIG_FILENAME: &str = "index.toml";
-const DEFAULT_EMBED_MODEL: &str = "ggml-org/embeddinggemma-300M-GGUF";
-const DEFAULT_RERANKER_MODEL: &str = "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF";
-const DEFAULT_EXPANDER_MODEL: &str = "Qwen/Qwen3-1.7B-GGUF";
 const DEFAULT_REAP_DAYS: u32 = 7;
 const DEFAULT_CHUNK_TARGET_TOKENS: usize = 800;
 const DEFAULT_CHUNK_SOFT_MAX_TOKENS: usize = 950;
@@ -24,18 +20,10 @@ const DEFAULT_CODE_CHUNK_TARGET_TOKENS: usize = 320;
 const DEFAULT_CODE_CHUNK_SOFT_MAX_TOKENS: usize = 420;
 const DEFAULT_CODE_CHUNK_HARD_MAX_TOKENS: usize = 560;
 const DEFAULT_CODE_CHUNK_BOUNDARY_OVERLAP_TOKENS: usize = 24;
-const DEFAULT_EMBEDDING_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 32;
-const DEFAULT_EMBEDDING_MAX_RETRIES: u32 = 2;
-const DEFAULT_LOCAL_EMBEDDING_MAX_LENGTH: usize = 512;
-const DEFAULT_LOCAL_GGUF_EMBEDDING_BATCH_SIZE: usize = 8;
 const DEFAULT_INFERENCE_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_INFERENCE_MAX_RETRIES: u32 = 2;
-const DEFAULT_LOCAL_INFERENCE_MAX_TOKENS: usize = 256;
 const DEFAULT_LOCAL_EXPANDER_MAX_TOKENS: usize = 600;
-const DEFAULT_LOCAL_INFERENCE_N_CTX: u32 = 2048;
-const DEFAULT_LLAMA_FLASH_ATTENTION_MODE: LlamaFlashAttentionMode = LlamaFlashAttentionMode::Auto;
-const DEFAULT_EXPANDER_ENABLE_THINKING: bool = false;
 const DEFAULT_EXPANDER_SEED: u32 = 0;
 const DEFAULT_EXPANDER_TEMPERATURE: f32 = 0.7;
 const DEFAULT_EXPANDER_TOP_K: i32 = 20;
@@ -68,70 +56,9 @@ pub struct Config {
     pub default_space: Option<String>,
     pub providers: HashMap<String, ProviderProfileConfig>,
     pub roles: RoleBindingsConfig,
-    pub models: ModelConfig,
-    pub embeddings: Option<EmbeddingConfig>,
-    pub inference: InferenceConfig,
     pub reaping: ReapingConfig,
     pub chunking: ChunkingConfig,
     pub ranking: RankingConfig,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "provider", rename_all = "snake_case")]
-pub enum EmbeddingConfig {
-    #[serde(rename = "openai_compatible")]
-    OpenAiCompatible {
-        model: String,
-        base_url: String,
-        #[serde(default)]
-        api_key_env: Option<String>,
-        #[serde(default = "default_embedding_timeout_ms")]
-        timeout_ms: u64,
-        #[serde(default = "default_embedding_batch_size")]
-        batch_size: usize,
-        #[serde(default = "default_embedding_max_retries")]
-        max_retries: u32,
-    },
-    Voyage {
-        model: String,
-        base_url: String,
-        #[serde(default)]
-        api_key_env: Option<String>,
-        #[serde(default = "default_embedding_timeout_ms")]
-        timeout_ms: u64,
-        #[serde(default = "default_embedding_batch_size")]
-        batch_size: usize,
-        #[serde(default = "default_embedding_max_retries")]
-        max_retries: u32,
-    },
-    LocalOnnx {
-        #[serde(default)]
-        onnx_file: Option<String>,
-        #[serde(default)]
-        tokenizer_file: Option<String>,
-        #[serde(default = "default_local_embedding_max_length")]
-        max_length: usize,
-    },
-    LocalGguf {
-        #[serde(default)]
-        model_file: Option<String>,
-        #[serde(default = "default_local_gguf_embedding_batch_size")]
-        batch_size: usize,
-        #[serde(default = "default_llama_flash_attention_mode")]
-        flash_attention: LlamaFlashAttentionMode,
-        #[serde(default)]
-        n_threads: Option<u32>,
-        #[serde(default)]
-        n_threads_batch: Option<u32>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct InferenceConfig {
-    #[serde(default)]
-    pub reranker: Option<TextInferenceConfig>,
-    #[serde(default)]
-    pub expander: Option<ExpanderInferenceConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -303,133 +230,11 @@ impl Default for ExpanderSamplingConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TextInferenceConfig {
-    #[serde(flatten)]
-    pub provider: TextInferenceProvider,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExpanderInferenceConfig {
-    #[serde(flatten)]
-    pub provider: ExpanderInferenceProvider,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum LlamaFlashAttentionMode {
-    #[default]
-    Auto,
-    Disabled,
-    Enabled,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "provider", rename_all = "snake_case")]
-pub enum ExpanderInferenceProvider {
-    #[serde(rename = "openai_compatible")]
-    OpenAiCompatible {
-        model: String,
-        base_url: String,
-        #[serde(default)]
-        api_key_env: Option<String>,
-        #[serde(default = "default_inference_timeout_ms")]
-        timeout_ms: u64,
-        #[serde(default = "default_inference_max_retries")]
-        max_retries: u32,
-    },
-    LocalLlama {
-        #[serde(default)]
-        model_file: Option<String>,
-        #[serde(default = "default_local_expander_max_tokens")]
-        max_tokens: usize,
-        #[serde(default = "default_local_inference_n_ctx")]
-        n_ctx: u32,
-        #[serde(default = "default_local_inference_n_gpu_layers")]
-        n_gpu_layers: Option<u32>,
-        #[serde(default = "default_llama_flash_attention_mode")]
-        flash_attention: LlamaFlashAttentionMode,
-        #[serde(default = "default_expander_enable_thinking")]
-        enable_thinking: bool,
-        #[serde(default = "default_expander_reasoning_format")]
-        reasoning_format: Option<String>,
-        #[serde(default)]
-        chat_template_kwargs: Option<String>,
-        #[serde(flatten)]
-        sampling: ExpanderSamplingConfig,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "provider", rename_all = "snake_case")]
-pub enum TextInferenceProvider {
-    #[serde(rename = "openai_compatible")]
-    OpenAiCompatible {
-        output_mode: TextInferenceOutputMode,
-        model: String,
-        base_url: String,
-        #[serde(default)]
-        api_key_env: Option<String>,
-        #[serde(default = "default_inference_timeout_ms")]
-        timeout_ms: u64,
-        #[serde(default = "default_inference_max_retries")]
-        max_retries: u32,
-    },
-    LocalLlama {
-        #[serde(default)]
-        model_file: Option<String>,
-        #[serde(default = "default_local_inference_max_tokens")]
-        max_tokens: usize,
-        #[serde(default = "default_local_inference_n_ctx")]
-        n_ctx: u32,
-        #[serde(default = "default_local_inference_n_gpu_layers")]
-        n_gpu_layers: Option<u32>,
-        #[serde(default = "default_llama_flash_attention_mode")]
-        flash_attention: LlamaFlashAttentionMode,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextInferenceOutputMode {
     #[serde(rename = "json_object")]
     JsonObject,
     #[serde(rename = "text")]
     Text,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelConfig {
-    #[serde(default = "default_embedder_source")]
-    pub embedder: ModelSourceConfig,
-    #[serde(default = "default_reranker_source")]
-    pub reranker: ModelSourceConfig,
-    #[serde(default = "default_expander_source")]
-    pub expander: ModelSourceConfig,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum ModelProvider {
-    #[serde(rename = "huggingface")]
-    #[default]
-    HuggingFace,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelSourceConfig {
-    #[serde(default)]
-    pub provider: ModelProvider,
-    pub id: String,
-    #[serde(default)]
-    pub revision: Option<String>,
-}
-
-impl Default for ModelConfig {
-    fn default() -> Self {
-        Self {
-            embedder: default_embedder_source(),
-            reranker: default_reranker_source(),
-            expander: default_expander_source(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -577,7 +382,9 @@ impl Default for Bm25BoostsConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkingConfig {
+    #[serde(default)]
     pub defaults: ChunkPolicy,
+    #[serde(default = "default_chunk_profiles")]
     pub profiles: HashMap<String, ChunkPolicy>,
 }
 
@@ -635,8 +442,6 @@ pub fn save(config: &Config) -> Result<()> {
     fs::create_dir_all(&config.config_dir)?;
     fs::create_dir_all(&config.cache_dir)?;
     validate_chunking(&config.chunking)?;
-    validate_embeddings(config.embeddings.as_ref())?;
-    validate_inference(&config.inference)?;
     validate_provider_profiles(&config.providers)?;
     validate_role_bindings(&config.roles, &config.providers)?;
     validate_ranking(&config.ranking)?;
@@ -701,9 +506,6 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
             default_space: None,
             providers: HashMap::new(),
             roles: RoleBindingsConfig::default(),
-            models: ModelConfig::default(),
-            embeddings: None,
-            inference: InferenceConfig::default(),
             reaping: ReapingConfig {
                 days: DEFAULT_REAP_DAYS,
             },
@@ -721,9 +523,6 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
         ))
     })?;
     validate_chunking(&file_config.chunking)?;
-    validate_embeddings(file_config.embeddings.as_ref())?;
-    let inference = InferenceConfig::from(file_config.inference.clone());
-    validate_inference(&inference)?;
     validate_provider_profiles(&file_config.providers)?;
     validate_role_bindings(&file_config.roles, &file_config.providers)?;
     validate_ranking(&file_config.ranking)?;
@@ -734,9 +533,6 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
         default_space: file_config.default_space,
         providers: file_config.providers,
         roles: file_config.roles,
-        models: file_config.models,
-        embeddings: file_config.embeddings,
-        inference,
         reaping: ReapingConfig {
             days: file_config.reaping.days,
         },
@@ -750,153 +546,6 @@ fn validate_chunking(chunking: &ChunkingConfig) -> Result<()> {
     for (profile, policy) in &chunking.profiles {
         validate_chunk_policy(format!("chunking.profiles.{profile}").as_str(), policy)?;
     }
-    Ok(())
-}
-
-fn validate_embeddings(embeddings: Option<&EmbeddingConfig>) -> Result<()> {
-    let Some(embeddings) = embeddings else {
-        return Ok(());
-    };
-
-    match embeddings {
-        EmbeddingConfig::OpenAiCompatible {
-            model,
-            base_url,
-            api_key_env,
-            timeout_ms,
-            batch_size,
-            ..
-        }
-        | EmbeddingConfig::Voyage {
-            model,
-            base_url,
-            api_key_env,
-            timeout_ms,
-            batch_size,
-            ..
-        } => {
-            if model.trim().is_empty() {
-                return Err(
-                    KboltError::Config("embeddings.model must not be empty".to_string()).into(),
-                );
-            }
-
-            if base_url.trim().is_empty() {
-                return Err(KboltError::Config(
-                    "embeddings.base_url must not be empty".to_string(),
-                )
-                .into());
-            }
-
-            if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
-                return Err(KboltError::Config(
-                    "embeddings.base_url must start with http:// or https://".to_string(),
-                )
-                .into());
-            }
-
-            if *timeout_ms == 0 {
-                return Err(KboltError::Config(
-                    "embeddings.timeout_ms must be greater than zero".to_string(),
-                )
-                .into());
-            }
-
-            if *batch_size == 0 {
-                return Err(KboltError::Config(
-                    "embeddings.batch_size must be greater than zero".to_string(),
-                )
-                .into());
-            }
-
-            if let Some(api_key_env) = api_key_env.as_deref() {
-                if api_key_env.trim().is_empty() {
-                    return Err(KboltError::Config(
-                        "embeddings.api_key_env must not be empty when set".to_string(),
-                    )
-                    .into());
-                }
-            }
-
-            Ok(())
-        }
-        EmbeddingConfig::LocalOnnx {
-            onnx_file,
-            tokenizer_file,
-            max_length,
-        } => {
-            if *max_length == 0 {
-                return Err(KboltError::Config(
-                    "embeddings.max_length must be greater than zero".to_string(),
-                )
-                .into());
-            }
-
-            if let Some(onnx_file) = onnx_file {
-                if onnx_file.trim().is_empty() {
-                    return Err(KboltError::Config(
-                        "embeddings.onnx_file must not be empty when set".to_string(),
-                    )
-                    .into());
-                }
-            }
-
-            if let Some(tokenizer_file) = tokenizer_file {
-                if tokenizer_file.trim().is_empty() {
-                    return Err(KboltError::Config(
-                        "embeddings.tokenizer_file must not be empty when set".to_string(),
-                    )
-                    .into());
-                }
-            }
-
-            Ok(())
-        }
-        EmbeddingConfig::LocalGguf {
-            model_file,
-            batch_size,
-            n_threads,
-            n_threads_batch,
-            ..
-        } => {
-            if *batch_size == 0 {
-                return Err(KboltError::Config(
-                    "embeddings.batch_size must be greater than zero".to_string(),
-                )
-                .into());
-            }
-
-            if let Some(model_file) = model_file {
-                if model_file.trim().is_empty() {
-                    return Err(KboltError::Config(
-                        "embeddings.model_file must not be empty when set".to_string(),
-                    )
-                    .into());
-                }
-            }
-
-            if matches!(n_threads, Some(0)) {
-                return Err(KboltError::Config(
-                    "embeddings.n_threads must be greater than zero when set".to_string(),
-                )
-                .into());
-            }
-
-            if matches!(n_threads_batch, Some(0)) {
-                return Err(KboltError::Config(
-                    "embeddings.n_threads_batch must be greater than zero when set".to_string(),
-                )
-                .into());
-            }
-
-            Ok(())
-        }
-    }
-}
-
-fn validate_inference(inference: &InferenceConfig) -> Result<()> {
-    validate_text_inference_config("inference.reranker", inference.reranker.as_ref())?;
-    validate_expander_inference("inference.expander", inference.expander.as_ref())?;
     Ok(())
 }
 
@@ -1054,148 +703,6 @@ fn validate_role_provider_reference(
     Ok(())
 }
 
-fn validate_text_inference_config(scope: &str, config: Option<&TextInferenceConfig>) -> Result<()> {
-    let Some(config) = config else {
-        return Ok(());
-    };
-
-    validate_text_inference_provider(scope, &config.provider)
-}
-
-fn validate_expander_inference(
-    scope: &str,
-    config: Option<&ExpanderInferenceConfig>,
-) -> Result<()> {
-    let Some(config) = config else {
-        return Ok(());
-    };
-
-    match &config.provider {
-        ExpanderInferenceProvider::OpenAiCompatible {
-            model,
-            base_url,
-            api_key_env,
-            timeout_ms,
-            ..
-        } => {
-            if model.trim().is_empty() {
-                return Err(KboltError::Config(format!("{scope}.model must not be empty")).into());
-            }
-
-            if base_url.trim().is_empty() {
-                return Err(
-                    KboltError::Config(format!("{scope}.base_url must not be empty")).into(),
-                );
-            }
-
-            if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
-                return Err(KboltError::Config(format!(
-                    "{scope}.base_url must start with http:// or https://"
-                ))
-                .into());
-            }
-
-            if *timeout_ms == 0 {
-                return Err(KboltError::Config(format!(
-                    "{scope}.timeout_ms must be greater than zero"
-                ))
-                .into());
-            }
-
-            if let Some(api_key_env) = api_key_env.as_deref() {
-                if api_key_env.trim().is_empty() {
-                    return Err(KboltError::Config(format!(
-                        "{scope}.api_key_env must not be empty when set"
-                    ))
-                    .into());
-                }
-            }
-
-            Ok(())
-        }
-        ExpanderInferenceProvider::LocalLlama {
-            model_file,
-            max_tokens,
-            n_ctx,
-            reasoning_format,
-            chat_template_kwargs,
-            sampling,
-            ..
-        } => {
-            if *max_tokens == 0 {
-                return Err(KboltError::Config(format!(
-                    "{scope}.max_tokens must be greater than zero"
-                ))
-                .into());
-            }
-
-            if *n_ctx == 0 {
-                return Err(
-                    KboltError::Config(format!("{scope}.n_ctx must be greater than zero")).into(),
-                );
-            }
-
-            if let Some(model_file) = model_file {
-                if model_file.trim().is_empty() {
-                    return Err(KboltError::Config(format!(
-                        "{scope}.model_file must not be empty when set"
-                    ))
-                    .into());
-                }
-            }
-
-            if let Some(reasoning_format) = reasoning_format {
-                if reasoning_format.trim().is_empty() {
-                    return Err(KboltError::Config(format!(
-                        "{scope}.reasoning_format must not be empty when set"
-                    ))
-                    .into());
-                }
-            }
-
-            if let Some(chat_template_kwargs) = chat_template_kwargs {
-                if chat_template_kwargs.trim().is_empty() {
-                    return Err(KboltError::Config(format!(
-                        "{scope}.chat_template_kwargs must not be empty when set"
-                    ))
-                    .into());
-                }
-
-                let parsed: Value = serde_json::from_str(chat_template_kwargs).map_err(|err| {
-                    KboltError::Config(format!(
-                        "{scope}.chat_template_kwargs must be valid JSON: {err}"
-                    ))
-                })?;
-                if !parsed.is_object() {
-                    return Err(KboltError::Config(format!(
-                        "{scope}.chat_template_kwargs must be a JSON object"
-                    ))
-                    .into());
-                }
-            }
-
-            validate_expander_local_llama_sampling(scope, sampling)
-        }
-    }
-}
-
-fn validate_expander_local_llama_sampling(
-    scope: &str,
-    sampling: &ExpanderLocalLlamaSamplingConfig,
-) -> Result<()> {
-    validate_expander_sampling(
-        scope,
-        sampling.temperature,
-        sampling.top_k,
-        sampling.top_p,
-        sampling.min_p,
-        sampling.repeat_last_n,
-        sampling.repeat_penalty,
-        sampling.frequency_penalty,
-        sampling.presence_penalty,
-    )
-}
-
 fn validate_expander_sampling(
     scope: &str,
     temperature: f32,
@@ -1255,83 +762,6 @@ fn validate_expander_sampling(
     }
 
     Ok(())
-}
-
-fn validate_text_inference_provider(scope: &str, provider: &TextInferenceProvider) -> Result<()> {
-    match provider {
-        TextInferenceProvider::OpenAiCompatible {
-            model,
-            base_url,
-            api_key_env,
-            timeout_ms,
-            ..
-        } => {
-            if model.trim().is_empty() {
-                return Err(KboltError::Config(format!("{scope}.model must not be empty")).into());
-            }
-
-            if base_url.trim().is_empty() {
-                return Err(
-                    KboltError::Config(format!("{scope}.base_url must not be empty")).into(),
-                );
-            }
-
-            if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
-                return Err(KboltError::Config(format!(
-                    "{scope}.base_url must start with http:// or https://"
-                ))
-                .into());
-            }
-
-            if *timeout_ms == 0 {
-                return Err(KboltError::Config(format!(
-                    "{scope}.timeout_ms must be greater than zero"
-                ))
-                .into());
-            }
-
-            if let Some(api_key_env) = api_key_env.as_deref() {
-                if api_key_env.trim().is_empty() {
-                    return Err(KboltError::Config(format!(
-                        "{scope}.api_key_env must not be empty when set"
-                    ))
-                    .into());
-                }
-            }
-
-            Ok(())
-        }
-        TextInferenceProvider::LocalLlama {
-            model_file,
-            max_tokens,
-            n_ctx,
-            ..
-        } => {
-            if *max_tokens == 0 {
-                return Err(KboltError::Config(format!(
-                    "{scope}.max_tokens must be greater than zero"
-                ))
-                .into());
-            }
-
-            if *n_ctx == 0 {
-                return Err(
-                    KboltError::Config(format!("{scope}.n_ctx must be greater than zero")).into(),
-                );
-            }
-
-            if let Some(model_file) = model_file {
-                if model_file.trim().is_empty() {
-                    return Err(KboltError::Config(format!(
-                        "{scope}.model_file must not be empty when set"
-                    ))
-                    .into());
-                }
-            }
-
-            Ok(())
-        }
-    }
 }
 
 fn validate_chunk_policy(scope: &str, policy: &ChunkPolicy) -> Result<()> {
@@ -1465,6 +895,7 @@ fn validate_hybrid_fusion_weights(scope: &str, dense_weight: f32, bm25_weight: f
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
 struct FileConfig {
     #[serde(default)]
     default_space: Option<String>,
@@ -1473,60 +904,11 @@ struct FileConfig {
     #[serde(default, skip_serializing_if = "RoleBindingsConfig::is_empty")]
     roles: RoleBindingsConfig,
     #[serde(default)]
-    models: ModelConfig,
-    #[serde(default)]
-    embeddings: Option<EmbeddingConfig>,
-    #[serde(default)]
-    inference: FileInferenceConfig,
-    #[serde(default)]
     reaping: FileReapingConfig,
     #[serde(default)]
     chunking: ChunkingConfig,
     #[serde(default)]
     ranking: RankingConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-struct FileInferenceConfig {
-    #[serde(default)]
-    reranker: Option<FileTextInferenceConfig>,
-    #[serde(default)]
-    expander: Option<ExpanderInferenceConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct FileTextInferenceConfig {
-    #[serde(flatten)]
-    provider: FileTextInferenceProvider,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "provider", rename_all = "snake_case")]
-enum FileTextInferenceProvider {
-    #[serde(rename = "openai_compatible")]
-    OpenAiCompatible {
-        output_mode: TextInferenceOutputMode,
-        model: String,
-        base_url: String,
-        #[serde(default)]
-        api_key_env: Option<String>,
-        #[serde(default = "default_inference_timeout_ms")]
-        timeout_ms: u64,
-        #[serde(default = "default_inference_max_retries")]
-        max_retries: u32,
-    },
-    LocalLlama {
-        #[serde(default)]
-        model_file: Option<String>,
-        #[serde(default)]
-        max_tokens: Option<usize>,
-        #[serde(default = "default_local_inference_n_ctx")]
-        n_ctx: u32,
-        #[serde(default = "default_local_inference_n_gpu_layers")]
-        n_gpu_layers: Option<u32>,
-        #[serde(default = "default_llama_flash_attention_mode")]
-        flash_attention: LlamaFlashAttentionMode,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1549,142 +931,12 @@ impl From<&Config> for FileConfig {
             default_space: value.default_space.clone(),
             providers: value.providers.clone(),
             roles: value.roles.clone(),
-            models: value.models.clone(),
-            embeddings: value.embeddings.clone(),
-            inference: FileInferenceConfig::from(&value.inference),
             reaping: FileReapingConfig {
                 days: value.reaping.days,
             },
             chunking: value.chunking.clone(),
             ranking: value.ranking.clone(),
         }
-    }
-}
-
-impl From<FileInferenceConfig> for InferenceConfig {
-    fn from(value: FileInferenceConfig) -> Self {
-        Self {
-            reranker: file_text_inference_to_runtime(
-                value.reranker,
-                default_local_inference_max_tokens(),
-            ),
-            expander: value.expander,
-        }
-    }
-}
-
-impl From<&InferenceConfig> for FileInferenceConfig {
-    fn from(value: &InferenceConfig) -> Self {
-        Self {
-            reranker: value.reranker.as_ref().map(FileTextInferenceConfig::from),
-            expander: value.expander.clone(),
-        }
-    }
-}
-
-impl From<&TextInferenceConfig> for FileTextInferenceConfig {
-    fn from(value: &TextInferenceConfig) -> Self {
-        let provider = match &value.provider {
-            TextInferenceProvider::OpenAiCompatible {
-                output_mode,
-                model,
-                base_url,
-                api_key_env,
-                timeout_ms,
-                max_retries,
-            } => FileTextInferenceProvider::OpenAiCompatible {
-                output_mode: output_mode.clone(),
-                model: model.clone(),
-                base_url: base_url.clone(),
-                api_key_env: api_key_env.clone(),
-                timeout_ms: *timeout_ms,
-                max_retries: *max_retries,
-            },
-            TextInferenceProvider::LocalLlama {
-                model_file,
-                max_tokens,
-                n_ctx,
-                n_gpu_layers,
-                flash_attention,
-            } => FileTextInferenceProvider::LocalLlama {
-                model_file: model_file.clone(),
-                max_tokens: Some(*max_tokens),
-                n_ctx: *n_ctx,
-                n_gpu_layers: *n_gpu_layers,
-                flash_attention: *flash_attention,
-            },
-        };
-
-        Self { provider }
-    }
-}
-
-fn file_text_inference_to_runtime(
-    config: Option<FileTextInferenceConfig>,
-    default_max_tokens: usize,
-) -> Option<TextInferenceConfig> {
-    config.map(|config| TextInferenceConfig {
-        provider: file_text_inference_provider_to_runtime(config.provider, default_max_tokens),
-    })
-}
-
-fn file_text_inference_provider_to_runtime(
-    provider: FileTextInferenceProvider,
-    default_max_tokens: usize,
-) -> TextInferenceProvider {
-    match provider {
-        FileTextInferenceProvider::OpenAiCompatible {
-            output_mode,
-            model,
-            base_url,
-            api_key_env,
-            timeout_ms,
-            max_retries,
-        } => TextInferenceProvider::OpenAiCompatible {
-            output_mode,
-            model,
-            base_url,
-            api_key_env,
-            timeout_ms,
-            max_retries,
-        },
-        FileTextInferenceProvider::LocalLlama {
-            model_file,
-            max_tokens,
-            n_ctx,
-            n_gpu_layers,
-            flash_attention,
-        } => TextInferenceProvider::LocalLlama {
-            model_file,
-            max_tokens: max_tokens.unwrap_or(default_max_tokens),
-            n_ctx,
-            n_gpu_layers,
-            flash_attention,
-        },
-    }
-}
-
-fn default_embedder_source() -> ModelSourceConfig {
-    ModelSourceConfig {
-        provider: ModelProvider::HuggingFace,
-        id: DEFAULT_EMBED_MODEL.to_string(),
-        revision: None,
-    }
-}
-
-fn default_reranker_source() -> ModelSourceConfig {
-    ModelSourceConfig {
-        provider: ModelProvider::HuggingFace,
-        id: DEFAULT_RERANKER_MODEL.to_string(),
-        revision: None,
-    }
-}
-
-fn default_expander_source() -> ModelSourceConfig {
-    ModelSourceConfig {
-        provider: ModelProvider::HuggingFace,
-        id: DEFAULT_EXPANDER_MODEL.to_string(),
-        revision: None,
     }
 }
 
@@ -1730,24 +982,8 @@ fn default_chunk_profiles() -> HashMap<String, ChunkPolicy> {
     )])
 }
 
-fn default_embedding_timeout_ms() -> u64 {
-    DEFAULT_EMBEDDING_TIMEOUT_MS
-}
-
 fn default_embedding_batch_size() -> usize {
     DEFAULT_EMBEDDING_BATCH_SIZE
-}
-
-fn default_embedding_max_retries() -> u32 {
-    DEFAULT_EMBEDDING_MAX_RETRIES
-}
-
-fn default_local_embedding_max_length() -> usize {
-    DEFAULT_LOCAL_EMBEDDING_MAX_LENGTH
-}
-
-fn default_local_gguf_embedding_batch_size() -> usize {
-    DEFAULT_LOCAL_GGUF_EMBEDDING_BATCH_SIZE
 }
 
 fn default_inference_timeout_ms() -> u64 {
@@ -1758,32 +994,8 @@ fn default_inference_max_retries() -> u32 {
     DEFAULT_INFERENCE_MAX_RETRIES
 }
 
-fn default_local_inference_max_tokens() -> usize {
-    DEFAULT_LOCAL_INFERENCE_MAX_TOKENS
-}
-
 fn default_local_expander_max_tokens() -> usize {
     DEFAULT_LOCAL_EXPANDER_MAX_TOKENS
-}
-
-fn default_local_inference_n_ctx() -> u32 {
-    DEFAULT_LOCAL_INFERENCE_N_CTX
-}
-
-fn default_local_inference_n_gpu_layers() -> Option<u32> {
-    None
-}
-
-fn default_llama_flash_attention_mode() -> LlamaFlashAttentionMode {
-    DEFAULT_LLAMA_FLASH_ATTENTION_MODE
-}
-
-fn default_expander_enable_thinking() -> bool {
-    DEFAULT_EXPANDER_ENABLE_THINKING
-}
-
-fn default_expander_reasoning_format() -> Option<String> {
-    Some("none".to_string())
 }
 
 fn default_expander_seed() -> u32 {

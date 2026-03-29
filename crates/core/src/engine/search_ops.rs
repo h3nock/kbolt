@@ -176,7 +176,7 @@ impl Engine {
     ) -> Result<Vec<RankedChunk>> {
         let Some(embedder) = self.embedder.as_ref() else {
             return Err(KboltError::InvalidInput(
-                "semantic search requires embeddings configuration. add [embeddings] to index.toml with provider = \"openai_compatible\", \"voyage\", \"local_onnx\", or \"local_gguf\"".to_string(),
+                "semantic search requires a configured embedder role. bind [roles.embedder] to an embedding provider profile in index.toml".to_string(),
             )
             .into());
         };
@@ -319,7 +319,7 @@ impl Engine {
     ) -> Result<Vec<RankedChunk>> {
         let Some(expander) = self.expander.as_ref() else {
             return Err(KboltError::InvalidInput(
-                "deep search requires expander configuration. add [inference.expander] to index.toml".to_string(),
+                "deep search requires a configured expander role. bind [roles.expander] to a chat_completion provider profile in index.toml".to_string(),
             )
             .into());
         };

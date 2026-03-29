@@ -13,4 +13,3 @@ mod schedule_support;
 pub mod storage;
 
 pub use error::{CoreError, Result};
-pub use models::ModelPullEvent;

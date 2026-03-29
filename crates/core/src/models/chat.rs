@@ -8,11 +8,61 @@ use crate::models::http::{HttpJsonClient, HttpOperation};
 use crate::models::text::strip_json_fences;
 use crate::Result;
 
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ChatCompletionRequestOptions {
+    pub output_mode: TextInferenceOutputMode,
+    pub max_tokens: Option<usize>,
+    pub seed: Option<u32>,
+    pub temperature: Option<f32>,
+    pub top_k: Option<i32>,
+    pub top_p: Option<f32>,
+    pub min_p: Option<f32>,
+    pub repeat_last_n: Option<i32>,
+    pub repeat_penalty: Option<f32>,
+    pub frequency_penalty: Option<f32>,
+    pub presence_penalty: Option<f32>,
+}
+
+impl ChatCompletionRequestOptions {
+    pub(super) fn json_object() -> Self {
+        Self {
+            output_mode: TextInferenceOutputMode::JsonObject,
+            max_tokens: None,
+            seed: None,
+            temperature: Some(0.0),
+            top_k: None,
+            top_p: None,
+            min_p: None,
+            repeat_last_n: None,
+            repeat_penalty: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn text() -> Self {
+        Self {
+            output_mode: TextInferenceOutputMode::Text,
+            max_tokens: None,
+            seed: None,
+            temperature: Some(0.0),
+            top_k: None,
+            top_p: None,
+            min_p: None,
+            repeat_last_n: None,
+            repeat_penalty: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct HttpChatClient {
     http: HttpJsonClient,
     model: String,
-    output_mode: TextInferenceOutputMode,
+    options: ChatCompletionRequestOptions,
 }
 
 impl HttpChatClient {
@@ -22,7 +72,7 @@ impl HttpChatClient {
         timeout_ms: u64,
         max_retries: u32,
         model: &str,
-        output_mode: TextInferenceOutputMode,
+        options: ChatCompletionRequestOptions,
         provider_name: &'static str,
     ) -> Self {
         Self {
@@ -35,25 +85,20 @@ impl HttpChatClient {
                 provider_name,
             ),
             model: model.to_string(),
-            output_mode,
+            options,
         }
     }
 }
 
 impl CompletionClient for HttpChatClient {
     fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
-        let payload = build_chat_payload(
-            &self.model,
-            system_prompt,
-            user_prompt,
-            self.output_mode.clone(),
-        );
+        let payload = build_chat_payload(&self.model, system_prompt, user_prompt, &self.options);
 
         let response: ChatCompletionResponse =
             self.http
                 .post_json("chat/completions", &payload, HttpOperation::ChatCompletion)?;
         let content = response.into_text()?;
-        let normalized = match self.output_mode {
+        let normalized = match self.options.output_mode {
             TextInferenceOutputMode::JsonObject => content.trim(),
             TextInferenceOutputMode::Text => strip_json_fences(&content),
         };
@@ -65,11 +110,10 @@ pub(super) fn build_chat_payload(
     model: &str,
     system_prompt: &str,
     user_prompt: &str,
-    output_mode: TextInferenceOutputMode,
+    options: &ChatCompletionRequestOptions,
 ) -> Value {
     let mut payload = json!({
         "model": model,
-        "temperature": 0,
         "messages": [
             {
                 "role": "system",
@@ -81,7 +125,37 @@ pub(super) fn build_chat_payload(
             }
         ]
     });
-    if output_mode == TextInferenceOutputMode::JsonObject {
+    if let Some(max_tokens) = options.max_tokens {
+        payload["max_tokens"] = json!(max_tokens);
+    }
+    if let Some(seed) = options.seed {
+        payload["seed"] = json!(seed);
+    }
+    if let Some(temperature) = options.temperature {
+        payload["temperature"] = json!(temperature);
+    }
+    if let Some(top_k) = options.top_k {
+        payload["top_k"] = json!(top_k);
+    }
+    if let Some(top_p) = options.top_p {
+        payload["top_p"] = json!(top_p);
+    }
+    if let Some(min_p) = options.min_p {
+        payload["min_p"] = json!(min_p);
+    }
+    if let Some(repeat_last_n) = options.repeat_last_n {
+        payload["repeat_last_n"] = json!(repeat_last_n);
+    }
+    if let Some(repeat_penalty) = options.repeat_penalty {
+        payload["repeat_penalty"] = json!(repeat_penalty);
+    }
+    if let Some(frequency_penalty) = options.frequency_penalty {
+        payload["frequency_penalty"] = json!(frequency_penalty);
+    }
+    if let Some(presence_penalty) = options.presence_penalty {
+        payload["presence_penalty"] = json!(presence_penalty);
+    }
+    if options.output_mode == TextInferenceOutputMode::JsonObject {
         payload["response_format"] = json!({ "type": "json_object" });
     }
     payload

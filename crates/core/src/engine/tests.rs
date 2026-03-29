@@ -1,19 +1,17 @@
 use fs2::FileExt;
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::sync::{Arc, Mutex, OnceLock};
 use tempfile::tempdir;
 
 use crate::config::{
-    ChunkingConfig, Config, EmbeddingConfig, ExpanderInferenceConfig, ExpanderInferenceProvider,
-    ExpanderLocalLlamaSamplingConfig, InferenceConfig, LlamaFlashAttentionMode, ModelConfig,
-    ModelProvider, ModelSourceConfig, RankingConfig, ReapingConfig, TextInferenceConfig,
-    TextInferenceProvider,
+    ChunkingConfig, Config, EmbedderRoleConfig, ProviderOperation, ProviderProfileConfig,
+    RankingConfig, ReapingConfig, RoleBindingsConfig,
 };
 use crate::engine::{retrieval_text_with_prefix, Engine};
 use crate::ingest::chunk::FinalChunkKind;
 use crate::storage::Storage;
-use crate::ModelPullEvent;
 use kbolt_types::{
     ActiveSpaceSource, AddCollectionRequest, AddScheduleRequest, GetRequest, KboltError, Locator,
     MultiGetRequest, OmitReason, RemoveScheduleRequest, RemoveScheduleSelector, ScheduleBackend,
@@ -111,6 +109,19 @@ impl crate::models::Expander for StaticExpander {
     }
 }
 
+fn base_test_config(config_dir: std::path::PathBuf, cache_dir: std::path::PathBuf) -> Config {
+    Config {
+        config_dir,
+        cache_dir,
+        default_space: None,
+        providers: HashMap::new(),
+        roles: RoleBindingsConfig::default(),
+        reaping: ReapingConfig { days: 7 },
+        chunking: ChunkingConfig::default(),
+        ranking: RankingConfig::default(),
+    }
+}
+
 fn test_engine() -> Engine {
     let root = tempdir().expect("create temp root");
     let root_path = root.path().to_path_buf();
@@ -118,35 +129,7 @@ fn test_engine() -> Engine {
     let config_dir = root_path.join("config");
     let cache_dir = root_path.join("cache");
     let storage = Storage::new(&cache_dir).expect("create storage");
-    let config = Config {
-        config_dir,
-        cache_dir,
-        default_space: None,
-        providers: std::collections::HashMap::new(),
-        roles: crate::config::RoleBindingsConfig::default(),
-        models: ModelConfig {
-            embedder: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "embed-model".to_string(),
-                revision: None,
-            },
-            reranker: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "reranker-model".to_string(),
-                revision: None,
-            },
-            expander: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "expander-model".to_string(),
-                revision: None,
-            },
-        },
-        embeddings: None,
-        inference: InferenceConfig::default(),
-        reaping: ReapingConfig { days: 7 },
-        chunking: ChunkingConfig::default(),
-        ranking: RankingConfig::default(),
-    };
+    let config = base_test_config(config_dir, cache_dir);
     Engine::from_parts(storage, config)
 }
 
@@ -157,35 +140,7 @@ fn test_engine_with_embedder(embedder: Arc<dyn crate::models::Embedder>) -> Engi
     let config_dir = root_path.join("config");
     let cache_dir = root_path.join("cache");
     let storage = Storage::new(&cache_dir).expect("create storage");
-    let config = Config {
-        config_dir,
-        cache_dir,
-        default_space: None,
-        providers: std::collections::HashMap::new(),
-        roles: crate::config::RoleBindingsConfig::default(),
-        models: ModelConfig {
-            embedder: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "embed-model".to_string(),
-                revision: None,
-            },
-            reranker: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "reranker-model".to_string(),
-                revision: None,
-            },
-            expander: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "expander-model".to_string(),
-                revision: None,
-            },
-        },
-        embeddings: None,
-        inference: InferenceConfig::default(),
-        reaping: ReapingConfig { days: 7 },
-        chunking: ChunkingConfig::default(),
-        ranking: RankingConfig::default(),
-    };
+    let config = base_test_config(config_dir, cache_dir);
     Engine::from_parts_with_embedder(storage, config, Some(embedder))
 }
 
@@ -214,35 +169,8 @@ fn test_engine_with_search_models_and_ranking(
     let config_dir = root_path.join("config");
     let cache_dir = root_path.join("cache");
     let storage = Storage::new(&cache_dir).expect("create storage");
-    let config = Config {
-        config_dir,
-        cache_dir,
-        default_space: None,
-        providers: std::collections::HashMap::new(),
-        roles: crate::config::RoleBindingsConfig::default(),
-        models: ModelConfig {
-            embedder: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "embed-model".to_string(),
-                revision: None,
-            },
-            reranker: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "reranker-model".to_string(),
-                revision: None,
-            },
-            expander: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "expander-model".to_string(),
-                revision: None,
-            },
-        },
-        embeddings: None,
-        inference: InferenceConfig::default(),
-        reaping: ReapingConfig { days: 7 },
-        chunking: ChunkingConfig::default(),
-        ranking,
-    };
+    let mut config = base_test_config(config_dir, cache_dir);
+    config.ranking = ranking;
     Engine::from_parts_with_models(storage, config, embedder, reranker, expander)
 }
 
@@ -256,42 +184,22 @@ fn test_engine_with_embedder_and_embedding_model(
     let config_dir = root_path.join("config");
     let cache_dir = root_path.join("cache");
     let storage = Storage::new(&cache_dir).expect("create storage");
-    let config = Config {
-        config_dir,
-        cache_dir,
-        default_space: None,
-        providers: std::collections::HashMap::new(),
-        roles: crate::config::RoleBindingsConfig::default(),
-        models: ModelConfig {
-            embedder: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "embed-model".to_string(),
-                revision: None,
-            },
-            reranker: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "reranker-model".to_string(),
-                revision: None,
-            },
-            expander: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "expander-model".to_string(),
-                revision: None,
-            },
-        },
-        embeddings: Some(EmbeddingConfig::OpenAiCompatible {
-            model: model.to_string(),
+    let mut config = base_test_config(config_dir, cache_dir);
+    config.providers.insert(
+        "remote_embed".to_string(),
+        ProviderProfileConfig::OpenAiCompatible {
+            operation: ProviderOperation::Embedding,
             base_url: "https://example.test/v1".to_string(),
+            model: model.to_string(),
             api_key_env: None,
             timeout_ms: 30_000,
-            batch_size: 32,
             max_retries: 0,
-        }),
-        inference: InferenceConfig::default(),
-        reaping: ReapingConfig { days: 7 },
-        chunking: ChunkingConfig::default(),
-        ranking: RankingConfig::default(),
-    };
+        },
+    );
+    config.roles.embedder = Some(EmbedderRoleConfig {
+        provider: "remote_embed".to_string(),
+        batch_size: 32,
+    });
     Engine::from_parts_with_embedder(storage, config, Some(embedder))
 }
 
@@ -302,35 +210,8 @@ fn test_engine_with_default_space(default_space: Option<&str>) -> Engine {
     let config_dir = root_path.join("config");
     let cache_dir = root_path.join("cache");
     let storage = Storage::new(&cache_dir).expect("create storage");
-    let config = Config {
-        config_dir,
-        cache_dir,
-        default_space: default_space.map(ToString::to_string),
-        providers: std::collections::HashMap::new(),
-        roles: crate::config::RoleBindingsConfig::default(),
-        models: ModelConfig {
-            embedder: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "embed-model".to_string(),
-                revision: None,
-            },
-            reranker: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "reranker-model".to_string(),
-                revision: None,
-            },
-            expander: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "expander-model".to_string(),
-                revision: None,
-            },
-        },
-        embeddings: None,
-        inference: InferenceConfig::default(),
-        reaping: ReapingConfig { days: 7 },
-        chunking: ChunkingConfig::default(),
-        ranking: RankingConfig::default(),
-    };
+    let mut config = base_test_config(config_dir, cache_dir);
+    config.default_space = default_space.map(ToString::to_string);
     Engine::from_parts(storage, config)
 }
 
@@ -341,271 +222,9 @@ fn test_engine_with_reaping_days(days: u32) -> Engine {
     let config_dir = root_path.join("config");
     let cache_dir = root_path.join("cache");
     let storage = Storage::new(&cache_dir).expect("create storage");
-    let config = Config {
-        config_dir,
-        cache_dir,
-        default_space: None,
-        providers: std::collections::HashMap::new(),
-        roles: crate::config::RoleBindingsConfig::default(),
-        models: ModelConfig {
-            embedder: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "embed-model".to_string(),
-                revision: None,
-            },
-            reranker: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "reranker-model".to_string(),
-                revision: None,
-            },
-            expander: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "expander-model".to_string(),
-                revision: None,
-            },
-        },
-        embeddings: None,
-        inference: InferenceConfig::default(),
-        reaping: ReapingConfig { days },
-        chunking: ChunkingConfig::default(),
-        ranking: RankingConfig::default(),
-    };
+    let mut config = base_test_config(config_dir, cache_dir);
+    config.reaping = ReapingConfig { days };
     Engine::from_parts(storage, config)
-}
-
-fn local_text_inference_config(model_file: &str) -> TextInferenceConfig {
-    TextInferenceConfig {
-        provider: TextInferenceProvider::LocalLlama {
-            model_file: Some(model_file.to_string()),
-            max_tokens: 256,
-            n_ctx: 2048,
-            n_gpu_layers: Some(0),
-            flash_attention: LlamaFlashAttentionMode::Disabled,
-        },
-    }
-}
-
-fn local_expander_config(model_file: &str) -> ExpanderInferenceConfig {
-    ExpanderInferenceConfig {
-        provider: ExpanderInferenceProvider::LocalLlama {
-            model_file: Some(model_file.to_string()),
-            max_tokens: 256,
-            n_ctx: 2048,
-            n_gpu_layers: Some(0),
-            flash_attention: LlamaFlashAttentionMode::Disabled,
-            enable_thinking: false,
-            reasoning_format: Some("none".to_string()),
-            chat_template_kwargs: None,
-            sampling: ExpanderLocalLlamaSamplingConfig::default(),
-        },
-    }
-}
-
-fn test_engine_with_local_model_runtime() -> Engine {
-    let root = tempdir().expect("create temp root");
-    let root_path = root.path().to_path_buf();
-    std::mem::forget(root);
-    let config_dir = root_path.join("config");
-    let cache_dir = root_path.join("cache");
-    let storage = Storage::new(&cache_dir).expect("create storage");
-    let config = Config {
-        config_dir,
-        cache_dir,
-        default_space: None,
-        providers: std::collections::HashMap::new(),
-        roles: crate::config::RoleBindingsConfig::default(),
-        models: ModelConfig {
-            embedder: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "embed-model".to_string(),
-                revision: None,
-            },
-            reranker: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "reranker-model".to_string(),
-                revision: None,
-            },
-            expander: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "expander-model".to_string(),
-                revision: None,
-            },
-        },
-        embeddings: Some(EmbeddingConfig::LocalGguf {
-            model_file: None,
-            batch_size: 8,
-            flash_attention: LlamaFlashAttentionMode::Disabled,
-            n_threads: None,
-            n_threads_batch: None,
-        }),
-        inference: InferenceConfig {
-            reranker: Some(TextInferenceConfig {
-                provider: TextInferenceProvider::LocalLlama {
-                    model_file: None,
-                    max_tokens: 256,
-                    n_ctx: 2048,
-                    n_gpu_layers: Some(0),
-                    flash_attention: LlamaFlashAttentionMode::Disabled,
-                },
-            }),
-            expander: Some(ExpanderInferenceConfig {
-                provider: ExpanderInferenceProvider::LocalLlama {
-                    model_file: None,
-                    max_tokens: 256,
-                    n_ctx: 2048,
-                    n_gpu_layers: Some(0),
-                    flash_attention: LlamaFlashAttentionMode::Disabled,
-                    enable_thinking: false,
-                    reasoning_format: Some("none".to_string()),
-                    chat_template_kwargs: None,
-                    sampling: ExpanderLocalLlamaSamplingConfig::default(),
-                },
-            }),
-        },
-        reaping: ReapingConfig { days: 7 },
-        chunking: ChunkingConfig::default(),
-        ranking: RankingConfig::default(),
-    };
-    Engine::from_parts(storage, config)
-}
-
-fn test_engine_with_missing_embedder_model() -> Engine {
-    let root = tempdir().expect("create temp root");
-    let root_path = root.path().to_path_buf();
-    std::mem::forget(root);
-    let config_dir = root_path.join("config");
-    let cache_dir = root_path.join("cache");
-    let storage = Storage::new(&cache_dir).expect("create storage");
-    let config = Config {
-        config_dir,
-        cache_dir,
-        default_space: None,
-        providers: std::collections::HashMap::new(),
-        roles: crate::config::RoleBindingsConfig::default(),
-        models: ModelConfig {
-            embedder: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "embed-model".to_string(),
-                revision: None,
-            },
-            reranker: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "reranker-model".to_string(),
-                revision: None,
-            },
-            expander: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "expander-model".to_string(),
-                revision: None,
-            },
-        },
-        embeddings: Some(EmbeddingConfig::LocalGguf {
-            model_file: Some("missing-embedder.gguf".to_string()),
-            batch_size: 8,
-            flash_attention: LlamaFlashAttentionMode::Disabled,
-            n_threads: None,
-            n_threads_batch: None,
-        }),
-        inference: InferenceConfig::default(),
-        reaping: ReapingConfig { days: 7 },
-        chunking: ChunkingConfig::default(),
-        ranking: RankingConfig::default(),
-    };
-    let model_dir = config.cache_dir.join("models");
-    let embedder = crate::models::build_embedder_with_local_runtime(
-        config.embeddings.as_ref(),
-        &config.models,
-        &model_dir,
-    )
-    .expect("build embedder for test engine");
-    Engine::from_parts_with_embedder(storage, config, embedder)
-}
-
-fn test_engine_with_missing_expander_model() -> Engine {
-    let root = tempdir().expect("create temp root");
-    let root_path = root.path().to_path_buf();
-    std::mem::forget(root);
-    let config_dir = root_path.join("config");
-    let cache_dir = root_path.join("cache");
-    let storage = Storage::new(&cache_dir).expect("create storage");
-    let config = Config {
-        config_dir,
-        cache_dir,
-        default_space: None,
-        providers: std::collections::HashMap::new(),
-        roles: crate::config::RoleBindingsConfig::default(),
-        models: ModelConfig {
-            embedder: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "embed-model".to_string(),
-                revision: None,
-            },
-            reranker: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "reranker-model".to_string(),
-                revision: None,
-            },
-            expander: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "expander-model".to_string(),
-                revision: None,
-            },
-        },
-        embeddings: None,
-        inference: InferenceConfig {
-            reranker: None,
-            expander: Some(local_expander_config("missing-expander.gguf")),
-        },
-        reaping: ReapingConfig { days: 7 },
-        chunking: ChunkingConfig::default(),
-        ranking: RankingConfig::default(),
-    };
-    Engine::from_parts(storage, config)
-}
-
-fn test_engine_with_embedder_and_expander_and_missing_reranker_model(
-    embedder: Arc<dyn crate::models::Embedder>,
-    expander: Arc<dyn crate::models::Expander>,
-) -> Engine {
-    let root = tempdir().expect("create temp root");
-    let root_path = root.path().to_path_buf();
-    std::mem::forget(root);
-    let config_dir = root_path.join("config");
-    let cache_dir = root_path.join("cache");
-    let storage = Storage::new(&cache_dir).expect("create storage");
-    let config = Config {
-        config_dir,
-        cache_dir,
-        default_space: None,
-        providers: std::collections::HashMap::new(),
-        roles: crate::config::RoleBindingsConfig::default(),
-        models: ModelConfig {
-            embedder: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "embed-model".to_string(),
-                revision: None,
-            },
-            reranker: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "reranker-model".to_string(),
-                revision: None,
-            },
-            expander: ModelSourceConfig {
-                provider: ModelProvider::HuggingFace,
-                id: "expander-model".to_string(),
-                revision: None,
-            },
-        },
-        embeddings: None,
-        inference: InferenceConfig {
-            reranker: Some(local_text_inference_config("missing-reranker.gguf")),
-            expander: None,
-        },
-        reaping: ReapingConfig { days: 7 },
-        chunking: ChunkingConfig::default(),
-        ranking: RankingConfig::default(),
-    };
-    Engine::from_parts_with_models(storage, config, Some(embedder), None, Some(expander))
 }
 
 fn with_kbolt_space_env<T>(value: Option<&str>, run: impl FnOnce() -> T) -> T {
@@ -732,43 +351,6 @@ fn retrieval_text_with_prefix_omits_fallback_title_when_absent() {
     assert_eq!(text, "heading: Setup\n\nbody text");
 }
 
-const MODEL_MANIFEST_FILENAME: &str = ".kbolt-model-manifest.json";
-
-fn model_provider_key(provider: &ModelProvider) -> &'static str {
-    match provider {
-        ModelProvider::HuggingFace => "huggingface",
-    }
-}
-
-fn json_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn seed_model_artifact(
-    model_root: &std::path::Path,
-    role: &str,
-    source: &ModelSourceConfig,
-    payload: &[u8],
-) {
-    let role_dir = model_root.join(role);
-    std::fs::create_dir_all(&role_dir).expect("create model role dir");
-    std::fs::write(role_dir.join("artifact.gguf"), payload).expect("write model payload");
-
-    let provider = model_provider_key(&source.provider);
-    let id = json_escape(&source.id);
-    let manifest = match source.revision.as_deref() {
-        Some(revision) => format!(
-            "{{\n  \"provider\": \"{provider}\",\n  \"id\": \"{id}\",\n  \"revision\": \"{}\"\n}}\n",
-            json_escape(revision)
-        ),
-        None => format!(
-            "{{\n  \"provider\": \"{provider}\",\n  \"id\": \"{id}\",\n  \"revision\": null\n}}\n"
-        ),
-    };
-
-    std::fs::write(role_dir.join(MODEL_MANIFEST_FILENAME), manifest).expect("write model manifest");
-}
-
 #[test]
 fn add_space_and_space_info_include_description_and_zero_counts() {
     let engine = test_engine();
@@ -842,11 +424,8 @@ fn describe_rename_and_remove_space_delegate_to_storage() {
 #[test]
 fn config_and_storage_accessors_expose_engine_components() {
     let engine = test_engine();
-    assert_eq!(
-        engine.config().models.embedder.id,
-        "embed-model",
-        "config accessor should expose loaded config"
-    );
+    assert!(engine.config().providers.is_empty());
+    assert_eq!(engine.config().roles, RoleBindingsConfig::default());
 
     let default_space = engine
         .storage()
@@ -2269,58 +1848,6 @@ fn search_auto_mode_uses_keyword_path_and_scopes_space() {
 }
 
 #[test]
-fn search_auto_mode_falls_back_when_dense_model_is_missing() {
-    with_kbolt_space_env(None, || {
-        let engine = test_engine_with_missing_embedder_model();
-        engine.add_space("work", None).expect("add work");
-
-        let root = tempdir().expect("create temp root");
-        let work_path = root.path().join("work-api");
-        std::fs::create_dir_all(&work_path).expect("create collection dir");
-        add_collection_fixture(&engine, "work", "api", work_path.clone());
-
-        write_text_file(&work_path.join("guide.md"), "fallback dense token\n");
-        engine
-            .update(UpdateOptions {
-                space: Some("work".to_string()),
-                collections: vec!["api".to_string()],
-                no_embed: true,
-                dry_run: false,
-                verbose: false,
-            })
-            .expect("index without embeddings");
-
-        let response = engine
-            .search(SearchRequest {
-                query: "fallback dense token".to_string(),
-                mode: SearchMode::Auto,
-                space: Some("work".to_string()),
-                collections: vec!["api".to_string()],
-                limit: 10,
-                min_score: 0.0,
-                no_rerank: true,
-                debug: false,
-            })
-            .expect("auto search should fall back to keyword");
-
-        assert_eq!(response.requested_mode, SearchMode::Auto);
-        assert_eq!(response.effective_mode, SearchMode::Keyword);
-        assert!(response.pipeline.keyword);
-        assert!(!response.pipeline.dense);
-        assert!(
-            response.pipeline.notices.iter().any(|notice| {
-                notice.step == kbolt_types::SearchPipelineStep::Dense
-                    && notice.reason
-                        == kbolt_types::SearchPipelineUnavailableReason::ModelNotAvailable
-            }),
-            "expected dense model-missing notice: {:?}",
-            response.pipeline.notices
-        );
-        assert!(!response.results.is_empty(), "expected fallback results");
-    });
-}
-
-#[test]
 fn search_auto_mode_uses_hybrid_signals_when_embedder_is_configured() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_embedder(Arc::new(DeterministicEmbedder));
@@ -2447,61 +1974,6 @@ fn search_deep_mode_returns_results_with_reranker_signal() {
         let signals = first.signals.as_ref().expect("debug signals");
         assert!(signals.bm25.is_some() || signals.dense.is_some());
         assert!(signals.reranker.is_some());
-    });
-}
-
-#[test]
-fn search_deep_mode_reports_rerank_unavailable_when_model_is_missing() {
-    with_kbolt_space_env(None, || {
-        let engine = test_engine_with_embedder_and_expander_and_missing_reranker_model(
-            Arc::new(DeterministicEmbedder),
-            Arc::new(DeterministicExpander),
-        );
-        engine.add_space("work", None).expect("add work");
-
-        let root = tempdir().expect("create temp root");
-        let work_path = root.path().join("work-api");
-        std::fs::create_dir_all(&work_path).expect("create collection dir");
-        add_collection_fixture(&engine, "work", "api", work_path.clone());
-
-        write_text_file(
-            &work_path.join("guide.md"),
-            "# Setup\n\nThis document explains setup steps and install details.\n",
-        );
-        engine
-            .update(update_options(Some("work"), &["api"]))
-            .expect("initial update");
-
-        let response = engine
-            .search(SearchRequest {
-                query: "setup install".to_string(),
-                mode: SearchMode::Deep,
-                space: Some("work".to_string()),
-                collections: vec!["api".to_string()],
-                limit: 10,
-                min_score: 0.0,
-                no_rerank: false,
-                debug: true,
-            })
-            .expect("deep search should skip missing reranker");
-
-        assert_eq!(response.requested_mode, SearchMode::Deep);
-        assert_eq!(response.effective_mode, SearchMode::Deep);
-        assert!(response.pipeline.expansion);
-        assert!(!response.pipeline.rerank);
-        assert!(
-            response.pipeline.notices.iter().any(|notice| {
-                notice.step == kbolt_types::SearchPipelineStep::Rerank
-                    && notice.reason
-                        == kbolt_types::SearchPipelineUnavailableReason::ModelNotAvailable
-            }),
-            "expected rerank model-missing notice: {:?}",
-            response.pipeline.notices
-        );
-        assert!(!response.results.is_empty(), "expected deep results");
-        let first = &response.results[0];
-        let signals = first.signals.as_ref().expect("debug signals");
-        assert!(signals.reranker.is_none());
     });
 }
 
@@ -2748,50 +2220,6 @@ fn search_rerank_sends_one_representative_per_document() {
 }
 
 #[test]
-fn search_deep_mode_fails_when_expansion_model_is_missing() {
-    with_kbolt_space_env(None, || {
-        let engine = test_engine_with_missing_expander_model();
-        engine.add_space("work", None).expect("add work");
-
-        let root = tempdir().expect("create temp root");
-        let work_path = root.path().join("work-api");
-        std::fs::create_dir_all(&work_path).expect("create collection dir");
-        add_collection_fixture(&engine, "work", "api", work_path.clone());
-
-        write_text_file(&work_path.join("guide.md"), "setup install details\n");
-        engine
-            .update(UpdateOptions {
-                space: Some("work".to_string()),
-                collections: vec!["api".to_string()],
-                no_embed: true,
-                dry_run: false,
-                verbose: false,
-            })
-            .expect("index without embeddings");
-
-        let err = engine
-            .search(SearchRequest {
-                query: "setup install".to_string(),
-                mode: SearchMode::Deep,
-                space: Some("work".to_string()),
-                collections: vec!["api".to_string()],
-                limit: 10,
-                min_score: 0.0,
-                no_rerank: false,
-                debug: false,
-            })
-            .expect_err("deep search should require working expansion");
-
-        match KboltError::from(err) {
-            KboltError::ModelNotAvailable { name } => {
-                assert_eq!(name, "expander-model");
-            }
-            other => panic!("unexpected error: {other}"),
-        }
-    });
-}
-
-#[test]
 fn initial_search_candidate_limit_uses_configured_rerank_expansion() {
     let engine = test_engine();
 
@@ -2881,12 +2309,12 @@ fn search_validates_semantic_and_collection_scope() {
         match KboltError::from(semantic_err) {
             KboltError::InvalidInput(message) => {
                 assert!(
-                    message.contains("semantic search requires embeddings configuration"),
+                    message.contains("semantic search requires a configured embedder role"),
                     "unexpected message: {message}"
                 );
                 assert!(
-                    message.contains("\"local_gguf\""),
-                    "expected local_gguf guidance in message: {message}"
+                    message.contains("[roles.embedder]"),
+                    "expected role-binding guidance in message: {message}"
                 );
             }
             other => panic!("unexpected error: {other}"),
@@ -4618,27 +4046,12 @@ fn status_reports_space_collection_and_model_counts() {
             engine.storage().count_embedded_chunks(None).unwrap()
         );
 
-        assert_eq!(
-            status.models.embedder.name,
-            engine.config().models.embedder.id
-        );
-        assert_eq!(
-            status.models.reranker.name,
-            engine.config().models.reranker.id
-        );
-        assert_eq!(
-            status.models.expander.name,
-            engine.config().models.expander.id
-        );
-        assert!(!status.models.embedder.downloaded);
-        assert!(!status.models.reranker.downloaded);
-        assert!(!status.models.expander.downloaded);
-        assert_eq!(status.models.embedder.size_bytes, None);
-        assert_eq!(status.models.reranker.size_bytes, None);
-        assert_eq!(status.models.expander.size_bytes, None);
-        assert_eq!(status.models.embedder.path, None);
-        assert_eq!(status.models.reranker.path, None);
-        assert_eq!(status.models.expander.path, None);
+        assert!(!status.models.embedder.configured);
+        assert!(!status.models.reranker.configured);
+        assert!(!status.models.expander.configured);
+        assert!(!status.models.embedder.ready);
+        assert!(!status.models.reranker.ready);
+        assert!(!status.models.expander.ready);
 
         let default_status = status
             .spaces
@@ -4811,71 +4224,12 @@ fn model_status_reflects_configured_model_names() {
     let engine = test_engine_with_default_space(None);
     let status = engine.model_status().expect("read model status");
 
-    assert_eq!(status.embedder.name, "embed-model");
-    assert_eq!(status.reranker.name, "reranker-model");
-    assert_eq!(status.expander.name, "expander-model");
-    assert!(!status.embedder.downloaded);
-    assert!(!status.reranker.downloaded);
-    assert!(!status.expander.downloaded);
-    assert_eq!(status.embedder.size_bytes, None);
-    assert_eq!(status.reranker.size_bytes, None);
-    assert_eq!(status.expander.size_bytes, None);
-    assert_eq!(status.embedder.path, None);
-    assert_eq!(status.reranker.path, None);
-    assert_eq!(status.expander.path, None);
-}
-
-#[test]
-fn pull_models_skips_already_present_model_directories() {
-    let engine = test_engine_with_local_model_runtime();
-    let model_dir = engine.config().cache_dir.join("models");
-    let models = &engine.config().models;
-    seed_model_artifact(&model_dir, "embedder", &models.embedder, b"e");
-    seed_model_artifact(&model_dir, "reranker", &models.reranker, b"r");
-    seed_model_artifact(&model_dir, "expander", &models.expander, b"x");
-
-    let report = engine.pull_models().expect("pull models");
-    assert_eq!(report.downloaded.len(), 0);
-    assert_eq!(report.already_present.len(), 3);
-    assert_eq!(report.total_bytes, 0);
-}
-
-#[test]
-fn pull_models_with_progress_emits_already_present_events() {
-    let engine = test_engine_with_local_model_runtime();
-    let model_dir = engine.config().cache_dir.join("models");
-    let models = &engine.config().models;
-    seed_model_artifact(&model_dir, "embedder", &models.embedder, b"e");
-    seed_model_artifact(&model_dir, "reranker", &models.reranker, b"r");
-    seed_model_artifact(&model_dir, "expander", &models.expander, b"x");
-
-    let mut events = Vec::new();
-    let report = engine
-        .pull_models_with_progress(|event| events.push(event))
-        .expect("pull models with progress");
-    assert_eq!(report.downloaded.len(), 0);
-    assert_eq!(report.already_present.len(), 3);
-
-    assert_eq!(
-        events,
-        vec![
-            ModelPullEvent::AlreadyPresent {
-                role: "embedder".to_string(),
-                model: "embed-model".to_string(),
-                bytes: 1,
-            },
-            ModelPullEvent::AlreadyPresent {
-                role: "reranker".to_string(),
-                model: "reranker-model".to_string(),
-                bytes: 1,
-            },
-            ModelPullEvent::AlreadyPresent {
-                role: "expander".to_string(),
-                model: "expander-model".to_string(),
-                bytes: 1,
-            },
-        ]
-    );
+    assert!(!status.embedder.configured);
+    assert!(!status.reranker.configured);
+    assert!(!status.expander.configured);
+    assert_eq!(status.embedder.profile, None);
+    assert_eq!(status.reranker.profile, None);
+    assert_eq!(status.expander.profile, None);
 }
 
 #[test]

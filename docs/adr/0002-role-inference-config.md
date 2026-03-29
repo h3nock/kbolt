@@ -74,15 +74,14 @@ presence_penalty = 0.5
 # omit n_gpu_layers to auto-detect acceleration
 ```
 
-Validation rules match embedding config expectations:
+Validation rules match provider-profile expectations:
 - `openai_compatible`: non-empty `model`, `base_url` must be `http://` or `https://`, `timeout_ms > 0`, and `api_key_env` non-empty when set
-- `local_llama`: `max_tokens > 0`, `n_ctx > 0`, optional `model_file` must be non-empty when set, optional `reasoning_format` must be non-empty when set, optional `chat_template_kwargs` must be a JSON object, and sampler fields must stay within valid ranges
-- `local_gguf` and `local_llama` share `flash_attention = "auto" | "enabled" | "disabled"`; default is `auto`
+- `llama_cpp_server`: non-empty `model`, `base_url` must be `http://` or `https://`, and `timeout_ms > 0`
 
 ## Consequences
 - Reranker and expander can be configured independently from embeddings.
 - Providers are pluggable per role, and expander generation settings are explicit instead of hidden in model-specific adapters.
 - Unset roles stay unset: kbolt does not synthesize heuristic replacements.
 - Deep search therefore requires an expander configuration, while reranking is skipped and reported when no reranker is configured.
-- V1 provider scope for these role adapters is `openai_compatible` and `local_llama`.
+- V1 provider scope for these role adapters is `openai_compatible` and `llama_cpp_server`.
 - The expander contract is plain query variants (`query -> Vec<String>`). Prompting, JSON parsing, duplicate/original filtering, and generation controls live behind the provider-specific expander implementation rather than a public `adapter` switch.

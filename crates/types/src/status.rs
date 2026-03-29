@@ -40,12 +40,16 @@ pub struct ModelStatus {
     pub expander: ModelInfo,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelInfo {
-    pub name: String,
-    pub downloaded: bool,
-    pub size_bytes: Option<u64>,
-    pub path: Option<PathBuf>,
+    pub configured: bool,
+    pub ready: bool,
+    pub profile: Option<String>,
+    pub kind: Option<String>,
+    pub operation: Option<String>,
+    pub model: Option<String>,
+    pub endpoint: Option<String>,
+    pub issue: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

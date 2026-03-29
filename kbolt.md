@@ -408,7 +408,7 @@ pub enum KboltError {
     FileDeleted(PathBuf),
 
     // Models
-    #[error("model not available: {name}. Run `kbolt models pull` to download.")]
+    #[error("model not available: {name}")]
     ModelNotAvailable { name: String },
 
     #[error("model download failed: {0}")]
@@ -928,21 +928,17 @@ pub fn save(config: &Config) -> Result<()>;
 
 Trait definitions are listed in the Architecture section (`Embedder`, `Reranker`, `Expander`, `Extractor`). Runtime model orchestration exposed from `models/mod.rs` is:
 
-```rust
-pub fn pull(config: &ModelConfig, model_dir: &Path) -> Result<PullReport>;
-pub fn status(config: &ModelConfig, model_dir: &Path) -> Result<ModelStatus>;
-```
+Engine composes role adapters through one inference gateway:
+- `Config`
+- `Gateway` (role -> provider deployment resolution)
+- provider client (`llama.cpp server` or `openai_compatible`)
+- role adapter (`Embedder`, `Reranker`, `Expander`)
 
-Engine composes role adapters through model builders (`build_embedder_*`, `build_reranker_*`, `build_expander_*`) and then routes update/search through those role traits. Unset reranker and expander roles stay unset: deep search requires an expander, and reranking is skipped with an explicit pipeline notice when no reranker is configured.
+Unset reranker and expander roles stay unset: deep search requires an expander, and reranking is skipped with an explicit pipeline notice when no reranker is configured.
 
-Model download is delegated through a provider abstraction (for example, HuggingFace, local filesystem mirrors, or cloud object storage). The core model module must not hardcode provider-specific assumptions in orchestration logic.
-
-Embedding inference provider scope is separate from model artifact download:
-- V1 providers: `openai_compatible`, `voyage`, `local_onnx`, `local_gguf`
-- V2 consideration: native Google embeddings provider (keep out of V1 unless native-only controls are required)
-
-Text inference providers for reranker/expander are configured per role:
-- V1 providers: `openai_compatible`, `local_llama`
+Inference provider scope is deployment-based:
+- local backend family: `llama.cpp server`
+- remote backend family: `openai_compatible`
 
 ---
 
@@ -1665,42 +1661,41 @@ See [ADR 0003](./docs/adr/0003-provider-profiles-and-shared-local-inference.md).
 
 default_space = "work"    # optional, set via `kbolt space default`
 
-[models]
+[providers.local_embed]
+kind = "llama_cpp_server"
+operation = "embedding"
+base_url = "http://127.0.0.1:8101"
+model = "embeddinggemma"
 
-[models.embedder]
-provider = "huggingface"
-id = "ggml-org/embeddinggemma-300M-GGUF"
-# revision = "main"
+[providers.local_rerank]
+kind = "llama_cpp_server"
+operation = "reranking"
+base_url = "http://127.0.0.1:8102"
+model = "qwen3-reranker"
 
-[models.reranker]
-provider = "huggingface"
-id = "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF"
+[providers.local_expand]
+kind = "llama_cpp_server"
+operation = "chat_completion"
+base_url = "http://127.0.0.1:8103"
+model = "qwen3-1.7b"
 
-[models.expander]
-provider = "huggingface"
-id = "Qwen/Qwen3-1.7B-GGUF"
+[providers.remote_expand]
+kind = "openai_compatible"
+operation = "chat_completion"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+model = "gpt-5-mini"
 
-[embeddings]
-provider = "local_gguf"          # V1: openai_compatible | voyage | local_onnx | local_gguf
-model_file = "embeddinggemma-300M-Q8_0.gguf"
-batch_size = 8
-# n_threads = 8
-# n_threads_batch = 8
+[roles.embedder]
+provider = "local_embed"
+batch_size = 32
 
-[inference.reranker]
-provider = "local_llama"         # V1: openai_compatible | local_llama
-model_file = "qwen3-reranker-0.6b-q8_0.gguf"
-max_tokens = 256
-n_ctx = 2048
-# omit n_gpu_layers to auto-detect acceleration
+[roles.reranker]
+provider = "local_rerank"
 
-[inference.expander]
-provider = "local_llama"
-model_file = "Qwen3-1.7B-Q8_0.gguf"
+[roles.expander]
+provider = "local_expand"
 max_tokens = 600
-n_ctx = 2048
-enable_thinking = false
-reasoning_format = "none"
 temperature = 0.7
 top_k = 20
 top_p = 0.8
@@ -1709,7 +1704,6 @@ repeat_last_n = 64
 repeat_penalty = 1.0
 frequency_penalty = 0.0
 presence_penalty = 0.5
-# omit n_gpu_layers to auto-detect acceleration
 
 [reaping]
 days = 7    # hard-delete documents deactivated longer than this
@@ -1764,12 +1758,9 @@ Collection-level chunking overrides are deferred in V1. When implemented, they w
 Notes:
 - Google embedding access through OpenAI-compatible endpoints is covered by `provider = "openai_compatible"` with the corresponding Google-compatible base URL.
 - Native Google embeddings API support is intentionally deferred to V2.
-- `provider = "local_onnx"` loads ONNX + tokenizer artifacts from `~/.cache/kbolt/models/embedder` (or explicit `onnx_file` / `tokenizer_file`).
-- `provider = "local_gguf"` loads a GGUF artifact from `~/.cache/kbolt/models/embedder` (or explicit `model_file`) and fails fast when artifact selection is ambiguous.
-- The current `local_gguf` embedding path is tuned for the default EmbeddingGemma model family: query inputs are prefixed with `task: search result | query: `, document inputs with `title: none | text: `, sequence embeddings use mean pooling, and vectors are L2-normalized before storage/search.
-- `provider = "local_llama"` loads GGUF artifacts from role directories (`reranker` / `expander`) and fails fast when artifact selection is ambiguous.
-- The current local reranker path is intentionally Qwen3-specific: it builds the documented Qwen3 reranker prompt contract, uses rank pooling, and should be treated as support for Qwen3-style GGUF rerankers rather than a generic local cross-encoder interface.
-- The current expander path generates plain query variants as a JSON array of strings. The local llama provider owns grammar-constrained generation, non-thinking chat-template controls, and configurable sampler settings; the engine owns how generated variants are searched and aggregated.
+- Local inference profiles point at externally managed `llama.cpp server` deployments; kbolt does not download or supervise those server processes in V1.
+- Roles can bind to different deployments even when they share the same backend family, for example separate local embedding/reranking/chat endpoints or different remote OpenAI-compatible endpoints.
+- The embedder path still uses EmbeddingGemma query/document normalization internally; the reranker path still uses the Qwen3-style reranker contract; the expander path still generates plain query variants as JSON strings. Those are role-adapter behaviors, not user-configurable local runtime ownership.
 
 ---
 
@@ -1842,8 +1833,7 @@ INDEXING
     --verbose                      Log per-file decisions
 
 MODELS
-  kbolt models pull                 Download required models
-  kbolt models list                 Show model status
+  kbolt models list                 Show configured role bindings and provider readiness
 
 EVALUATION
   kbolt eval run                    Run the default evaluation suite
@@ -1904,19 +1894,19 @@ Injected into LLM system prompt on connection:
 
 ---
 
-## Models (V1 — Off-the-shelf)
+## Inference Deployments
 
 | Role | Model | Format | Size | Runtime |
 |---|---|---|---|---|
-| Embedding | embeddinggemma 300M | GGUF Q8 | ~314MB | llama-cpp-rs (GPU/CPU) |
-| Reranker | Qwen3-Reranker 0.6B | GGUF Q8 | ~640MB | llama-cpp-rs (GPU/CPU) |
-| Expander | Qwen3 1.7B | GGUF Q8 | ~1.7GB | llama-cpp-rs (GPU/CPU) |
+| Embedding | embeddinggemma 300M | GGUF Q8 | ~314MB | `llama.cpp server` |
+| Reranker | Qwen3-Reranker 0.6B | GGUF Q8 | ~640MB | `llama.cpp server` |
+| Expander | Qwen3 1.7B | GGUF Q8 | ~1.7GB | `llama.cpp server` |
 
-Download path is provider-agnostic in core: model orchestration depends on a provider abstraction, and artifact download is delegated to provider adapters. Default adapter is HuggingFace Hub via `hf-hub` (resumable downloads, checksum verification, local caching). `kbolt models pull` downloads only required role artifacts (embedder: one ONNX + tokenizer for `local_onnx`, or one GGUF for `local_gguf`; text roles: one GGUF each).
+In the provider-profile architecture, kbolt does not own local model artifact download or process supervision. Local inference is served by one or more externally managed `llama.cpp server` deployments, and kbolt binds roles to those deployments through `providers.*` + `roles.*`.
 
-Prompting is CLI-only: interactive terminal sessions may prompt to pull models when missing; non-interactive CLI and MCP never prompt. Non-interactive update errors include actionable guidance to run `kbolt models pull` or re-run with `--no-embed` when embedding is optional.
+Remote inference uses `openai_compatible` provider profiles. Different roles may bind to different remote deployments without changing engine/search code.
 
-Models loaded lazily — embedder loads on first `kbolt update` (with embedding), reranker loads on first search that triggers reranking, expander loads on first `--deep` search. Once loaded, models stay in memory for the process lifetime (freed when the process exits). No inactivity timeout in V1 — it would add timer/reload complexity and cause unpredictable latency spikes during MCP sessions. Memory reclamation via timeout is a V2/daemon-mode feature.
+`kbolt models list` reports configured role bindings plus endpoint readiness. Update/collection-add guidance now points users to configure role bindings or opt out of embedding when appropriate.
 
 ---
 
