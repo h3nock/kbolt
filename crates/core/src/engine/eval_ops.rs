@@ -680,6 +680,8 @@ judgments = [{ path = "rust/guides/traits.md", relevance = 1 }]
             config_dir,
             cache_dir,
             default_space: None,
+            providers: std::collections::HashMap::new(),
+            roles: crate::config::RoleBindingsConfig::default(),
             models: ModelConfig {
                 embedder: ModelSourceConfig {
                     provider: ModelProvider::HuggingFace,

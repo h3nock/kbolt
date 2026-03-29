@@ -1652,6 +1652,14 @@ Return top results up to `--limit` (default `10`).
 
 System-level settings only. Spaces and collections are stored in SQLite, managed via CLI.
 
+**Architecture direction**: inference is moving toward provider profiles plus role bindings.
+- one local backend family: `llama.cpp server`
+- multiple local deployment profiles of that same kind
+- many remote backends
+- per-role provider choice
+
+See [ADR 0003](./docs/adr/0003-provider-profiles-and-shared-local-inference.md).
+
 ```toml
 # ~/.config/kbolt/index.toml
 

@@ -1,7 +1,16 @@
 # ADR 0002: Role-Specific Inference Config
 
 ## Status
-Accepted
+Superseded by ADR 0003
+
+This ADR introduced per-role inference config, but it still reflected in-process local runtime
+ownership. The target architecture now standardizes on:
+- one local backend family: `llama.cpp server`
+- multiple local deployment profiles of that same kind
+- many remote backends
+- per-role provider choice through provider profiles and role bindings
+
+See [ADR 0003](./0003-provider-profiles-and-shared-local-inference.md).
 
 ## Context
 Kbolt already had:

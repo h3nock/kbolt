@@ -66,6 +66,8 @@ pub struct Config {
     pub config_dir: PathBuf,
     pub cache_dir: PathBuf,
     pub default_space: Option<String>,
+    pub providers: HashMap<String, ProviderProfileConfig>,
+    pub roles: RoleBindingsConfig,
     pub models: ModelConfig,
     pub embeddings: Option<EmbeddingConfig>,
     pub inference: InferenceConfig,
@@ -132,6 +134,174 @@ pub struct InferenceConfig {
     pub expander: Option<ExpanderInferenceConfig>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderOperation {
+    Embedding,
+    Reranking,
+    ChatCompletion,
+}
+
+impl ProviderOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Embedding => "embedding",
+            Self::Reranking => "reranking",
+            Self::ChatCompletion => "chat_completion",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProviderProfileConfig {
+    LlamaCppServer {
+        operation: ProviderOperation,
+        base_url: String,
+        model: String,
+        #[serde(default = "default_inference_timeout_ms")]
+        timeout_ms: u64,
+        #[serde(default = "default_inference_max_retries")]
+        max_retries: u32,
+    },
+    #[serde(rename = "openai_compatible")]
+    OpenAiCompatible {
+        operation: ProviderOperation,
+        base_url: String,
+        model: String,
+        #[serde(default)]
+        api_key_env: Option<String>,
+        #[serde(default = "default_inference_timeout_ms")]
+        timeout_ms: u64,
+        #[serde(default = "default_inference_max_retries")]
+        max_retries: u32,
+    },
+}
+
+impl ProviderProfileConfig {
+    pub fn operation(&self) -> ProviderOperation {
+        match self {
+            Self::LlamaCppServer { operation, .. } | Self::OpenAiCompatible { operation, .. } => {
+                *operation
+            }
+        }
+    }
+
+    pub fn base_url(&self) -> &str {
+        match self {
+            Self::LlamaCppServer { base_url, .. } | Self::OpenAiCompatible { base_url, .. } => {
+                base_url
+            }
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        match self {
+            Self::LlamaCppServer { model, .. } | Self::OpenAiCompatible { model, .. } => model,
+        }
+    }
+
+    pub fn api_key_env(&self) -> Option<&str> {
+        match self {
+            Self::LlamaCppServer { .. } => None,
+            Self::OpenAiCompatible { api_key_env, .. } => api_key_env.as_deref(),
+        }
+    }
+
+    pub fn timeout_ms(&self) -> u64 {
+        match self {
+            Self::LlamaCppServer { timeout_ms, .. } | Self::OpenAiCompatible { timeout_ms, .. } => {
+                *timeout_ms
+            }
+        }
+    }
+
+    pub fn max_retries(&self) -> u32 {
+        match self {
+            Self::LlamaCppServer { max_retries, .. }
+            | Self::OpenAiCompatible { max_retries, .. } => *max_retries,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RoleBindingsConfig {
+    #[serde(default)]
+    pub embedder: Option<EmbedderRoleConfig>,
+    #[serde(default)]
+    pub reranker: Option<RerankerRoleConfig>,
+    #[serde(default)]
+    pub expander: Option<ExpanderRoleConfig>,
+}
+
+impl RoleBindingsConfig {
+    fn is_empty(&self) -> bool {
+        self.embedder.is_none() && self.reranker.is_none() && self.expander.is_none()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbedderRoleConfig {
+    pub provider: String,
+    #[serde(default = "default_embedding_batch_size")]
+    pub batch_size: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RerankerRoleConfig {
+    pub provider: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExpanderRoleConfig {
+    pub provider: String,
+    #[serde(default = "default_local_expander_max_tokens")]
+    pub max_tokens: usize,
+    #[serde(flatten)]
+    pub sampling: ExpanderSamplingConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExpanderSamplingConfig {
+    #[serde(default = "default_expander_seed")]
+    pub seed: u32,
+    #[serde(default = "default_expander_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_expander_top_k")]
+    pub top_k: i32,
+    #[serde(default = "default_expander_top_p")]
+    pub top_p: f32,
+    #[serde(default = "default_expander_min_p")]
+    pub min_p: f32,
+    #[serde(default = "default_expander_repeat_last_n")]
+    pub repeat_last_n: i32,
+    #[serde(default = "default_expander_repeat_penalty")]
+    pub repeat_penalty: f32,
+    #[serde(default = "default_expander_frequency_penalty")]
+    pub frequency_penalty: f32,
+    #[serde(default = "default_expander_presence_penalty")]
+    pub presence_penalty: f32,
+}
+
+pub type ExpanderRoleSamplingConfig = ExpanderSamplingConfig;
+pub type ExpanderLocalLlamaSamplingConfig = ExpanderSamplingConfig;
+
+impl Default for ExpanderSamplingConfig {
+    fn default() -> Self {
+        Self {
+            seed: default_expander_seed(),
+            temperature: default_expander_temperature(),
+            top_k: default_expander_top_k(),
+            top_p: default_expander_top_p(),
+            min_p: default_expander_min_p(),
+            repeat_last_n: default_expander_repeat_last_n(),
+            repeat_penalty: default_expander_repeat_penalty(),
+            frequency_penalty: default_expander_frequency_penalty(),
+            presence_penalty: default_expander_presence_penalty(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextInferenceConfig {
     #[serde(flatten)]
@@ -185,46 +355,8 @@ pub enum ExpanderInferenceProvider {
         #[serde(default)]
         chat_template_kwargs: Option<String>,
         #[serde(flatten)]
-        sampling: ExpanderLocalLlamaSamplingConfig,
+        sampling: ExpanderSamplingConfig,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExpanderLocalLlamaSamplingConfig {
-    #[serde(default = "default_expander_seed")]
-    pub seed: u32,
-    #[serde(default = "default_expander_temperature")]
-    pub temperature: f32,
-    #[serde(default = "default_expander_top_k")]
-    pub top_k: i32,
-    #[serde(default = "default_expander_top_p")]
-    pub top_p: f32,
-    #[serde(default = "default_expander_min_p")]
-    pub min_p: f32,
-    #[serde(default = "default_expander_repeat_last_n")]
-    pub repeat_last_n: i32,
-    #[serde(default = "default_expander_repeat_penalty")]
-    pub repeat_penalty: f32,
-    #[serde(default = "default_expander_frequency_penalty")]
-    pub frequency_penalty: f32,
-    #[serde(default = "default_expander_presence_penalty")]
-    pub presence_penalty: f32,
-}
-
-impl Default for ExpanderLocalLlamaSamplingConfig {
-    fn default() -> Self {
-        Self {
-            seed: default_expander_seed(),
-            temperature: default_expander_temperature(),
-            top_k: default_expander_top_k(),
-            top_p: default_expander_top_p(),
-            min_p: default_expander_min_p(),
-            repeat_last_n: default_expander_repeat_last_n(),
-            repeat_penalty: default_expander_repeat_penalty(),
-            frequency_penalty: default_expander_frequency_penalty(),
-            presence_penalty: default_expander_presence_penalty(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -505,6 +637,8 @@ pub fn save(config: &Config) -> Result<()> {
     validate_chunking(&config.chunking)?;
     validate_embeddings(config.embeddings.as_ref())?;
     validate_inference(&config.inference)?;
+    validate_provider_profiles(&config.providers)?;
+    validate_role_bindings(&config.roles, &config.providers)?;
     validate_ranking(&config.ranking)?;
 
     let file_config = FileConfig::from(config);
@@ -565,6 +699,8 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
             config_dir: config_dir.to_path_buf(),
             cache_dir: cache_dir.to_path_buf(),
             default_space: None,
+            providers: HashMap::new(),
+            roles: RoleBindingsConfig::default(),
             models: ModelConfig::default(),
             embeddings: None,
             inference: InferenceConfig::default(),
@@ -588,12 +724,16 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
     validate_embeddings(file_config.embeddings.as_ref())?;
     let inference = InferenceConfig::from(file_config.inference.clone());
     validate_inference(&inference)?;
+    validate_provider_profiles(&file_config.providers)?;
+    validate_role_bindings(&file_config.roles, &file_config.providers)?;
     validate_ranking(&file_config.ranking)?;
 
     Ok(Config {
         config_dir: config_dir.to_path_buf(),
         cache_dir: cache_dir.to_path_buf(),
         default_space: file_config.default_space,
+        providers: file_config.providers,
+        roles: file_config.roles,
         models: file_config.models,
         embeddings: file_config.embeddings,
         inference,
@@ -760,6 +900,160 @@ fn validate_inference(inference: &InferenceConfig) -> Result<()> {
     Ok(())
 }
 
+fn validate_provider_profiles(providers: &HashMap<String, ProviderProfileConfig>) -> Result<()> {
+    for (name, profile) in providers {
+        if name.trim().is_empty() {
+            return Err(
+                KboltError::Config("providers table names must not be empty".to_string()).into(),
+            );
+        }
+
+        validate_provider_profile(format!("providers.{name}").as_str(), profile)?;
+    }
+
+    Ok(())
+}
+
+fn validate_provider_profile(scope: &str, profile: &ProviderProfileConfig) -> Result<()> {
+    validate_provider_profile_common(
+        scope,
+        profile.base_url(),
+        profile.model(),
+        profile.api_key_env(),
+        profile.timeout_ms(),
+    )
+}
+
+fn validate_provider_profile_common(
+    scope: &str,
+    base_url: &str,
+    model: &str,
+    api_key_env: Option<&str>,
+    timeout_ms: u64,
+) -> Result<()> {
+    if model.trim().is_empty() {
+        return Err(KboltError::Config(format!("{scope}.model must not be empty")).into());
+    }
+
+    if base_url.trim().is_empty() {
+        return Err(KboltError::Config(format!("{scope}.base_url must not be empty")).into());
+    }
+
+    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+        return Err(KboltError::Config(format!(
+            "{scope}.base_url must start with http:// or https://"
+        ))
+        .into());
+    }
+
+    if timeout_ms == 0 {
+        return Err(
+            KboltError::Config(format!("{scope}.timeout_ms must be greater than zero")).into(),
+        );
+    }
+
+    if let Some(api_key_env) = api_key_env {
+        if api_key_env.trim().is_empty() {
+            return Err(KboltError::Config(format!(
+                "{scope}.api_key_env must not be empty when set"
+            ))
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_role_bindings(
+    roles: &RoleBindingsConfig,
+    providers: &HashMap<String, ProviderProfileConfig>,
+) -> Result<()> {
+    if let Some(embedder) = roles.embedder.as_ref() {
+        validate_role_provider_reference(
+            "roles.embedder",
+            &embedder.provider,
+            &[ProviderOperation::Embedding],
+            providers,
+        )?;
+        if embedder.batch_size == 0 {
+            return Err(KboltError::Config(
+                "roles.embedder.batch_size must be greater than zero".to_string(),
+            )
+            .into());
+        }
+    }
+
+    if let Some(reranker) = roles.reranker.as_ref() {
+        validate_role_provider_reference(
+            "roles.reranker",
+            &reranker.provider,
+            &[
+                ProviderOperation::Reranking,
+                ProviderOperation::ChatCompletion,
+            ],
+            providers,
+        )?;
+    }
+
+    if let Some(expander) = roles.expander.as_ref() {
+        validate_role_provider_reference(
+            "roles.expander",
+            &expander.provider,
+            &[ProviderOperation::ChatCompletion],
+            providers,
+        )?;
+        if expander.max_tokens == 0 {
+            return Err(KboltError::Config(
+                "roles.expander.max_tokens must be greater than zero".to_string(),
+            )
+            .into());
+        }
+        validate_expander_sampling(
+            "roles.expander",
+            expander.sampling.temperature,
+            expander.sampling.top_k,
+            expander.sampling.top_p,
+            expander.sampling.min_p,
+            expander.sampling.repeat_last_n,
+            expander.sampling.repeat_penalty,
+            expander.sampling.frequency_penalty,
+            expander.sampling.presence_penalty,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_role_provider_reference(
+    scope: &str,
+    provider_name: &str,
+    allowed_operations: &[ProviderOperation],
+    providers: &HashMap<String, ProviderProfileConfig>,
+) -> Result<()> {
+    if provider_name.trim().is_empty() {
+        return Err(KboltError::Config(format!("{scope}.provider must not be empty")).into());
+    }
+
+    let Some(profile) = providers.get(provider_name) else {
+        return Err(KboltError::Config(format!(
+            "{scope}.provider references undefined provider profile '{provider_name}'"
+        ))
+        .into());
+    };
+
+    let operation = profile.operation();
+
+    if !allowed_operations.contains(&operation) {
+        return Err(KboltError::Config(format!(
+            "{scope}.provider '{provider_name}' uses incompatible operation '{}'",
+            operation.as_str()
+        ))
+        .into());
+    }
+
+    Ok(())
+}
+
 fn validate_text_inference_config(scope: &str, config: Option<&TextInferenceConfig>) -> Result<()> {
     let Some(config) = config else {
         return Ok(());
@@ -889,50 +1183,74 @@ fn validate_expander_local_llama_sampling(
     scope: &str,
     sampling: &ExpanderLocalLlamaSamplingConfig,
 ) -> Result<()> {
-    if !sampling.temperature.is_finite() || sampling.temperature <= 0.0 {
+    validate_expander_sampling(
+        scope,
+        sampling.temperature,
+        sampling.top_k,
+        sampling.top_p,
+        sampling.min_p,
+        sampling.repeat_last_n,
+        sampling.repeat_penalty,
+        sampling.frequency_penalty,
+        sampling.presence_penalty,
+    )
+}
+
+fn validate_expander_sampling(
+    scope: &str,
+    temperature: f32,
+    top_k: i32,
+    top_p: f32,
+    min_p: f32,
+    repeat_last_n: i32,
+    repeat_penalty: f32,
+    frequency_penalty: f32,
+    presence_penalty: f32,
+) -> Result<()> {
+    if !temperature.is_finite() || temperature <= 0.0 {
         return Err(KboltError::Config(format!(
             "{scope}.temperature must be finite and greater than zero"
         ))
         .into());
     }
 
-    if sampling.top_k <= 0 {
+    if top_k <= 0 {
         return Err(KboltError::Config(format!("{scope}.top_k must be greater than zero")).into());
     }
 
-    if !sampling.top_p.is_finite() || sampling.top_p <= 0.0 || sampling.top_p > 1.0 {
+    if !top_p.is_finite() || top_p <= 0.0 || top_p > 1.0 {
         return Err(KboltError::Config(format!(
             "{scope}.top_p must be finite and in the range (0, 1]"
         ))
         .into());
     }
 
-    if !sampling.min_p.is_finite() || sampling.min_p < 0.0 || sampling.min_p > 1.0 {
+    if !min_p.is_finite() || min_p < 0.0 || min_p > 1.0 {
         return Err(KboltError::Config(format!(
             "{scope}.min_p must be finite and in the range [0, 1]"
         ))
         .into());
     }
 
-    if sampling.repeat_last_n < -1 {
+    if repeat_last_n < -1 {
         return Err(KboltError::Config(format!(
             "{scope}.repeat_last_n must be greater than or equal to -1"
         ))
         .into());
     }
 
-    if !sampling.repeat_penalty.is_finite() || sampling.repeat_penalty <= 0.0 {
+    if !repeat_penalty.is_finite() || repeat_penalty <= 0.0 {
         return Err(KboltError::Config(format!(
             "{scope}.repeat_penalty must be finite and greater than zero"
         ))
         .into());
     }
 
-    if !sampling.frequency_penalty.is_finite() {
+    if !frequency_penalty.is_finite() {
         return Err(KboltError::Config(format!("{scope}.frequency_penalty must be finite")).into());
     }
 
-    if !sampling.presence_penalty.is_finite() {
+    if !presence_penalty.is_finite() {
         return Err(KboltError::Config(format!("{scope}.presence_penalty must be finite")).into());
     }
 
@@ -1150,6 +1468,10 @@ fn validate_hybrid_fusion_weights(scope: &str, dense_weight: f32, bm25_weight: f
 struct FileConfig {
     #[serde(default)]
     default_space: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    providers: HashMap<String, ProviderProfileConfig>,
+    #[serde(default, skip_serializing_if = "RoleBindingsConfig::is_empty")]
+    roles: RoleBindingsConfig,
     #[serde(default)]
     models: ModelConfig,
     #[serde(default)]
@@ -1225,6 +1547,8 @@ impl From<&Config> for FileConfig {
     fn from(value: &Config) -> Self {
         Self {
             default_space: value.default_space.clone(),
+            providers: value.providers.clone(),
+            roles: value.roles.clone(),
             models: value.models.clone(),
             embeddings: value.embeddings.clone(),
             inference: FileInferenceConfig::from(&value.inference),

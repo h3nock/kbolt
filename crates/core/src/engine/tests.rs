@@ -122,6 +122,8 @@ fn test_engine() -> Engine {
         config_dir,
         cache_dir,
         default_space: None,
+        providers: std::collections::HashMap::new(),
+        roles: crate::config::RoleBindingsConfig::default(),
         models: ModelConfig {
             embedder: ModelSourceConfig {
                 provider: ModelProvider::HuggingFace,
@@ -159,6 +161,8 @@ fn test_engine_with_embedder(embedder: Arc<dyn crate::models::Embedder>) -> Engi
         config_dir,
         cache_dir,
         default_space: None,
+        providers: std::collections::HashMap::new(),
+        roles: crate::config::RoleBindingsConfig::default(),
         models: ModelConfig {
             embedder: ModelSourceConfig {
                 provider: ModelProvider::HuggingFace,
@@ -214,6 +218,8 @@ fn test_engine_with_search_models_and_ranking(
         config_dir,
         cache_dir,
         default_space: None,
+        providers: std::collections::HashMap::new(),
+        roles: crate::config::RoleBindingsConfig::default(),
         models: ModelConfig {
             embedder: ModelSourceConfig {
                 provider: ModelProvider::HuggingFace,
@@ -254,6 +260,8 @@ fn test_engine_with_embedder_and_embedding_model(
         config_dir,
         cache_dir,
         default_space: None,
+        providers: std::collections::HashMap::new(),
+        roles: crate::config::RoleBindingsConfig::default(),
         models: ModelConfig {
             embedder: ModelSourceConfig {
                 provider: ModelProvider::HuggingFace,
@@ -298,6 +306,8 @@ fn test_engine_with_default_space(default_space: Option<&str>) -> Engine {
         config_dir,
         cache_dir,
         default_space: default_space.map(ToString::to_string),
+        providers: std::collections::HashMap::new(),
+        roles: crate::config::RoleBindingsConfig::default(),
         models: ModelConfig {
             embedder: ModelSourceConfig {
                 provider: ModelProvider::HuggingFace,
@@ -335,6 +345,8 @@ fn test_engine_with_reaping_days(days: u32) -> Engine {
         config_dir,
         cache_dir,
         default_space: None,
+        providers: std::collections::HashMap::new(),
+        roles: crate::config::RoleBindingsConfig::default(),
         models: ModelConfig {
             embedder: ModelSourceConfig {
                 provider: ModelProvider::HuggingFace,
@@ -400,6 +412,8 @@ fn test_engine_with_local_model_runtime() -> Engine {
         config_dir,
         cache_dir,
         default_space: None,
+        providers: std::collections::HashMap::new(),
+        roles: crate::config::RoleBindingsConfig::default(),
         models: ModelConfig {
             embedder: ModelSourceConfig {
                 provider: ModelProvider::HuggingFace,
@@ -466,6 +480,8 @@ fn test_engine_with_missing_embedder_model() -> Engine {
         config_dir,
         cache_dir,
         default_space: None,
+        providers: std::collections::HashMap::new(),
+        roles: crate::config::RoleBindingsConfig::default(),
         models: ModelConfig {
             embedder: ModelSourceConfig {
                 provider: ModelProvider::HuggingFace,
@@ -516,6 +532,8 @@ fn test_engine_with_missing_expander_model() -> Engine {
         config_dir,
         cache_dir,
         default_space: None,
+        providers: std::collections::HashMap::new(),
+        roles: crate::config::RoleBindingsConfig::default(),
         models: ModelConfig {
             embedder: ModelSourceConfig {
                 provider: ModelProvider::HuggingFace,
@@ -559,6 +577,8 @@ fn test_engine_with_embedder_and_expander_and_missing_reranker_model(
         config_dir,
         cache_dir,
         default_space: None,
+        providers: std::collections::HashMap::new(),
+        roles: crate::config::RoleBindingsConfig::default(),
         models: ModelConfig {
             embedder: ModelSourceConfig {
                 provider: ModelProvider::HuggingFace,
