@@ -23,6 +23,12 @@ The previous config model mixed deployment concerns with role concerns:
 
 That shape does not match the target operating model.
 
+The design process also surfaced several negative constraints:
+- this refactor is pre-release, so the architecture should not carry migration shims or dual paths
+- local multi-user and multi-agent use needs one shared serving model, not per-process local runtimes
+- remote provider flexibility matters, but local backend sprawl does not
+- role adapters should be capability-oriented and provider-backed, not model-specific
+
 ## Decision
 Use **provider profiles plus role bindings** as the target inference architecture.
 
@@ -67,6 +73,36 @@ Kbolt will not, in this first architecture step:
 - auto-start local servers
 - supervise them
 - own local GGUF runtime construction for normal inference
+
+## Rejected Alternatives
+
+### Keep in-process local runtimes as the primary architecture
+Rejected because it gives kbolt the wrong ownership boundary. It couples inference behavior to
+artifact management, makes multi-agent/local concurrency harder to reason about, and keeps local
+resource scheduling inside random client processes instead of inside a shared serving layer.
+
+### Use provider profiles as connection-only records and keep model on the role
+Rejected because the local deployment unit is a concrete server+model+operation combination.
+Splitting that across provider and role makes role bindings harder to reason about and weakens
+operation validation.
+
+### Add a normalized `connections + deployments + roles` schema
+Rejected for V1 because it solves hypothetical repetition before we have real repetition
+pressure. Provider-profile-as-deployment gives the right boundary with much less machinery.
+
+### Keep old and new inference schemas side by side during refactor
+Rejected because this repo is still in active development with no migration requirement.
+Supporting both would preserve the old mistakes, complicate engine construction, and hide which
+schema is authoritative.
+
+### Let kbolt continue to own local model pulls and local runtime setup
+Rejected because it conflicts with the chosen local architecture. Once local inference is served
+by externally managed `llama.cpp server` deployments, kbolt should report readiness and bind
+roles, not download or supervise those models itself.
+
+### Force one remote vendor
+Rejected because remote providers already own serving/scheduling and users will have different
+preferences there. The architecture standardizes local backend family, not remote vendor.
 
 ## Target Configuration Shape
 
@@ -132,3 +168,5 @@ presence_penalty = 0.5
 - local deployment ownership is separated from role behavior
 - current in-process local runtime modules are no longer the target architecture center
 - remote vendor support remains extensible without changing the core schema
+- provider profiles and role bindings are the only authoritative inference schema
+- readiness/status is now deployment-oriented rather than artifact-oriented

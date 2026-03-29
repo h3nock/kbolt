@@ -17,6 +17,11 @@ Kbolt's speed profile is not uniform across modes:
 
 This document records the measured baseline for `40/20/30` and the current best understanding of the main bottlenecks.
 
+This report was written before the provider-profile refactor removed the old in-process local
+runtime modules. The performance conclusions still matter, but some file references below point
+to historical implementations. The current reranker/expander provider-backed implementations now
+live under `crates/core/src/models/inference.rs`.
+
 ## Benchmark Method
 
 Benchmarks were run against:
@@ -91,7 +96,7 @@ The `40/20/30` configuration was selected because it was the best global comprom
 Relevant code:
 
 - `crates/core/src/engine/search_ops.rs`
-- `crates/core/src/models/local_reranker.rs`
+- `crates/core/src/models/inference.rs`
 
 Observed behavior:
 
@@ -105,7 +110,7 @@ This matches the measured latency jump when reranking is enabled.
 
 ### 2) The reranker is serialized and scores documents one-by-one
 
-Current reranker behavior in `local_reranker.rs`:
+Historical reranker behavior before the provider-profile refactor:
 
 - guarded by `inference_lock: Mutex<()>`
 - tokenizes every `(query, document)` prompt independently

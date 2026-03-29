@@ -6,7 +6,7 @@
 
 A best-in-class local-first retrieval engine: correct, fast, and extensible. V1 focuses on core retrieval quality with clean extension points. Model training, SPLADE, and advanced features are deferred to V2.
 
-**Stack**: Rust, Tantivy (FTS), USearch (dense vectors), SQLite (metadata + entity storage), ONNX Runtime (embeddings), llama-cpp-rs (reranking/generation), tree-sitter (code), pulldown-cmark (markdown), clap (CLI), TOML (system config).
+**Stack**: Rust, Tantivy (FTS), USearch (dense vectors), SQLite (metadata + entity storage), HTTP inference clients against local `llama.cpp server` and remote OpenAI-compatible deployments, tree-sitter (code), pulldown-cmark (markdown), clap (CLI), TOML (system config).
 
 **Distribution**: Shell installer script (`curl -fsSL https://... | sh`) + Homebrew tap + GitHub Releases with prebuilt binaries for macOS (arm64, x86_64) and Linux (x86_64, arm64). One-liner install, no Rust toolchain required. `cargo install` as fallback for Rust developers.
 
@@ -30,7 +30,8 @@ CLI and MCP are thin adapters over the `Engine` struct. HTTP server (axum, Strea
 
 ### Process Model
 
-Kbolt is a **single process** in V1. No daemon, no background service.
+Kbolt itself is a **single process** in V1. No kbolt daemon, no kbolt-owned background
+inference service.
 
 ```
 kbolt search "query"     → process starts, searches, prints, exits
@@ -38,11 +39,15 @@ kbolt update             → process starts, scans/indexes, exits
 kbolt mcp                → process starts, stays alive for MCP client session, exits on disconnect
 ```
 
-No process running between commands. Models live as long as the process — loaded on first use within a session, freed when the process exits. MCP sessions keep models warm naturally (process stays alive). CLI commands cold-start if dense/reranking is needed.
+No kbolt process runs between commands. MCP sessions keep the `Engine` warm because the process
+stays alive for the client session, but local inference deployments are external to kbolt and may
+outlive any given kbolt process.
 
 Scheduled indexing uses OS-managed jobs: launchd on macOS and systemd user timers on Linux. `kbolt schedule` manages those artifacts from persisted schedule definitions.
 
-V2 extension path: `kbolt serve` daemon (HTTP + MCP). CLI would check "is daemon running?" and send requests to it instead of creating a local Engine. Core modules don't change — only the CLI adapter adds a daemon-check wrapper, plus a new HTTP crate.
+V2 extension path: `kbolt serve` daemon (HTTP + MCP) or a kbolt-owned inference broker. CLI would
+check "is daemon running?" and send requests to it instead of creating a local Engine. Core
+modules do not need their role contracts rewritten for that.
 
 ### Cross-Process Locking
 
@@ -73,7 +78,7 @@ core/           (depends on: types)
 Dependencies flow strictly upward. CLI and MCP never depend on each other. Core never depends on CLI or MCP. Types depends on nothing.
 
 - **types/** — every struct that crosses a module boundary (requests, responses, reports). No logic, no `impl` blocks with behavior. Just data definitions with `serde` derives.
-- **core/** — all business logic, storage, model inference. 90% of the code. External dependencies: `rusqlite`, `tantivy`, `usearch`, `ort`, `llama-cpp-rs`, `tree-sitter`, `pulldown-cmark`, `tokenizers`, `hf-hub`.
+- **core/** — all business logic, storage, model inference. 90% of the code. External dependencies: `rusqlite`, `tantivy`, `usearch`, HTTP client libraries, `tree-sitter`, `pulldown-cmark`, `tokenizers`.
 - **cli/** — thin adapter. Parses args (clap), calls Engine, formats terminal output. External dependencies: `clap`.
 - **mcp/** — thin adapter. MCP protocol over stdio, maps tool calls to Engine methods. External dependencies: `mcp-sdk` or hand-rolled stdio JSON-RPC.
 
@@ -90,7 +95,7 @@ Dependencies flow strictly upward. CLI and MCP never depend on each other. Core 
                                    ▼
                       ┌────────────────────────────┐
                       │           Engine           │
-                      │ storage, config, role impl│
+                      │ storage, config, gateway  │
                       └─────────────┬──────────────┘
                                     │
                 ┌───────────────────┼───────────────────┐
@@ -104,14 +109,14 @@ Dependencies flow strictly upward. CLI and MCP never depend on each other. Core 
                 ▼          ▼                   ▼       ▼
             storage/     models/             ingest/  config/
 
-──────┼────────────────────┼───────────────────────┼──────────────
-      │ External           │                       │
-      ▼                    ▼                       ▼
-┌───────────────┐     ┌───────────────┐       ┌──────────────┐
-│ ~/.cache/     │     │ ONNX / llama  │       │ ~/.config/   │
-│ meta.sqlite   │     │ model runtimes│       │ index.toml   │
-│ spaces/{name} │     │ + model files │       │ ignores/     │
-└───────────────┘     └───────────────┘       └──────────────┘
+──────┼────────────────────┼─────────────────────────────────┼──────────────
+      │ External           │                                 │
+      ▼                    ▼                                 ▼
+┌───────────────┐     ┌──────────────────────────────┐  ┌──────────────┐
+│ ~/.cache/     │     │ Inference deployments        │  │ ~/.config/   │
+│ meta.sqlite   │     │ - local llama.cpp server     │  │ index.toml   │
+│ spaces/{name} │     │ - remote OpenAI-compatible   │  │ ignores/     │
+└───────────────┘     └──────────────────────────────┘  └──────────────┘
 ```
 
 ### External I/O
@@ -123,11 +128,9 @@ Every module that crosses the Core boundary:
 | `storage/` | `~/.cache/meta.sqlite` | read/write | SQLite — all entity CRUD (spaces, collections, documents, chunks, embeddings, cache) |
 | `storage/` | `~/.cache/spaces/{name}/tantivy/` | read/write | Per-space Tantivy — BM25 index |
 | `storage/` | `~/.cache/spaces/{name}/vectors.usearch` | read/write | Per-space USearch — HNSW vector index |
-| `models/` | ONNX Runtime | in-process | Embedding inference (CPU, thread-safe) |
-| `models/` | llama-cpp | in-process | Reranking + generation (GPU, single-thread) |
-| `models/` | `~/.cache/models/` | read | Load .onnx and .gguf files from disk |
-| `models/` | Model artifact provider (default: HuggingFace Hub via `hf-hub`) | download | Fetch model files on first use |
-| `config/` | `~/.config/index.toml` | read/write | System settings (models, reaping, default space) |
+| `models/` | `llama.cpp server` deployments | HTTP client | Local embedding, reranking, and expansion inference |
+| `models/` | OpenAI-compatible deployments | HTTP client | Remote embedding, reranking, and expansion inference |
+| `config/` | `~/.config/index.toml` | read/write | System settings (provider profiles, role bindings, reaping, default space) |
 | `config/` | `~/.config/ignores/` | read/write | Ignore patterns (per space/collection) |
 | `ingest/` | Collection directories | read | Scan files, read bytes, compute hashes |
 
@@ -155,19 +158,19 @@ Only `storage/`, `models/`, `config/`, and `engine/update_ops` touch the outside
 - `engine/search_ops` reads source files for snippet assembly
 
 **Construction-time data flow** (once when Engine is created):
-- `config::load(path)` -> returns `Config` struct (includes model + inference config)
-- `Engine::new()` builds role adapters via `models::build_*_with_local_runtime`
+- `config::load(path)` -> returns `Config` struct (provider profiles + role bindings + storage policy)
+- `Engine::new()` resolves role bindings through the inference gateway and builds provider-backed role adapters
 - `Engine::new()` passes `config.cache_dir` -> `Storage::new()`
 
 **No connection** (by design):
 - `config/` <-> `storage/`: independent
-- `config/` <-> `models/`: Engine bridges them at construction
 - `storage/` <-> `models/`: never call each other
+- provider clients do not know search/update/storage orchestration
 
 **Module dependency rules** — no circular dependencies:
 - `config/` -> nothing (reads TOML, returns Config struct)
 - `storage/` -> nothing (receives operations, manages three stores)
-- `models/` -> nothing (loads models, runs inference)
+- `models/` -> nothing (resolves provider bindings, talks to inference deployments)
 - `ingest/` -> extraction/chunking only (no storage/model orchestration)
 - `engine` -> orchestrates storage/models/config/ingest
 
@@ -205,25 +208,20 @@ core/
     code.rs              # code extraction implementation
 
   models/
-    mod.rs               # model orchestration (pull/status/resolve), role wiring entry points
-    provider.rs          # model artifact provider trait
-    providers/hf.rs      # HuggingFace artifact download adapter
+    mod.rs               # inference entry points + readiness reporting
+    gateway.rs           # role -> provider deployment resolution
     embedder.rs          # Embedder trait
     reranker.rs          # Reranker trait
     expander.rs          # Expander trait
-    inference.rs         # provider wiring and role implementations
-    http.rs              # shared HTTP transport/retry behavior
-    chat.rs              # chat completion client + request/response shaping
+    inference.rs         # provider-backed role implementations
+    http.rs              # shared HTTP transport/retry/readiness behavior
+    chat.rs              # chat completion request/response shaping
     completion.rs        # shared completion client contract
-    local_onnx.rs        # local ONNX embedder runtime
-    local_gguf.rs        # local GGUF embedder runtime
-    local_llama.rs       # local llama generation runtime (raw/chat + sampling + grammar)
-    variants_expander.rs # generic query-variants expander
-    artifacts.rs         # model artifact file discovery helpers
+    variants_expander.rs # query-variant expander implementation
     text.rs              # shared text normalization helpers
 
   config/
-    mod.rs               # Config struct, TOML loading/saving (models, reaping, chunking policy)
+    mod.rs               # Config struct, provider profiles, role bindings, TOML load/save
 ```
 
 ### Engine (composition root)
@@ -270,8 +268,7 @@ impl Engine {
     pub fn list_collections(&self, space: Option<&str>) -> Result<Vec<CollectionInfo>>;
     pub fn collection_info(&self, space: Option<&str>, name: &str) -> Result<CollectionInfo>;
 
-    // Models / admin
-    pub fn pull_models(&self) -> Result<PullReport>;
+    // Inference / readiness
     pub fn model_status(&self) -> Result<ModelStatus>;
     pub fn status(&self, space: Option<&str>) -> Result<StatusResponse>;
 }
@@ -311,9 +308,15 @@ Engine search/update modules do not manage index locks — they call `storage.qu
 
 **Space index lifecycle**: All known spaces are eagerly opened at `Storage::new()` by scanning the spaces table and loading each space's Tantivy/USearch handles. `open_space`/`close_space` take a write lock on the spaces map. Read operations take a read lock and use the selected entry for the query/index mutation. This keeps index ownership centralized in Storage and prevents adapter-level lock coupling.
 
-### Models (facade, owns lifecycle)
+### Models (gateway, provider clients, role adapters)
 
-Models hides inference/runtime details behind role interfaces. Engine owns role instances (`Embedder`, `Reranker`, `Expander`) and builds them from config at construction. Provider-specific transport/runtime concerns (HTTP, ONNX Runtime, llama-cpp) stay inside `models/` implementation modules.
+`models/` hides backend protocol details behind role interfaces. Engine owns role instances
+(`Embedder`, `Reranker`, `Expander`) and builds them from config at construction time through:
+- a gateway that resolves `roles.* -> providers.*`
+- provider clients that know backend protocols (`llama.cpp server`, `openai_compatible`)
+- role adapters that implement kbolt's role traits on top of those provider capabilities
+
+Kbolt does not own local model download or local runtime construction in this architecture.
 
 Three separate traits — each defines its own contract because they share nothing in common (different inputs, outputs, runtimes, thread-safety):
 
@@ -325,20 +328,20 @@ pub trait Extractor: Send + Sync {
 }
 
 pub trait Embedder: Send + Sync {
-    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
-    fn dimensions(&self) -> usize;
+    fn embed_batch(&self, kind: EmbeddingInputKind, texts: &[String]) -> Result<Vec<Vec<f32>>>;
 }
 
 pub trait Reranker: Send + Sync {
-    fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<f32>>;
+    fn rerank(&self, query: &str, docs: &[String]) -> Result<Vec<f32>>;
 }
 
 pub trait Expander: Send + Sync {
     fn expand(&self, query: &str, max_variants: usize) -> Result<Vec<String>>;
 }
 
-pub trait Generator: Send + Sync {
-    fn generate(&self, prompt: &str, max_tokens: u32) -> Result<String>;
+pub enum EmbeddingInputKind {
+    Query,
+    Document,
 }
 ```
 
@@ -658,17 +661,21 @@ pub struct ModelStatus {
 }
 
 pub struct ModelInfo {
-    pub name: String,
-    pub downloaded: bool,
-    pub size_bytes: Option<u64>,
-    pub path: Option<PathBuf>,
+    pub configured: bool,
+    pub ready: bool,
+    pub profile: Option<String>,
+    pub kind: Option<String>,
+    pub operation: Option<String>,
+    pub model: Option<String>,
+    pub endpoint: Option<String>,
+    pub issue: Option<String>,
 }
 
 pub struct DiskUsage {
     pub sqlite_bytes: u64,
     pub tantivy_bytes: u64,
     pub usearch_bytes: u64,
-    pub models_bytes: u64,
+    pub models_bytes: u64,                // counts files under ~/.cache/kbolt/models/ if present
     pub total_bytes: u64,
 }
 ```
@@ -849,26 +856,68 @@ pub struct Config {
     pub config_dir: PathBuf,               // ~/.config/kbolt/
     pub cache_dir: PathBuf,                // ~/.cache/kbolt/
     pub default_space: Option<String>,
-    pub models: ModelConfig,
+    pub providers: HashMap<String, ProviderProfileConfig>,
+    pub roles: RoleBindingsConfig,
     pub reaping: ReapingConfig,
     pub chunking: ChunkingConfig,
     pub ranking: RankingConfig,
 }
 
-pub struct ModelConfig {
-    pub embedder: ModelSourceConfig,
-    pub reranker: ModelSourceConfig,
-    pub expander: ModelSourceConfig,
+pub enum ProviderProfileConfig {
+    LlamaCppServer {
+        operation: ProviderOperation,
+        base_url: String,
+        model: String,
+        timeout_ms: u64,
+        max_retries: u32,
+    },
+    OpenAiCompatible {
+        operation: ProviderOperation,
+        base_url: String,
+        model: String,
+        api_key_env: Option<String>,
+        timeout_ms: u64,
+        max_retries: u32,
+    },
 }
 
-pub struct ModelSourceConfig {
-    pub provider: ModelProvider,           // "huggingface" in V1
-    pub id: String,                        // provider model identifier
-    pub revision: Option<String>,          // optional pinned revision/tag
+pub enum ProviderOperation {
+    Embedding,
+    Reranking,
+    ChatCompletion,
 }
 
-pub enum ModelProvider {
-    HuggingFace,
+pub struct RoleBindingsConfig {
+    pub embedder: Option<EmbedderRoleConfig>,
+    pub reranker: Option<RerankerRoleConfig>,
+    pub expander: Option<ExpanderRoleConfig>,
+}
+
+pub struct EmbedderRoleConfig {
+    pub provider: String,
+    pub batch_size: usize,
+}
+
+pub struct RerankerRoleConfig {
+    pub provider: String,
+}
+
+pub struct ExpanderRoleConfig {
+    pub provider: String,
+    pub max_tokens: usize,
+    pub sampling: ExpanderSamplingConfig,
+}
+
+pub struct ExpanderSamplingConfig {
+    pub seed: u32,
+    pub temperature: f32,
+    pub top_k: i32,
+    pub top_p: f32,
+    pub min_p: f32,
+    pub repeat_last_n: i32,
+    pub repeat_penalty: f32,
+    pub frequency_penalty: f32,
+    pub presence_penalty: f32,
 }
 
 pub struct ReapingConfig {
@@ -934,7 +983,9 @@ Engine composes role adapters through one inference gateway:
 - provider client (`llama.cpp server` or `openai_compatible`)
 - role adapter (`Embedder`, `Reranker`, `Expander`)
 
-Unset reranker and expander roles stay unset: deep search requires an expander, and reranking is skipped with an explicit pipeline notice when no reranker is configured.
+Unbound roles stay unconfigured: deep search requires an expander, reranking is skipped with an
+explicit pipeline notice when no reranker is configured, and semantic search requires an
+embedder binding.
 
 Inference provider scope is deployment-based:
 - local backend family: `llama.cpp server`
@@ -1157,15 +1208,12 @@ Key type:       u64 (chunk_id from SQLite)
         {space}/
             tantivy/        # Tantivy index (managed by Tantivy)
             vectors.usearch # USearch HNSW file (managed by USearch)
-    models/                 # model artifacts (provider-managed cache)
-        embedder/           # embedder role artifacts
-        reranker/           # reranker role artifacts
-        expander/           # query-expander role artifacts
+    models/                 # optional residual cache directory; not required by provider-profile inference
     schedules/              # per-schedule run state
         s1.json             # last_started / last_finished / last_result / last_error
 ```
 
-SQLite is shared globally (one database for all spaces). Tantivy and USearch are per-space — each space has its own index directory under `~/.cache/kbolt/spaces/{space_name}/`. This gives each space independent BM25 IDF statistics, preventing one space's content from skewing another's keyword search quality.
+SQLite is shared globally (one database for all spaces). Tantivy and USearch are per-space — each space has its own index directory under `~/.cache/kbolt/spaces/{space_name}/`. This gives each space independent BM25 IDF statistics, preventing one space's content from skewing another's keyword search quality. The `models/` directory is no longer an active part of inference ownership; disk-usage reporting still counts it if present so old local artifacts remain visible to operators.
 
 Ignore patterns are stored internally at `~/.config/kbolt/ignores/{space}/{collection}.ignore`, not in the user's directories. Kbolt does not own user directories and should not place files there. Users manage ignore patterns via `kbolt ignore` commands.
 
@@ -1956,12 +2004,12 @@ under the requested output directory, using the benchmark default `space = "benc
 ## Implementation Order
 
 1. **types/** — shared request/response structs (spaces, collections, search/update/status)
-2. **core/config** — TOML load/save + validation (models, embeddings, inference, reaping, chunking, default space)
+2. **core/config** — TOML load/save + validation (provider profiles, role bindings, reaping, chunking, default space)
 3. **core/storage** — SQLite schema + per-space Tantivy/USearch ownership and lifecycle
 4. **core/ingest/extract** — extractor contracts + markdown/plaintext/code extractors
 5. **core/ingest/chunk** — profile-aware chunking (packing, forced split, overlap, structural kinds)
-6. **core/models (artifacts)** — provider-agnostic model pull/status + manifest checks
-7. **core/models (runtime roles)** — embedder/reranker/expander builders (HTTP + local ONNX/llama)
+6. **core/models (gateway)** — role binding resolution and readiness reporting
+7. **core/models (provider clients + role adapters)** — embedder/reranker/expander builders over `llama.cpp server` and `openai_compatible`
 8. **core/engine (facade)** — public API surface and shared operation lock orchestration
 9. **core/engine/update_ops** — update pipeline + FTS replay + embedding backlog reconciliation
 10. **core/engine/search_ops** — keyword/semantic/auto/deep retrieval + scoring + rerank/expand integration
