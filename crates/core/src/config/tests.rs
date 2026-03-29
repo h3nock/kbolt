@@ -587,6 +587,7 @@ n_threads_batch = 6
         Some(EmbeddingConfig::LocalGguf {
             model_file: Some("embeddinggemma-300M-Q8_0.gguf".to_string()),
             batch_size: 4,
+            flash_attention: LlamaFlashAttentionMode::Auto,
             n_threads: Some(6),
             n_threads_batch: Some(6),
         })
@@ -615,6 +616,7 @@ provider = "local_gguf"
         Some(EmbeddingConfig::LocalGguf {
             model_file: None,
             batch_size: DEFAULT_LOCAL_GGUF_EMBEDDING_BATCH_SIZE,
+            flash_attention: LlamaFlashAttentionMode::Auto,
             n_threads: None,
             n_threads_batch: None,
         })
@@ -943,6 +945,7 @@ provider = "local_llama"
                 max_tokens: DEFAULT_LOCAL_INFERENCE_MAX_TOKENS,
                 n_ctx: DEFAULT_LOCAL_INFERENCE_N_CTX,
                 n_gpu_layers: None,
+                flash_attention: LlamaFlashAttentionMode::Auto,
             },
         })
     );
@@ -954,11 +957,93 @@ provider = "local_llama"
                 max_tokens: DEFAULT_LOCAL_EXPANDER_MAX_TOKENS,
                 n_ctx: DEFAULT_LOCAL_INFERENCE_N_CTX,
                 n_gpu_layers: None,
+                flash_attention: LlamaFlashAttentionMode::Auto,
                 enable_thinking: DEFAULT_EXPANDER_ENABLE_THINKING,
                 reasoning_format: Some("none".to_string()),
                 chat_template_kwargs: None,
                 sampling: ExpanderLocalLlamaSamplingConfig::default(),
             },
+        })
+    );
+}
+
+#[test]
+fn load_reads_local_llama_flash_attention_modes() {
+    let tmp = tempdir().expect("create tempdir");
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    let config_file = config_dir.join(CONFIG_FILENAME);
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        &config_file,
+        r#"
+[inference.reranker]
+provider = "local_llama"
+flash_attention = "auto"
+
+[inference.expander]
+provider = "local_llama"
+flash_attention = "enabled"
+"#,
+    )
+    .expect("write config file");
+
+    let config = load_from_file(&config_file, &config_dir, &cache_dir).expect("load config");
+    assert_eq!(
+        config.inference,
+        InferenceConfig {
+            reranker: Some(TextInferenceConfig {
+                provider: TextInferenceProvider::LocalLlama {
+                    model_file: None,
+                    max_tokens: DEFAULT_LOCAL_INFERENCE_MAX_TOKENS,
+                    n_ctx: DEFAULT_LOCAL_INFERENCE_N_CTX,
+                    n_gpu_layers: None,
+                    flash_attention: LlamaFlashAttentionMode::Auto,
+                },
+            }),
+            expander: Some(ExpanderInferenceConfig {
+                provider: ExpanderInferenceProvider::LocalLlama {
+                    model_file: None,
+                    max_tokens: DEFAULT_LOCAL_EXPANDER_MAX_TOKENS,
+                    n_ctx: DEFAULT_LOCAL_INFERENCE_N_CTX,
+                    n_gpu_layers: None,
+                    flash_attention: LlamaFlashAttentionMode::Enabled,
+                    enable_thinking: DEFAULT_EXPANDER_ENABLE_THINKING,
+                    reasoning_format: Some("none".to_string()),
+                    chat_template_kwargs: None,
+                    sampling: ExpanderLocalLlamaSamplingConfig::default(),
+                },
+            }),
+        }
+    );
+}
+
+#[test]
+fn load_reads_local_gguf_flash_attention_modes() {
+    let tmp = tempdir().expect("create tempdir");
+    let config_dir = tmp.path().join("config");
+    let cache_dir = tmp.path().join("cache");
+    let config_file = config_dir.join(CONFIG_FILENAME);
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(
+        &config_file,
+        r#"
+[embeddings]
+provider = "local_gguf"
+flash_attention = "enabled"
+"#,
+    )
+    .expect("write config file");
+
+    let config = load_from_file(&config_file, &config_dir, &cache_dir).expect("load config");
+    assert_eq!(
+        config.embeddings,
+        Some(EmbeddingConfig::LocalGguf {
+            model_file: None,
+            batch_size: DEFAULT_LOCAL_GGUF_EMBEDDING_BATCH_SIZE,
+            flash_attention: LlamaFlashAttentionMode::Enabled,
+            n_threads: None,
+            n_threads_batch: None,
         })
     );
 }

@@ -11,11 +11,12 @@ use llama_cpp_2::openai::OpenAIChatTemplateParams;
 use llama_cpp_2::sampling::LlamaSampler;
 use serde_json::json;
 
+use crate::config::LlamaFlashAttentionMode;
 use crate::models::completion::CompletionClient;
 use crate::models::text::strip_json_fences;
 use crate::Result;
 
-use super::llama_backend;
+use super::{llama_backend, llama_flash_attention_policy};
 
 pub(super) enum LocalLlamaPrompt<'a> {
     Chat {
@@ -30,6 +31,7 @@ pub(super) struct LocalLlamaGenerationOptions {
     pub sampler: LocalLlamaSamplerConfig,
     pub stop_sequences: Vec<String>,
     pub grammar: Option<LocalLlamaGrammar>,
+    pub flash_attention: LlamaFlashAttentionMode,
     pub template: LocalLlamaChatTemplateOptions,
 }
 
@@ -125,7 +127,8 @@ impl LocalLlamaClient {
 
         let ctx_params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(needed_ctx))
-            .with_n_batch(n_batch);
+            .with_n_batch(n_batch)
+            .with_flash_attention_policy(llama_flash_attention_policy(options.flash_attention));
         let mut ctx = self.model.new_context(backend, ctx_params).map_err(|err| {
             KboltError::Inference(format!("failed to create llama context: {err}"))
         })?;

@@ -7,8 +7,8 @@ use serde_json::json;
 
 use crate::config::{
     EmbeddingConfig, ExpanderInferenceConfig, ExpanderInferenceProvider,
-    ExpanderLocalLlamaSamplingConfig, ModelConfig, TextInferenceConfig, TextInferenceOutputMode,
-    TextInferenceProvider,
+    ExpanderLocalLlamaSamplingConfig, LlamaFlashAttentionMode, ModelConfig, TextInferenceConfig,
+    TextInferenceOutputMode, TextInferenceProvider,
 };
 use crate::models::artifacts::resolve_file_with_extension;
 use crate::models::chat::HttpChatClient;
@@ -198,6 +198,7 @@ fn build_embedder_inner(
             EmbeddingConfig::LocalGguf {
                 model_file,
                 batch_size,
+                flash_attention,
                 n_threads,
                 n_threads_batch,
             } => {
@@ -208,6 +209,7 @@ fn build_embedder_inner(
                 })?;
                 let model_file = model_file.clone();
                 let batch_size = *batch_size;
+                let flash_attention = *flash_attention;
                 let n_threads = *n_threads;
                 let n_threads_batch = *n_threads_batch;
                 let embedder: Arc<dyn Embedder> =
@@ -217,6 +219,7 @@ fn build_embedder_inner(
                             &runtime.model_dir,
                             model_file.as_deref(),
                             batch_size,
+                            flash_attention,
                             n_threads,
                             n_threads_batch,
                         )
@@ -253,6 +256,7 @@ fn build_reranker_inner(
             model_file,
             n_ctx,
             n_gpu_layers,
+            flash_attention,
             ..
         } => {
             let runtime = local_runtime.ok_or_else(|| {
@@ -263,6 +267,7 @@ fn build_reranker_inner(
             let model_file = model_file.clone();
             let n_ctx = *n_ctx;
             let n_gpu_layers = *n_gpu_layers;
+            let flash_attention = *flash_attention;
             Arc::new(LazyArc::new("local qwen3 reranker", move || {
                 build_local_qwen3_reranker(
                     &runtime.model_config,
@@ -270,6 +275,7 @@ fn build_reranker_inner(
                     model_file.as_deref(),
                     n_ctx,
                     n_gpu_layers,
+                    flash_attention,
                 )
             }))
         }
@@ -314,6 +320,7 @@ fn build_expander_inner(
             max_tokens,
             n_ctx,
             n_gpu_layers,
+            flash_attention,
             enable_thinking,
             reasoning_format,
             chat_template_kwargs,
@@ -328,6 +335,7 @@ fn build_expander_inner(
             let max_tokens = *max_tokens;
             let n_ctx = *n_ctx;
             let n_gpu_layers = *n_gpu_layers;
+            let flash_attention = *flash_attention;
             let enable_thinking = *enable_thinking;
             let reasoning_format = reasoning_format.clone();
             let chat_template_kwargs = chat_template_kwargs.clone();
@@ -340,6 +348,7 @@ fn build_expander_inner(
                     max_tokens,
                     n_ctx,
                     n_gpu_layers,
+                    flash_attention,
                     enable_thinking,
                     reasoning_format.clone(),
                     chat_template_kwargs.clone(),
@@ -379,6 +388,7 @@ fn build_completion_client_for_role(
             max_tokens,
             n_ctx,
             n_gpu_layers,
+            ..
         } => {
             let runtime = local_runtime.ok_or_else(|| {
                 KboltError::Inference(format!(
@@ -526,13 +536,20 @@ fn build_local_gguf_embedder_with_runtime(
     model_dir: &Path,
     model_file: Option<&str>,
     batch_size: usize,
+    flash_attention: LlamaFlashAttentionMode,
     n_threads: Option<u32>,
     n_threads_batch: Option<u32>,
 ) -> Result<Arc<dyn Embedder>> {
     let artifact = resolve_model_artifact(model_config, model_dir, ModelRole::Embedder)?;
     let gguf_path =
         resolve_file_with_extension(&artifact.path, model_file, "gguf", "embeddings.model_file")?;
-    let embedder = build_local_gguf_embedder(&gguf_path, batch_size, n_threads, n_threads_batch)?;
+    let embedder = build_local_gguf_embedder(
+        &gguf_path,
+        batch_size,
+        flash_attention,
+        n_threads,
+        n_threads_batch,
+    )?;
     Ok(Arc::new(embedder))
 }
 
@@ -569,6 +586,7 @@ fn build_local_qwen3_reranker(
     model_file: Option<&str>,
     n_ctx: u32,
     n_gpu_layers: Option<u32>,
+    flash_attention: LlamaFlashAttentionMode,
 ) -> Result<Arc<dyn Reranker>> {
     let artifact = resolve_model_artifact(model_config, model_dir, ModelRole::Reranker)?;
     let gguf_path = resolve_file_with_extension(
@@ -580,7 +598,11 @@ fn build_local_qwen3_reranker(
 
     let (model, _) = load_local_llama_model_and_template(&gguf_path, n_gpu_layers)?;
 
-    Ok(Arc::new(LocalQwen3Reranker::new(model, n_ctx)))
+    Ok(Arc::new(LocalQwen3Reranker::new(
+        model,
+        n_ctx,
+        flash_attention,
+    )))
 }
 
 fn build_local_llama_variants_expander(
@@ -590,6 +612,7 @@ fn build_local_llama_variants_expander(
     max_tokens: usize,
     n_ctx: u32,
     n_gpu_layers: Option<u32>,
+    flash_attention: LlamaFlashAttentionMode,
     enable_thinking: bool,
     reasoning_format: Option<String>,
     chat_template_kwargs: Option<String>,
@@ -616,6 +639,7 @@ fn build_local_llama_variants_expander(
             frequency_penalty: sampling.frequency_penalty,
             presence_penalty: sampling.presence_penalty,
         }),
+        flash_attention,
         template: LocalLlamaChatTemplateOptions {
             use_oaicompat: true,
             enable_thinking,
@@ -800,6 +824,7 @@ mod tests {
                 max_tokens: 128,
                 n_ctx: 2048,
                 n_gpu_layers: Some(0),
+                flash_attention: LlamaFlashAttentionMode::Disabled,
             },
         }
     }
@@ -808,6 +833,7 @@ mod tests {
         EmbeddingConfig::LocalGguf {
             model_file: None,
             batch_size: 4,
+            flash_attention: LlamaFlashAttentionMode::Disabled,
             n_threads: Some(4),
             n_threads_batch: Some(4),
         }

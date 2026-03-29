@@ -6,8 +6,9 @@ use tempfile::tempdir;
 
 use crate::config::{
     ChunkingConfig, Config, EmbeddingConfig, ExpanderInferenceConfig, ExpanderInferenceProvider,
-    ExpanderLocalLlamaSamplingConfig, InferenceConfig, ModelConfig, ModelProvider,
-    ModelSourceConfig, RankingConfig, ReapingConfig, TextInferenceConfig, TextInferenceProvider,
+    ExpanderLocalLlamaSamplingConfig, InferenceConfig, LlamaFlashAttentionMode, ModelConfig,
+    ModelProvider, ModelSourceConfig, RankingConfig, ReapingConfig, TextInferenceConfig,
+    TextInferenceProvider,
 };
 use crate::engine::{retrieval_text_with_prefix, Engine};
 use crate::ingest::chunk::FinalChunkKind;
@@ -367,6 +368,7 @@ fn local_text_inference_config(model_file: &str) -> TextInferenceConfig {
             max_tokens: 256,
             n_ctx: 2048,
             n_gpu_layers: Some(0),
+            flash_attention: LlamaFlashAttentionMode::Disabled,
         },
     }
 }
@@ -378,6 +380,7 @@ fn local_expander_config(model_file: &str) -> ExpanderInferenceConfig {
             max_tokens: 256,
             n_ctx: 2048,
             n_gpu_layers: Some(0),
+            flash_attention: LlamaFlashAttentionMode::Disabled,
             enable_thinking: false,
             reasoning_format: Some("none".to_string()),
             chat_template_kwargs: None,
@@ -417,6 +420,7 @@ fn test_engine_with_local_model_runtime() -> Engine {
         embeddings: Some(EmbeddingConfig::LocalGguf {
             model_file: None,
             batch_size: 8,
+            flash_attention: LlamaFlashAttentionMode::Disabled,
             n_threads: None,
             n_threads_batch: None,
         }),
@@ -427,6 +431,7 @@ fn test_engine_with_local_model_runtime() -> Engine {
                     max_tokens: 256,
                     n_ctx: 2048,
                     n_gpu_layers: Some(0),
+                    flash_attention: LlamaFlashAttentionMode::Disabled,
                 },
             }),
             expander: Some(ExpanderInferenceConfig {
@@ -435,6 +440,7 @@ fn test_engine_with_local_model_runtime() -> Engine {
                     max_tokens: 256,
                     n_ctx: 2048,
                     n_gpu_layers: Some(0),
+                    flash_attention: LlamaFlashAttentionMode::Disabled,
                     enable_thinking: false,
                     reasoning_format: Some("none".to_string()),
                     chat_template_kwargs: None,
@@ -480,6 +486,7 @@ fn test_engine_with_missing_embedder_model() -> Engine {
         embeddings: Some(EmbeddingConfig::LocalGguf {
             model_file: Some("missing-embedder.gguf".to_string()),
             batch_size: 8,
+            flash_attention: LlamaFlashAttentionMode::Disabled,
             n_threads: None,
             n_threads_batch: None,
         }),

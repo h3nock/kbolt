@@ -34,6 +34,7 @@ const DEFAULT_INFERENCE_MAX_RETRIES: u32 = 2;
 const DEFAULT_LOCAL_INFERENCE_MAX_TOKENS: usize = 256;
 const DEFAULT_LOCAL_EXPANDER_MAX_TOKENS: usize = 600;
 const DEFAULT_LOCAL_INFERENCE_N_CTX: u32 = 2048;
+const DEFAULT_LLAMA_FLASH_ATTENTION_MODE: LlamaFlashAttentionMode = LlamaFlashAttentionMode::Auto;
 const DEFAULT_EXPANDER_ENABLE_THINKING: bool = false;
 const DEFAULT_EXPANDER_SEED: u32 = 0;
 const DEFAULT_EXPANDER_TEMPERATURE: f32 = 0.7;
@@ -114,6 +115,8 @@ pub enum EmbeddingConfig {
         model_file: Option<String>,
         #[serde(default = "default_local_gguf_embedding_batch_size")]
         batch_size: usize,
+        #[serde(default = "default_llama_flash_attention_mode")]
+        flash_attention: LlamaFlashAttentionMode,
         #[serde(default)]
         n_threads: Option<u32>,
         #[serde(default)]
@@ -141,6 +144,15 @@ pub struct ExpanderInferenceConfig {
     pub provider: ExpanderInferenceProvider,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LlamaFlashAttentionMode {
+    #[default]
+    Auto,
+    Disabled,
+    Enabled,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "provider", rename_all = "snake_case")]
 pub enum ExpanderInferenceProvider {
@@ -164,6 +176,8 @@ pub enum ExpanderInferenceProvider {
         n_ctx: u32,
         #[serde(default = "default_local_inference_n_gpu_layers")]
         n_gpu_layers: Option<u32>,
+        #[serde(default = "default_llama_flash_attention_mode")]
+        flash_attention: LlamaFlashAttentionMode,
         #[serde(default = "default_expander_enable_thinking")]
         enable_thinking: bool,
         #[serde(default = "default_expander_reasoning_format")]
@@ -237,6 +251,8 @@ pub enum TextInferenceProvider {
         n_ctx: u32,
         #[serde(default = "default_local_inference_n_gpu_layers")]
         n_gpu_layers: Option<u32>,
+        #[serde(default = "default_llama_flash_attention_mode")]
+        flash_attention: LlamaFlashAttentionMode,
     },
 }
 
@@ -701,6 +717,7 @@ fn validate_embeddings(embeddings: Option<&EmbeddingConfig>) -> Result<()> {
             batch_size,
             n_threads,
             n_threads_batch,
+            ..
         } => {
             if *batch_size == 0 {
                 return Err(KboltError::Config(
@@ -1185,6 +1202,8 @@ enum FileTextInferenceProvider {
         n_ctx: u32,
         #[serde(default = "default_local_inference_n_gpu_layers")]
         n_gpu_layers: Option<u32>,
+        #[serde(default = "default_llama_flash_attention_mode")]
+        flash_attention: LlamaFlashAttentionMode,
     },
 }
 
@@ -1262,11 +1281,13 @@ impl From<&TextInferenceConfig> for FileTextInferenceConfig {
                 max_tokens,
                 n_ctx,
                 n_gpu_layers,
+                flash_attention,
             } => FileTextInferenceProvider::LocalLlama {
                 model_file: model_file.clone(),
                 max_tokens: Some(*max_tokens),
                 n_ctx: *n_ctx,
                 n_gpu_layers: *n_gpu_layers,
+                flash_attention: *flash_attention,
             },
         };
 
@@ -1308,11 +1329,13 @@ fn file_text_inference_provider_to_runtime(
             max_tokens,
             n_ctx,
             n_gpu_layers,
+            flash_attention,
         } => TextInferenceProvider::LocalLlama {
             model_file,
             max_tokens: max_tokens.unwrap_or(default_max_tokens),
             n_ctx,
             n_gpu_layers,
+            flash_attention,
         },
     }
 }
@@ -1425,6 +1448,10 @@ fn default_local_inference_n_ctx() -> u32 {
 
 fn default_local_inference_n_gpu_layers() -> Option<u32> {
     None
+}
+
+fn default_llama_flash_attention_mode() -> LlamaFlashAttentionMode {
+    DEFAULT_LLAMA_FLASH_ATTENTION_MODE
 }
 
 fn default_expander_enable_thinking() -> bool {

@@ -9,14 +9,16 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::token::LlamaToken;
 
+use crate::config::LlamaFlashAttentionMode;
 use crate::models::{Embedder, EmbeddingInputKind};
 use crate::Result;
 
-use super::llama_backend;
+use super::{llama_backend, llama_flash_attention_policy};
 
 pub(super) struct LocalGgufEmbedder {
     model: Arc<LlamaModel>,
     batch_size: usize,
+    flash_attention: LlamaFlashAttentionMode,
     n_threads: Option<u32>,
     n_threads_batch: Option<u32>,
     inference_lock: Mutex<()>,
@@ -31,6 +33,7 @@ impl Embedder for LocalGgufEmbedder {
 pub(super) fn build_local_gguf_embedder(
     model_path: &Path,
     batch_size: usize,
+    flash_attention: LlamaFlashAttentionMode,
     n_threads: Option<u32>,
     n_threads_batch: Option<u32>,
 ) -> Result<LocalGgufEmbedder> {
@@ -46,6 +49,7 @@ pub(super) fn build_local_gguf_embedder(
     Ok(LocalGgufEmbedder {
         model: Arc::new(model),
         batch_size,
+        flash_attention,
         n_threads,
         n_threads_batch,
         inference_lock: Mutex::new(()),
@@ -72,7 +76,11 @@ fn embed_with_local_gguf(
 
     let backend = llama_backend();
 
-    let ctx_params = embed_context_params(embedder.n_threads, embedder.n_threads_batch);
+    let ctx_params = embed_context_params(
+        embedder.n_threads,
+        embedder.n_threads_batch,
+        embedder.flash_attention,
+    );
 
     let mut ctx = embedder
         .model
@@ -115,6 +123,7 @@ fn embed_with_local_gguf(
 fn embed_context_params(
     n_threads: Option<u32>,
     n_threads_batch: Option<u32>,
+    flash_attention: LlamaFlashAttentionMode,
 ) -> LlamaContextParams {
     let mut ctx_params = LlamaContextParams::default()
         .with_embeddings(true)
@@ -122,7 +131,8 @@ fn embed_context_params(
         .with_n_ctx(NonZeroU32::new(EMBED_CTX_SIZE))
         .with_n_batch(EMBED_CTX_SIZE)
         .with_n_ubatch(EMBED_CTX_SIZE)
-        .with_n_seq_max(1);
+        .with_n_seq_max(1)
+        .with_flash_attention_policy(llama_flash_attention_policy(flash_attention));
     if let Some(n_threads) = n_threads {
         ctx_params = ctx_params.with_n_threads(n_threads as i32);
     }
@@ -193,9 +203,14 @@ mod tests {
         truncate_embedding_tokens, EMBEDDING_GEMMA_DOCUMENT_PREFIX, EMBEDDING_GEMMA_QUERY_PREFIX,
         EMBED_CTX_SIZE,
     };
+    use crate::config::LlamaFlashAttentionMode;
     use crate::models::EmbeddingInputKind;
     use llama_cpp_2::context::params::LlamaPoolingType;
     use llama_cpp_2::token::LlamaToken;
+
+    const LLAMA_FLASH_ATTN_TYPE_AUTO: i32 = -1;
+    const LLAMA_FLASH_ATTN_TYPE_DISABLED: i32 = 0;
+    const LLAMA_FLASH_ATTN_TYPE_ENABLED: i32 = 1;
 
     #[test]
     fn embedding_tokens_are_truncated_to_embed_context_size() {
@@ -230,9 +245,36 @@ mod tests {
 
     #[test]
     fn gguf_embedding_context_uses_mean_pooling() {
-        let params = embed_context_params(Some(4), Some(2));
+        let params = embed_context_params(Some(4), Some(2), LlamaFlashAttentionMode::Disabled);
 
         assert_eq!(params.pooling_type(), LlamaPoolingType::Mean);
+    }
+
+    #[test]
+    fn gguf_embedding_context_params_disable_flash_attention_by_default() {
+        let params = embed_context_params(Some(4), Some(2), LlamaFlashAttentionMode::Disabled);
+
+        assert_eq!(
+            params.flash_attention_policy(),
+            LLAMA_FLASH_ATTN_TYPE_DISABLED
+        );
+    }
+
+    #[test]
+    fn gguf_embedding_context_params_enable_flash_attention_when_requested() {
+        let params = embed_context_params(Some(4), Some(2), LlamaFlashAttentionMode::Enabled);
+
+        assert_eq!(
+            params.flash_attention_policy(),
+            LLAMA_FLASH_ATTN_TYPE_ENABLED
+        );
+    }
+
+    #[test]
+    fn gguf_embedding_context_params_use_auto_flash_attention_when_requested() {
+        let params = embed_context_params(Some(4), Some(2), LlamaFlashAttentionMode::Auto);
+
+        assert_eq!(params.flash_attention_policy(), LLAMA_FLASH_ATTN_TYPE_AUTO);
     }
 
     #[test]

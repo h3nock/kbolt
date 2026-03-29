@@ -10,7 +10,8 @@ use walkdir::WalkDir;
 
 use crate::config::{
     EmbeddingConfig, ExpanderInferenceConfig, ExpanderInferenceProvider, InferenceConfig,
-    ModelConfig, ModelProvider, ModelSourceConfig, TextInferenceConfig, TextInferenceProvider,
+    LlamaFlashAttentionMode, ModelConfig, ModelProvider, ModelSourceConfig, TextInferenceConfig,
+    TextInferenceProvider,
 };
 use crate::Result;
 
@@ -39,6 +40,14 @@ pub(super) fn llama_backend() -> &'static LlamaBackend {
         backend.void_logs();
         backend
     })
+}
+
+pub(super) fn llama_flash_attention_policy(mode: LlamaFlashAttentionMode) -> i32 {
+    match mode {
+        LlamaFlashAttentionMode::Auto => -1,
+        LlamaFlashAttentionMode::Disabled => 0,
+        LlamaFlashAttentionMode::Enabled => 1,
+    }
 }
 
 const MODEL_DIRNAME_EMBEDDER: &str = "embedder";

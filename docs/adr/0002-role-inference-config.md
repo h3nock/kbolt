@@ -42,6 +42,7 @@ provider = "local_llama"
 # model_file = "qwen-reranker.gguf"
 max_tokens = 256
 n_ctx = 2048
+flash_attention = "auto" # auto | enabled | disabled
 # omit n_gpu_layers to auto-detect acceleration
 
 [inference.expander]
@@ -50,6 +51,7 @@ provider = "local_llama"
 # model_file = "Qwen3-1.7B-Q8_0.gguf"
 max_tokens = 600
 n_ctx = 2048
+flash_attention = "auto" # auto | enabled | disabled
 enable_thinking = false
 reasoning_format = "none"
 temperature = 0.7
@@ -66,6 +68,7 @@ presence_penalty = 0.5
 Validation rules match embedding config expectations:
 - `openai_compatible`: non-empty `model`, `base_url` must be `http://` or `https://`, `timeout_ms > 0`, and `api_key_env` non-empty when set
 - `local_llama`: `max_tokens > 0`, `n_ctx > 0`, optional `model_file` must be non-empty when set, optional `reasoning_format` must be non-empty when set, optional `chat_template_kwargs` must be a JSON object, and sampler fields must stay within valid ranges
+- `local_gguf` and `local_llama` share `flash_attention = "auto" | "enabled" | "disabled"`; default is `auto`
 
 ## Consequences
 - Reranker and expander can be configured independently from embeddings.

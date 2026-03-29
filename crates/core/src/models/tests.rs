@@ -6,8 +6,9 @@ use tempfile::tempdir;
 
 use crate::config::{
     EmbeddingConfig, ExpanderInferenceConfig, ExpanderInferenceProvider,
-    ExpanderLocalLlamaSamplingConfig, InferenceConfig, ModelConfig, ModelProvider,
-    ModelSourceConfig, TextInferenceConfig, TextInferenceOutputMode, TextInferenceProvider,
+    ExpanderLocalLlamaSamplingConfig, InferenceConfig, LlamaFlashAttentionMode, ModelConfig,
+    ModelProvider, ModelSourceConfig, TextInferenceConfig, TextInferenceOutputMode,
+    TextInferenceProvider,
 };
 use crate::models::{
     build_embedder, pull_with_downloader, pull_with_downloader_and_progress,
@@ -224,6 +225,7 @@ fn local_runtime_config() -> (EmbeddingConfig, InferenceConfig) {
         EmbeddingConfig::LocalGguf {
             model_file: None,
             batch_size: 4,
+            flash_attention: LlamaFlashAttentionMode::Disabled,
             n_threads: None,
             n_threads_batch: None,
         },
@@ -234,6 +236,7 @@ fn local_runtime_config() -> (EmbeddingConfig, InferenceConfig) {
                     max_tokens: 128,
                     n_ctx: 2048,
                     n_gpu_layers: Some(0),
+                    flash_attention: LlamaFlashAttentionMode::Disabled,
                 },
             }),
             expander: Some(ExpanderInferenceConfig {
@@ -242,6 +245,7 @@ fn local_runtime_config() -> (EmbeddingConfig, InferenceConfig) {
                     max_tokens: 128,
                     n_ctx: 2048,
                     n_gpu_layers: Some(0),
+                    flash_attention: LlamaFlashAttentionMode::Disabled,
                     enable_thinking: false,
                     reasoning_format: Some("none".to_string()),
                     chat_template_kwargs: None,
@@ -556,6 +560,7 @@ fn pull_uses_configured_relative_file_overrides() {
                 max_tokens: 128,
                 n_ctx: 2048,
                 n_gpu_layers: Some(0),
+                flash_attention: LlamaFlashAttentionMode::Disabled,
             },
         }),
         expander: Some(ExpanderInferenceConfig {
@@ -611,6 +616,7 @@ fn pull_uses_gguf_requirements_when_embedder_is_local_gguf() {
     let embeddings = EmbeddingConfig::LocalGguf {
         model_file: Some("embeddinggemma-300M-Q8_0.gguf".to_string()),
         batch_size: 4,
+        flash_attention: LlamaFlashAttentionMode::Disabled,
         n_threads: Some(6),
         n_threads_batch: Some(6),
     };
@@ -644,6 +650,7 @@ fn pull_materializes_configured_runtime_paths_from_nested_hf_layout() {
     let embeddings = EmbeddingConfig::LocalGguf {
         model_file: Some("embeddinggemma-300M-Q8_0.gguf".to_string()),
         batch_size: 4,
+        flash_attention: LlamaFlashAttentionMode::Disabled,
         n_threads: None,
         n_threads_batch: None,
     };
@@ -654,6 +661,7 @@ fn pull_materializes_configured_runtime_paths_from_nested_hf_layout() {
                 max_tokens: 128,
                 n_ctx: 2048,
                 n_gpu_layers: Some(0),
+                flash_attention: LlamaFlashAttentionMode::Disabled,
             },
         }),
         expander: None,
@@ -690,6 +698,7 @@ fn pull_repairs_runtime_paths_for_existing_nested_hf_layout() {
     let embeddings = EmbeddingConfig::LocalGguf {
         model_file: Some("embeddinggemma-300M-Q8_0.gguf".to_string()),
         batch_size: 4,
+        flash_attention: LlamaFlashAttentionMode::Disabled,
         n_threads: None,
         n_threads_batch: None,
     };

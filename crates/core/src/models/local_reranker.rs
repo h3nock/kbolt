@@ -10,7 +10,9 @@ use llama_cpp_2::token::LlamaToken;
 use crate::models::Reranker;
 use crate::Result;
 
-use super::llama_backend;
+use crate::config::LlamaFlashAttentionMode;
+
+use super::{llama_backend, llama_flash_attention_policy};
 
 const QWEN3_RERANK_SYSTEM_PROMPT: &str = "Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".";
 const QWEN3_RERANK_INSTRUCT: &str =
@@ -23,14 +25,20 @@ const QWEN3_RERANK_ASSISTANT_PREFIX: &str = "<|im_start|>assistant\n<think>\n\n<
 pub(super) struct LocalQwen3Reranker {
     model: Arc<LlamaModel>,
     n_ctx: u32,
+    flash_attention: LlamaFlashAttentionMode,
     inference_lock: Mutex<()>,
 }
 
 impl LocalQwen3Reranker {
-    pub(super) fn new(model: Arc<LlamaModel>, n_ctx: u32) -> Self {
+    pub(super) fn new(
+        model: Arc<LlamaModel>,
+        n_ctx: u32,
+        flash_attention: LlamaFlashAttentionMode,
+    ) -> Self {
         Self {
             model,
             n_ctx,
+            flash_attention,
             inference_lock: Mutex::new(()),
         }
     }
@@ -50,7 +58,7 @@ impl Reranker for LocalQwen3Reranker {
             .iter()
             .map(|doc| tokenize_rerank_prompt(&self.model, self.n_ctx, query, doc))
             .collect::<Result<Vec<_>>>()?;
-        score_docs(&self.model, self.n_ctx, &tokenized)
+        score_docs(&self.model, self.n_ctx, self.flash_attention, &tokenized)
     }
 }
 
@@ -142,7 +150,12 @@ where
     Ok(&text[..best_end])
 }
 
-fn score_docs(model: &LlamaModel, n_ctx: u32, tokenized: &[Vec<LlamaToken>]) -> Result<Vec<f32>> {
+fn score_docs(
+    model: &LlamaModel,
+    n_ctx: u32,
+    flash_attention: LlamaFlashAttentionMode,
+    tokenized: &[Vec<LlamaToken>],
+) -> Result<Vec<f32>> {
     if tokenized.is_empty() {
         return Ok(Vec::new());
     }
@@ -151,13 +164,7 @@ fn score_docs(model: &LlamaModel, n_ctx: u32, tokenized: &[Vec<LlamaToken>]) -> 
     let max_seq_tokens = tokenized.iter().map(Vec::len).max().unwrap_or(0) as u32;
     let effective_ctx = resolve_reranker_context_size(n_ctx, max_seq_tokens)?;
 
-    let ctx_params = LlamaContextParams::default()
-        .with_n_ctx(NonZeroU32::new(effective_ctx))
-        .with_n_batch(effective_ctx)
-        .with_n_ubatch(effective_ctx)
-        .with_n_seq_max(1)
-        .with_embeddings(true)
-        .with_pooling_type(LlamaPoolingType::Rank);
+    let ctx_params = reranker_context_params(effective_ctx, flash_attention);
 
     let mut ctx = model.new_context(backend, ctx_params).map_err(|err| {
         KboltError::Inference(format!("Qwen3 reranker context creation failed: {err}"))
@@ -184,6 +191,20 @@ fn score_docs(model: &LlamaModel, n_ctx: u32, tokenized: &[Vec<LlamaToken>]) -> 
     }
 
     Ok(scores)
+}
+
+fn reranker_context_params(
+    effective_ctx: u32,
+    flash_attention: LlamaFlashAttentionMode,
+) -> LlamaContextParams {
+    LlamaContextParams::default()
+        .with_n_ctx(NonZeroU32::new(effective_ctx))
+        .with_n_batch(effective_ctx)
+        .with_n_ubatch(effective_ctx)
+        .with_n_seq_max(1)
+        .with_embeddings(true)
+        .with_pooling_type(LlamaPoolingType::Rank)
+        .with_flash_attention_policy(llama_flash_attention_policy(flash_attention))
 }
 
 fn extract_binary_rank_relevance_score(embeddings: &[f32]) -> Result<f32> {
@@ -217,10 +238,15 @@ fn resolve_reranker_context_size(configured_n_ctx: u32, required_tokens: u32) ->
 
 #[cfg(test)]
 mod tests {
+    const LLAMA_FLASH_ATTN_TYPE_AUTO: i32 = -1;
+    const LLAMA_FLASH_ATTN_TYPE_DISABLED: i32 = 0;
+    const LLAMA_FLASH_ATTN_TYPE_ENABLED: i32 = 1;
+
     use super::{
         build_qwen3_rerank_prompt, extract_binary_rank_relevance_score,
-        fit_utf8_prefix_to_token_limit, resolve_reranker_context_size,
+        fit_utf8_prefix_to_token_limit, reranker_context_params, resolve_reranker_context_size,
     };
+    use crate::config::LlamaFlashAttentionMode;
 
     #[test]
     fn reranker_context_size_respects_configured_ceiling() {
@@ -228,6 +254,33 @@ mod tests {
 
         let err = resolve_reranker_context_size(128, 129).expect_err("must reject overflow");
         assert!(err.to_string().contains("requires 129 context tokens"));
+    }
+
+    #[test]
+    fn reranker_context_params_disable_flash_attention_by_default() {
+        let params = reranker_context_params(256, LlamaFlashAttentionMode::Disabled);
+
+        assert_eq!(
+            params.flash_attention_policy(),
+            LLAMA_FLASH_ATTN_TYPE_DISABLED
+        );
+    }
+
+    #[test]
+    fn reranker_context_params_enable_flash_attention_when_requested() {
+        let params = reranker_context_params(256, LlamaFlashAttentionMode::Enabled);
+
+        assert_eq!(
+            params.flash_attention_policy(),
+            LLAMA_FLASH_ATTN_TYPE_ENABLED
+        );
+    }
+
+    #[test]
+    fn reranker_context_params_use_auto_flash_attention_when_requested() {
+        let params = reranker_context_params(256, LlamaFlashAttentionMode::Auto);
+
+        assert_eq!(params.flash_attention_policy(), LLAMA_FLASH_ATTN_TYPE_AUTO);
     }
 
     #[test]
