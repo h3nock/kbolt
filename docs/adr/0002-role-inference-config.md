@@ -1,7 +1,17 @@
 # ADR 0002: Role-Specific Inference Config
 
 ## Status
-Accepted
+Superseded by ADR 0003
+
+This ADR captured the first clean split between embedding inference and role-specific text
+inference. The target architecture now moves one step further:
+- local inference standardizes on a shared `llama.cpp server` backend
+- remote providers remain pluggable per role
+- configuration moves from implementation-shaped local runtimes toward provider profiles and role
+  bindings
+
+See [ADR 0003](./0003-provider-profiles-and-shared-local-inference.md) for the replacement
+design.
 
 ## Context
 Kbolt already had:

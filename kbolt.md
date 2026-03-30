@@ -313,6 +313,15 @@ Engine search/update modules do not manage index locks — they call `storage.qu
 
 ### Models (facade, owns lifecycle)
 
+**Architecture direction**: the long-term inference design is defined by
+[ADR 0003](./docs/adr/0003-provider-profiles-and-shared-local-inference.md):
+- one local backend (`llama.cpp server`)
+- many remote backends
+- per-role provider choice through provider profiles and role bindings
+
+The in-process local runtime details described in this V1 spec reflect the current
+implementation lineage, not the target architecture.
+
 Models hides inference/runtime details behind role interfaces. Engine owns role instances (`Embedder`, `Reranker`, `Expander`) and builds them from config at construction. Provider-specific transport/runtime concerns (HTTP, ONNX Runtime, llama-cpp) stay inside `models/` implementation modules.
 
 Three separate traits — each defines its own contract because they share nothing in common (different inputs, outputs, runtimes, thread-safety):
@@ -1651,6 +1660,14 @@ Return top results up to `--limit` (default `10`).
 ## Configuration (TOML)
 
 System-level settings only. Spaces and collections are stored in SQLite, managed via CLI.
+
+**Config direction**: the sample below reflects the current implementation. The target inference
+configuration is provider-profile based:
+- provider profiles define local/remote connection details
+- role bindings choose provider + model per role
+- local inference standardizes on `llama.cpp server`
+
+See [ADR 0003](./docs/adr/0003-provider-profiles-and-shared-local-inference.md).
 
 ```toml
 # ~/.config/kbolt/index.toml
