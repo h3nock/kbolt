@@ -26,6 +26,22 @@ pub(super) struct ChatCompletionRequestOptions {
     pub repeat_penalty: Option<f32>,
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
+    pub llama_cpp: Option<LlamaCppChatRequestOptions>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct LlamaCppChatRequestOptions {
+    pub grammar: Option<String>,
+    pub chat_template_kwargs: Option<Value>,
+}
+
+impl LlamaCppChatRequestOptions {
+    pub(super) fn non_thinking() -> Self {
+        Self {
+            grammar: None,
+            chat_template_kwargs: Some(json!({ "enable_thinking": false })),
+        }
+    }
 }
 
 impl ChatCompletionRequestOptions {
@@ -42,6 +58,7 @@ impl ChatCompletionRequestOptions {
             repeat_penalty: None,
             frequency_penalty: None,
             presence_penalty: None,
+            llama_cpp: None,
         }
     }
 
@@ -59,6 +76,7 @@ impl ChatCompletionRequestOptions {
             repeat_penalty: None,
             frequency_penalty: None,
             presence_penalty: None,
+            llama_cpp: None,
         }
     }
 }
@@ -67,6 +85,7 @@ impl ChatCompletionRequestOptions {
 pub(super) struct HttpChatClient {
     http: HttpJsonClient,
     model: String,
+    endpoint_suffix: &'static str,
     options: ChatCompletionRequestOptions,
 }
 
@@ -77,6 +96,7 @@ impl HttpChatClient {
         timeout_ms: u64,
         max_retries: u32,
         model: &str,
+        endpoint_suffix: &'static str,
         options: ChatCompletionRequestOptions,
         provider_name: &'static str,
     ) -> Self {
@@ -90,6 +110,7 @@ impl HttpChatClient {
                 provider_name,
             ),
             model: model.to_string(),
+            endpoint_suffix,
             options,
         }
     }
@@ -99,9 +120,11 @@ impl CompletionClient for HttpChatClient {
     fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
         let payload = build_chat_payload(&self.model, system_prompt, user_prompt, &self.options);
 
-        let response: ChatCompletionResponse =
-            self.http
-                .post_json("chat/completions", &payload, HttpOperation::ChatCompletion)?;
+        let response: ChatCompletionResponse = self.http.post_json(
+            self.endpoint_suffix,
+            &payload,
+            HttpOperation::ChatCompletion,
+        )?;
         let content = response.into_text()?;
         let normalized = match self.options.output_mode {
             ChatCompletionOutputMode::JsonObject => content.trim(),
@@ -159,6 +182,14 @@ pub(super) fn build_chat_payload(
     }
     if let Some(presence_penalty) = options.presence_penalty {
         payload["presence_penalty"] = json!(presence_penalty);
+    }
+    if let Some(llama_cpp) = options.llama_cpp.as_ref() {
+        if let Some(grammar) = llama_cpp.grammar.as_ref() {
+            payload["grammar"] = json!(grammar);
+        }
+        if let Some(chat_template_kwargs) = llama_cpp.chat_template_kwargs.as_ref() {
+            payload["chat_template_kwargs"] = chat_template_kwargs.clone();
+        }
     }
     if options.output_mode == ChatCompletionOutputMode::JsonObject {
         payload["response_format"] = json!({ "type": "json_object" });
@@ -227,5 +258,47 @@ fn extract_text(value: Value) -> Option<String> {
             .and_then(|item| item.as_str())
             .map(ToString::to_string),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_chat_payload, ChatCompletionOutputMode, ChatCompletionRequestOptions,
+        LlamaCppChatRequestOptions,
+    };
+
+    #[test]
+    fn build_chat_payload_adds_llama_non_thinking_controls_when_requested() {
+        let mut options = ChatCompletionRequestOptions::text();
+        options.llama_cpp = Some(LlamaCppChatRequestOptions::non_thinking());
+
+        let payload = build_chat_payload("model", "system", "user", &options);
+        assert_eq!(payload["chat_template_kwargs"]["enable_thinking"], false);
+    }
+
+    #[test]
+    fn build_chat_payload_adds_llama_grammar_when_requested() {
+        let mut options = ChatCompletionRequestOptions::text();
+        options.llama_cpp = Some(LlamaCppChatRequestOptions {
+            grammar: Some("root ::= \"ok\"".to_string()),
+            chat_template_kwargs: None,
+        });
+
+        let payload = build_chat_payload("model", "system", "user", &options);
+        assert_eq!(payload["grammar"], "root ::= \"ok\"");
+    }
+
+    #[test]
+    fn build_chat_payload_omits_llama_controls_by_default() {
+        let options = ChatCompletionRequestOptions::text();
+        let payload = build_chat_payload("model", "system", "user", &options);
+        assert!(payload.get("chat_template_kwargs").is_none());
+    }
+
+    #[test]
+    fn text_request_options_keep_text_output_mode() {
+        let options = ChatCompletionRequestOptions::text();
+        assert_eq!(options.output_mode, ChatCompletionOutputMode::Text);
     }
 }

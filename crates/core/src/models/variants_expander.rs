@@ -11,6 +11,15 @@ use crate::models::{normalize_query_text, Expander};
 use crate::Result;
 
 const VARIANTS_SYSTEM_PROMPT: &str = "You generate retrieval query variants. Return JSON only as an array of strings. Preserve the original intent, named entities, numbers, abbreviations, error text, config keys, and file paths. Keep each variant specific and retrieval-focused. Do not answer the query. Do not explain anything.";
+pub(super) const VARIANTS_GRAMMAR: &str = r#"root ::= ws array ws
+array ::= "[" ws elements? ws "]"
+elements ::= string (ws "," ws string)*
+string ::= "\"" chars "\""
+chars ::= char*
+char ::= [^"\\\x00-\x1F] | escape
+escape ::= "\\" (["\\/bfnrt] | "u" hex hex hex hex)
+hex ::= [0-9a-fA-F]
+ws ::= [ \t\n\r]*"#;
 
 #[derive(Clone)]
 pub(super) struct ChatVariantsExpander {

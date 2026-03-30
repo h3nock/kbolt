@@ -5,14 +5,17 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::config::{Config, ProviderOperation};
-use crate::models::chat::{ChatCompletionOutputMode, ChatCompletionRequestOptions, HttpChatClient};
+use crate::models::chat::{
+    ChatCompletionOutputMode, ChatCompletionRequestOptions, HttpChatClient,
+    LlamaCppChatRequestOptions,
+};
 use crate::models::completion::CompletionClient;
 use crate::models::gateway::{
     resolve_inference_gateway_bindings, EmbedderBinding, ExpanderBinding, GatewayProviderKind,
     InferenceGatewayBindings, ProviderDeployment, RerankerBinding,
 };
 use crate::models::http::{HttpJsonClient, HttpOperation};
-use crate::models::variants_expander::ChatVariantsExpander;
+use crate::models::variants_expander::{ChatVariantsExpander, VARIANTS_GRAMMAR};
 use crate::models::{Embedder, EmbeddingInputKind, Expander, Reranker};
 use crate::Result;
 
@@ -26,6 +29,7 @@ struct HttpApiEmbedder {
     client: HttpJsonClient,
     model: String,
     batch_size: usize,
+    endpoint_suffix: &'static str,
 }
 
 #[derive(Clone)]
@@ -34,9 +38,17 @@ struct ChatBackedReranker {
 }
 
 #[derive(Debug, Clone)]
-struct HttpEndpointReranker {
+struct LlamaCppEndpointReranker {
     client: HttpJsonClient,
     model: String,
+    endpoint_suffix: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct OpenAiCompatibleEndpointReranker {
+    client: HttpJsonClient,
+    model: String,
+    endpoint_suffix: &'static str,
 }
 
 pub(crate) struct BuiltInferenceClients {
@@ -103,26 +115,51 @@ fn build_embedder_from_binding(binding: &EmbedderBinding) -> Result<Arc<dyn Embe
         ),
         model: binding.deployment.model.clone(),
         batch_size: binding.batch_size,
+        endpoint_suffix: embedding_endpoint_suffix(binding.deployment.kind),
     }))
 }
 
 fn build_reranker_from_binding(binding: &RerankerBinding) -> Result<Arc<dyn Reranker>> {
     match binding.deployment.operation {
-        ProviderOperation::Reranking => Ok(Arc::new(HttpEndpointReranker {
-            client: HttpJsonClient::new(
-                &binding.deployment.base_url,
-                binding.deployment.api_key_env.as_deref(),
-                binding.deployment.timeout_ms,
-                binding.deployment.max_retries,
-                "reranking",
-                binding.deployment.kind.as_str(),
-            ),
-            model: binding.deployment.model.clone(),
-        })),
+        ProviderOperation::Reranking => match binding.deployment.kind {
+            GatewayProviderKind::LlamaCppServer => Ok(Arc::new(LlamaCppEndpointReranker {
+                client: HttpJsonClient::new(
+                    &binding.deployment.base_url,
+                    binding.deployment.api_key_env.as_deref(),
+                    binding.deployment.timeout_ms,
+                    binding.deployment.max_retries,
+                    "reranking",
+                    binding.deployment.kind.as_str(),
+                ),
+                model: binding.deployment.model.clone(),
+                endpoint_suffix: llama_cpp_reranking_endpoint_suffix(),
+            })),
+            GatewayProviderKind::OpenAiCompatible => {
+                Ok(Arc::new(OpenAiCompatibleEndpointReranker {
+                    client: HttpJsonClient::new(
+                        &binding.deployment.base_url,
+                        binding.deployment.api_key_env.as_deref(),
+                        binding.deployment.timeout_ms,
+                        binding.deployment.max_retries,
+                        "reranking",
+                        binding.deployment.kind.as_str(),
+                    ),
+                    model: binding.deployment.model.clone(),
+                    endpoint_suffix: openai_compatible_reranking_endpoint_suffix(),
+                }))
+            }
+        },
         ProviderOperation::ChatCompletion => Ok(Arc::new(ChatBackedReranker {
             chat: Arc::new(build_chat_client(
                 &binding.deployment,
-                ChatCompletionRequestOptions::json_object(),
+                match binding.deployment.kind {
+                    GatewayProviderKind::LlamaCppServer => {
+                        structured_llama_cpp_chat_options(ChatCompletionOutputMode::JsonObject)
+                    }
+                    GatewayProviderKind::OpenAiCompatible => {
+                        ChatCompletionRequestOptions::json_object()
+                    }
+                },
             )),
         })),
         ProviderOperation::Embedding => Err(KboltError::Inference(format!(
@@ -166,9 +203,32 @@ fn build_chat_client(
         deployment.timeout_ms,
         deployment.max_retries,
         &deployment.model,
+        chat_completion_endpoint_suffix(deployment.kind),
         options,
         deployment.kind.as_str(),
     )
+}
+
+fn embedding_endpoint_suffix(kind: GatewayProviderKind) -> &'static str {
+    match kind {
+        GatewayProviderKind::LlamaCppServer => "v1/embeddings",
+        GatewayProviderKind::OpenAiCompatible => "embeddings",
+    }
+}
+
+fn chat_completion_endpoint_suffix(kind: GatewayProviderKind) -> &'static str {
+    match kind {
+        GatewayProviderKind::LlamaCppServer => "v1/chat/completions",
+        GatewayProviderKind::OpenAiCompatible => "chat/completions",
+    }
+}
+
+fn llama_cpp_reranking_endpoint_suffix() -> &'static str {
+    "v1/reranking"
+}
+
+fn openai_compatible_reranking_endpoint_suffix() -> &'static str {
+    "rerank"
 }
 
 fn openai_expander_options(binding: &ExpanderBinding) -> ChatCompletionRequestOptions {
@@ -184,10 +244,14 @@ fn openai_expander_options(binding: &ExpanderBinding) -> ChatCompletionRequestOp
         repeat_penalty: None,
         frequency_penalty: Some(binding.sampling.frequency_penalty),
         presence_penalty: Some(binding.sampling.presence_penalty),
+        llama_cpp: None,
     }
 }
 
 fn llama_cpp_expander_options(binding: &ExpanderBinding) -> ChatCompletionRequestOptions {
+    let mut llama_cpp = LlamaCppChatRequestOptions::non_thinking();
+    llama_cpp.grammar = Some(VARIANTS_GRAMMAR.to_string());
+
     ChatCompletionRequestOptions {
         output_mode: ChatCompletionOutputMode::Text,
         max_tokens: Some(binding.max_tokens),
@@ -200,7 +264,32 @@ fn llama_cpp_expander_options(binding: &ExpanderBinding) -> ChatCompletionReques
         repeat_penalty: Some(binding.sampling.repeat_penalty),
         frequency_penalty: Some(binding.sampling.frequency_penalty),
         presence_penalty: Some(binding.sampling.presence_penalty),
+        llama_cpp: Some(llama_cpp),
     }
+}
+
+fn structured_llama_cpp_chat_options(
+    output_mode: ChatCompletionOutputMode,
+) -> ChatCompletionRequestOptions {
+    let mut options = match output_mode {
+        ChatCompletionOutputMode::JsonObject => ChatCompletionRequestOptions::json_object(),
+        ChatCompletionOutputMode::Text => ChatCompletionRequestOptions {
+            output_mode: ChatCompletionOutputMode::Text,
+            max_tokens: None,
+            seed: None,
+            temperature: Some(0.0),
+            top_k: None,
+            top_p: None,
+            min_p: None,
+            repeat_last_n: None,
+            repeat_penalty: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            llama_cpp: None,
+        },
+    };
+    options.llama_cpp = Some(LlamaCppChatRequestOptions::non_thinking());
+    options
 }
 
 fn validate_openai_expander_sampling(binding: &ExpanderBinding) -> Result<()> {
@@ -221,7 +310,13 @@ fn validate_openai_expander_sampling(binding: &ExpanderBinding) -> Result<()> {
 
 impl Embedder for HttpApiEmbedder {
     fn embed_batch(&self, _kind: EmbeddingInputKind, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        embed_with_http_api(&self.client, &self.model, self.batch_size, texts)
+        embed_with_http_api(
+            &self.client,
+            self.endpoint_suffix,
+            &self.model,
+            self.batch_size,
+            texts,
+        )
     }
 }
 
@@ -257,7 +352,7 @@ impl Reranker for ChatBackedReranker {
     }
 }
 
-impl Reranker for HttpEndpointReranker {
+impl Reranker for LlamaCppEndpointReranker {
     fn rerank(&self, query: &str, docs: &[String]) -> Result<Vec<f32>> {
         if docs.is_empty() {
             return Ok(Vec::new());
@@ -270,37 +365,46 @@ impl Reranker for HttpEndpointReranker {
             "top_n": docs.len(),
             "return_text": false,
         });
-        let mut scored = self
+        let scored = self
             .client
-            .post_json::<RerankResponseEnvelope>("rerank", &payload, HttpOperation::Reranking)?
+            .post_json::<LlamaCppRerankResponseEnvelope>(
+                self.endpoint_suffix,
+                &payload,
+                HttpOperation::Reranking,
+            )?
             .into_items()?;
-        if scored.len() != docs.len() {
-            return Err(KboltError::Inference(format!(
-                "rerank response size mismatch: expected {}, got {}",
-                docs.len(),
-                scored.len()
-            ))
-            .into());
+        finalize_rerank_scores(scored, docs.len())
+    }
+}
+
+impl Reranker for OpenAiCompatibleEndpointReranker {
+    fn rerank(&self, query: &str, docs: &[String]) -> Result<Vec<f32>> {
+        if docs.is_empty() {
+            return Ok(Vec::new());
         }
 
-        scored.sort_by_key(|item| item.index);
-        let mut scores = Vec::with_capacity(scored.len());
-        for (expected, item) in scored.into_iter().enumerate() {
-            if item.index != expected {
-                return Err(KboltError::Inference(format!(
-                    "rerank response index mismatch: expected {expected}, got {}",
-                    item.index
-                ))
-                .into());
-            }
-            scores.push(item.score);
-        }
-        Ok(scores)
+        let payload = json!({
+            "model": self.model,
+            "query": query,
+            "documents": docs,
+            "top_n": docs.len(),
+            "return_text": false,
+        });
+        let scored = self
+            .client
+            .post_json::<OpenAiCompatibleRerankResponseEnvelope>(
+                self.endpoint_suffix,
+                &payload,
+                HttpOperation::Reranking,
+            )?
+            .into_items()?;
+        finalize_rerank_scores(scored, docs.len())
     }
 }
 
 fn embed_with_http_api(
     client: &HttpJsonClient,
+    endpoint_suffix: &str,
     model: &str,
     batch_size: usize,
     texts: &[String],
@@ -316,7 +420,7 @@ fn embed_with_http_api(
             "input": batch,
         });
         let parsed: EmbeddingResponseEnvelope =
-            client.post_json("embeddings", &payload, HttpOperation::Embedding)?;
+            client.post_json(endpoint_suffix, &payload, HttpOperation::Embedding)?;
         let response_vectors = parsed.into_vectors(batch.len())?;
         vectors.extend(response_vectors);
     }
@@ -352,23 +456,44 @@ enum RerankerResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum RerankResponseEnvelope {
-    Items(Vec<RerankItem>),
-    Wrapped { results: Vec<RerankItem> },
+enum LlamaCppRerankResponseEnvelope {
+    Items(Vec<LlamaCppRerankItem>),
+    Wrapped { results: Vec<LlamaCppRerankItem> },
 }
 
-impl RerankResponseEnvelope {
-    fn into_items(self) -> Result<Vec<RerankItem>> {
+impl LlamaCppRerankResponseEnvelope {
+    fn into_items(self) -> Result<Vec<RerankScoreItem>> {
         let items = match self {
             Self::Items(items) => items,
             Self::Wrapped { results } => results,
-        };
-        if items.iter().any(|item| !item.score.is_finite()) {
-            return Err(KboltError::Inference(
-                "rerank response contains non-finite score".to_string(),
-            )
-            .into());
         }
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>();
+        validate_rerank_scores(&items)?;
+        Ok(items)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum OpenAiCompatibleRerankResponseEnvelope {
+    Items(Vec<OpenAiCompatibleRerankItem>),
+    Wrapped {
+        results: Vec<OpenAiCompatibleRerankItem>,
+    },
+}
+
+impl OpenAiCompatibleRerankResponseEnvelope {
+    fn into_items(self) -> Result<Vec<RerankScoreItem>> {
+        let items = match self {
+            Self::Items(items) => items,
+            Self::Wrapped { results } => results,
+        }
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>();
+        validate_rerank_scores(&items)?;
         Ok(items)
     }
 }
@@ -435,9 +560,39 @@ struct EmbeddingItem {
 }
 
 #[derive(Debug, Deserialize)]
-struct RerankItem {
+struct RerankScoreItem {
     index: usize,
     score: f32,
+}
+
+#[derive(Debug, Deserialize)]
+struct LlamaCppRerankItem {
+    index: usize,
+    relevance_score: f32,
+}
+
+impl From<LlamaCppRerankItem> for RerankScoreItem {
+    fn from(value: LlamaCppRerankItem) -> Self {
+        Self {
+            index: value.index,
+            score: value.relevance_score,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCompatibleRerankItem {
+    index: usize,
+    score: f32,
+}
+
+impl From<OpenAiCompatibleRerankItem> for RerankScoreItem {
+    fn from(value: OpenAiCompatibleRerankItem) -> Self {
+        Self {
+            index: value.index,
+            score: value.score,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -456,12 +611,50 @@ impl EmbeddingVector {
     }
 }
 
+fn validate_rerank_scores(items: &[RerankScoreItem]) -> Result<()> {
+    if items.iter().any(|item| !item.score.is_finite()) {
+        return Err(
+            KboltError::Inference("rerank response contains non-finite score".to_string()).into(),
+        );
+    }
+    Ok(())
+}
+
+fn finalize_rerank_scores(
+    mut scored: Vec<RerankScoreItem>,
+    expected_len: usize,
+) -> Result<Vec<f32>> {
+    if scored.len() != expected_len {
+        return Err(KboltError::Inference(format!(
+            "rerank response size mismatch: expected {expected_len}, got {}",
+            scored.len()
+        ))
+        .into());
+    }
+
+    scored.sort_by_key(|item| item.index);
+    let mut scores = Vec::with_capacity(scored.len());
+    for (expected, item) in scored.into_iter().enumerate() {
+        if item.index != expected {
+            return Err(KboltError::Inference(format!(
+                "rerank response index mismatch: expected {expected}, got {}",
+                item.index
+            ))
+            .into());
+        }
+        scores.push(item.score);
+    }
+
+    Ok(scores)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::sync::mpsc;
     use std::time::Duration;
 
     use super::*;
@@ -550,7 +743,64 @@ mod tests {
         format!("http://{addr}")
     }
 
+    fn serve_once_capturing_request(
+        status_code: u16,
+        body: &str,
+    ) -> (String, mpsc::Receiver<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("server address");
+        let payload = body.to_string();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let request = read_raw_request(&mut stream);
+            tx.send(request).expect("send captured request");
+
+            let status_line = match status_code {
+                200 => "HTTP/1.1 200 OK",
+                401 => "HTTP/1.1 401 Unauthorized",
+                404 => "HTTP/1.1 404 Not Found",
+                429 => "HTTP/1.1 429 Too Many Requests",
+                500 => "HTTP/1.1 500 Internal Server Error",
+                other => panic!("unsupported status code in test server: {other}"),
+            };
+            let response = format!(
+                "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+
+        (format!("http://{addr}"), rx)
+    }
+
     fn read_full_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        let raw = read_raw_request(stream);
+        let header_end = raw
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|offset| offset + 4);
+        let Some(header_end) = header_end else {
+            return Vec::new();
+        };
+
+        let headers = String::from_utf8_lossy(&raw[..header_end]).to_ascii_lowercase();
+        let mut content_length = 0usize;
+        for line in headers.lines() {
+            if let Some(value) = line.strip_prefix("content-length:") {
+                content_length = value.trim().parse::<usize>().unwrap_or(0);
+                break;
+            }
+        }
+
+        let body_end = header_end.saturating_add(content_length).min(raw.len());
+        raw.get(header_end..body_end).unwrap_or_default().to_vec()
+    }
+
+    fn read_raw_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
         let mut raw = Vec::new();
         let mut header_end = None;
         while header_end.is_none() {
@@ -584,11 +834,10 @@ mod tests {
             if read == 0 {
                 break;
             }
+            raw.extend_from_slice(&chunk[..read]);
             remaining = remaining.saturating_sub(read);
         }
-
-        let body_end = header_end.saturating_add(content_length).min(raw.len());
-        raw.get(header_end..body_end).unwrap_or_default().to_vec()
+        raw
     }
 
     #[test]
@@ -621,7 +870,7 @@ mod tests {
 
     #[test]
     fn provider_profile_reranker_supports_native_rerank_endpoint() {
-        let body = r#"{"results":[{"index":1,"score":0.9},{"index":0,"score":0.2}]}"#;
+        let body = r#"{"model":"qwen3-reranker","object":"list","usage":{"prompt_tokens":153,"total_tokens":153},"results":[{"index":1,"relevance_score":0.9},{"index":0,"relevance_score":0.2}]}"#;
         let mut config = base_config();
         config.providers.insert(
             "local_rerank".to_string(),
@@ -635,6 +884,33 @@ mod tests {
         );
         config.roles.reranker = Some(RerankerRoleConfig {
             provider: "local_rerank".to_string(),
+        });
+
+        let built = build_inference_clients(&config).expect("build clients");
+        let reranker = built.reranker.expect("reranker should exist");
+        let scores = reranker
+            .rerank("query", &["doc one".to_string(), "doc two".to_string()])
+            .expect("rerank");
+        assert_eq!(scores, vec![0.2, 0.9]);
+    }
+
+    #[test]
+    fn openai_native_reranker_uses_score_field() {
+        let body = r#"{"results":[{"index":1,"score":0.9},{"index":0,"score":0.2}]}"#;
+        let mut config = base_config();
+        config.providers.insert(
+            "remote_rerank".to_string(),
+            ProviderProfileConfig::OpenAiCompatible {
+                operation: ProviderOperation::Reranking,
+                base_url: serve_once(200, body),
+                model: "rerank-model".to_string(),
+                api_key_env: None,
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        );
+        config.roles.reranker = Some(RerankerRoleConfig {
+            provider: "remote_rerank".to_string(),
         });
 
         let built = build_inference_clients(&config).expect("build clients");
@@ -686,7 +962,7 @@ mod tests {
   "choices": [
     {
       "message": {
-        "content": "{\"variants\":[\"trait object rust\",\"explain rust traits\"]}"
+        "content": "[\"trait object rust\",\"explain rust traits\"]"
       }
     }
   ]
@@ -717,6 +993,57 @@ mod tests {
                 "trait object rust".to_string(),
                 "explain rust traits".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn llama_cpp_expander_posts_v1_chat_request_with_non_thinking_grammar() {
+        let body = r#"{
+  "choices": [
+    {
+      "message": {
+        "content": "[\"trait object rust\",\"explain rust traits\"]"
+      }
+    }
+  ]
+}"#;
+        let (base_url, requests) = serve_once_capturing_request(200, body);
+        let mut config = base_config();
+        config.providers.insert(
+            "local_expand".to_string(),
+            ProviderProfileConfig::LlamaCppServer {
+                operation: ProviderOperation::ChatCompletion,
+                base_url,
+                model: "qwen3-1.7b".to_string(),
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        );
+        config.roles.expander = Some(ExpanderRoleConfig {
+            provider: "local_expand".to_string(),
+            max_tokens: 256,
+            sampling: ExpanderSamplingConfig::default(),
+        });
+
+        let built = build_inference_clients(&config).expect("build clients");
+        let expander = built.expander.expect("expander should exist");
+        let _ = expander.expand("rust traits", 4).expect("expand");
+
+        let raw_request = requests
+            .recv_timeout(Duration::from_secs(1))
+            .expect("captured request");
+        let request = String::from_utf8(raw_request).expect("utf8 request");
+        assert!(
+            request.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"),
+            "unexpected request line: {request}"
+        );
+        assert!(
+            request.contains("\"chat_template_kwargs\":{\"enable_thinking\":false}"),
+            "missing non-thinking kwargs in request: {request}"
+        );
+        assert!(
+            request.contains("array ::= \\\"[\\\" ws elements? ws \\\"]\\\""),
+            "missing variants grammar in request: {request}"
         );
     }
 
