@@ -606,19 +606,21 @@ pub struct UpdateOptions {
     pub collections: Vec<String>,          // scope to collections (empty = all)
     pub no_embed: bool,                    // skip embedding (FTS-only indexing)
     pub dry_run: bool,                     // preview what would change, no writes
-    pub verbose: bool,                     // log per-file decisions to stderr
+    pub verbose: bool,                     // include per-file decisions in update output
 }
 
 pub struct UpdateReport {
-    pub scanned: usize,                    // files examined (stat'd)
-    pub skipped_mtime: usize,              // unchanged mtime → fast skip
-    pub skipped_hash: usize,               // mtime changed but hash unchanged
-    pub added: usize,                      // new files indexed
-    pub updated: usize,                    // changed files re-indexed
-    pub deactivated: usize,                // files disappeared from disk
-    pub reactivated: usize,                // previously deactivated files returned
-    pub reaped: usize,                     // hard-deleted past reaping period
-    pub embedded: usize,                   // chunks that received embeddings
+    pub scanned_docs: usize,               // candidate files examined as documents
+    pub skipped_mtime_docs: usize,         // active docs skipped by mtime fast path
+    pub skipped_hash_docs: usize,          // active docs skipped after hash match
+    pub added_docs: usize,                 // new docs indexed (or that would be indexed in dry-run)
+    pub updated_docs: usize,               // changed docs re-indexed (or that would be in dry-run)
+    pub failed_docs: usize,                // unique docs with non-fatal failures this run
+    pub deactivated_docs: usize,           // docs no longer seen in the collection scan
+    pub reactivated_docs: usize,           // previously inactive docs made active again
+    pub reaped_docs: usize,                // inactive docs hard-deleted by reaping
+    pub embedded_chunks: usize,            // chunks that received embeddings
+    pub decisions: Vec<UpdateDecision>,    // verbose per-doc decisions (only when verbose)
     pub errors: Vec<FileError>,            // per-file errors (non-fatal, indexing continues)
     pub elapsed_ms: u64,
 }

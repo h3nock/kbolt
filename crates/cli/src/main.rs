@@ -1318,15 +1318,16 @@ mod tests {
     #[test]
     fn render_structured_output_serializes_update_reports_with_decisions() {
         let rendered = render_structured_output(&UpdateReport {
-            scanned: 2,
-            skipped_mtime: 0,
-            skipped_hash: 0,
-            added: 1,
-            updated: 0,
-            deactivated: 0,
-            reactivated: 0,
-            reaped: 0,
-            embedded: 0,
+            scanned_docs: 2,
+            skipped_mtime_docs: 0,
+            skipped_hash_docs: 0,
+            added_docs: 1,
+            updated_docs: 0,
+            failed_docs: 0,
+            deactivated_docs: 0,
+            reactivated_docs: 0,
+            reaped_docs: 0,
+            embedded_chunks: 0,
             decisions: vec![UpdateDecision {
                 space: "work".to_string(),
                 collection: "api".to_string(),
@@ -1346,15 +1347,16 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "scanned": 2,
-                "skipped_mtime": 0,
-                "skipped_hash": 0,
-                "added": 1,
-                "updated": 0,
-                "deactivated": 0,
-                "reactivated": 0,
-                "reaped": 0,
-                "embedded": 0,
+                "scanned_docs": 2,
+                "skipped_mtime_docs": 0,
+                "skipped_hash_docs": 0,
+                "added_docs": 1,
+                "updated_docs": 0,
+                "failed_docs": 0,
+                "deactivated_docs": 0,
+                "reactivated_docs": 0,
+                "reaped_docs": 0,
+                "embedded_chunks": 0,
                 "decisions": [
                     {
                         "space": "work",

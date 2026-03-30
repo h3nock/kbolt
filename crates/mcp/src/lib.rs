@@ -614,7 +614,7 @@ mod tests {
                     verbose: false,
                 })
                 .expect("update work collection");
-            assert_eq!(report.added, 1);
+            assert_eq!(report.added_docs, 1);
 
             let files = adapter
                 .list_files(Some("work"), "api", Some("src"))

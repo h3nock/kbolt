@@ -3097,10 +3097,10 @@ fn update_indexes_new_document_and_skips_unchanged_mtime() {
         let first = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("first update");
-        assert_eq!(first.scanned, 1);
-        assert_eq!(first.added, 1);
-        assert_eq!(first.updated, 0);
-        assert_eq!(first.deactivated, 0);
+        assert_eq!(first.scanned_docs, 1);
+        assert_eq!(first.added_docs, 1);
+        assert_eq!(first.updated_docs, 0);
+        assert_eq!(first.deactivated_docs, 0);
         assert!(
             first.errors.is_empty(),
             "unexpected errors: {:?}",
@@ -3116,11 +3116,11 @@ fn update_indexes_new_document_and_skips_unchanged_mtime() {
         let second = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("second update");
-        assert_eq!(second.scanned, 1);
-        assert_eq!(second.skipped_mtime, 1);
-        assert_eq!(second.added, 0);
-        assert_eq!(second.updated, 0);
-        assert_eq!(second.deactivated, 0);
+        assert_eq!(second.scanned_docs, 1);
+        assert_eq!(second.skipped_mtime_docs, 1);
+        assert_eq!(second.added_docs, 0);
+        assert_eq!(second.updated_docs, 0);
+        assert_eq!(second.deactivated_docs, 0);
     });
 }
 
@@ -3141,8 +3141,8 @@ fn update_replays_fts_dirty_documents_before_mtime_fast_path() {
         let first = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("first update");
-        assert_eq!(first.scanned, 1);
-        assert_eq!(first.added, 1);
+        assert_eq!(first.scanned_docs, 1);
+        assert_eq!(first.added_docs, 1);
         assert!(
             first.errors.is_empty(),
             "unexpected errors: {:?}",
@@ -3249,7 +3249,7 @@ fn update_replay_skips_hash_mismatch_outside_scoped_targets() {
         let first = engine
             .update(update_options(None, &[]))
             .expect("index initial fixtures");
-        assert_eq!(first.added, 2);
+        assert_eq!(first.added_docs, 2);
         assert!(
             first.errors.is_empty(),
             "unexpected errors: {:?}",
@@ -3335,8 +3335,8 @@ fn update_clears_mismatched_dense_state_before_scan() {
         let first = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("first update");
-        assert_eq!(first.scanned, 1);
-        assert_eq!(first.added, 1);
+        assert_eq!(first.scanned_docs, 1);
+        assert_eq!(first.added_docs, 1);
         assert!(
             first.errors.is_empty(),
             "unexpected errors: {:?}",
@@ -3381,8 +3381,8 @@ fn update_clears_mismatched_dense_state_before_scan() {
         let second = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("second update");
-        assert_eq!(second.scanned, 1);
-        assert_eq!(second.skipped_mtime, 1);
+        assert_eq!(second.scanned_docs, 1);
+        assert_eq!(second.skipped_mtime_docs, 1);
         assert!(
             second.errors.is_empty(),
             "unexpected errors: {:?}",
@@ -3423,8 +3423,8 @@ fn update_clears_dense_state_when_embedding_model_drifts() {
         let first = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("first update");
-        assert_eq!(first.scanned, 1);
-        assert_eq!(first.added, 1);
+        assert_eq!(first.scanned_docs, 1);
+        assert_eq!(first.added_docs, 1);
         assert!(
             first.errors.is_empty(),
             "unexpected errors: {:?}",
@@ -3474,8 +3474,8 @@ fn update_clears_dense_state_when_embedding_model_drifts() {
         let second = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("second update");
-        assert_eq!(second.scanned, 1);
-        assert_eq!(second.skipped_mtime, 1);
+        assert_eq!(second.scanned_docs, 1);
+        assert_eq!(second.skipped_mtime_docs, 1);
         assert!(
             second.errors.is_empty(),
             "unexpected errors: {:?}",
@@ -3516,11 +3516,11 @@ fn update_embeds_chunks_when_embedder_is_configured() {
         let report = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("update with embedder");
-        assert_eq!(report.scanned, 1);
-        assert_eq!(report.added, 1);
+        assert_eq!(report.scanned_docs, 1);
+        assert_eq!(report.added_docs, 1);
         assert_eq!(report.errors.len(), 0);
         assert!(
-            report.embedded > 0,
+            report.embedded_chunks > 0,
             "expected embedding phase to process chunks"
         );
 
@@ -3530,14 +3530,14 @@ fn update_embeds_chunks_when_embedder_is_configured() {
                 .storage()
                 .count_embedded_chunks(Some(work_space.id))
                 .expect("count embedded chunks"),
-            report.embedded
+            report.embedded_chunks
         );
         assert_eq!(
             engine
                 .storage()
                 .count_usearch("work")
                 .expect("count usearch vectors"),
-            report.embedded
+            report.embedded_chunks
         );
 
         let files = engine
@@ -3566,9 +3566,10 @@ fn update_isolates_buffered_embedding_failures() {
             .update(update_options(Some("work"), &["api"]))
             .expect("update with partial embed failure");
 
-        assert_eq!(report.scanned, 2);
-        assert_eq!(report.added, 2);
-        assert_eq!(report.embedded, 1);
+        assert_eq!(report.scanned_docs, 2);
+        assert_eq!(report.added_docs, 2);
+        assert_eq!(report.failed_docs, 1);
+        assert_eq!(report.embedded_chunks, 1);
         assert_eq!(report.errors.len(), 1);
         assert!(
             report.errors[0].path.ends_with("bad.md"),
@@ -3642,8 +3643,9 @@ fn update_isolates_backlog_embedding_failures() {
             .update(update_options(Some("work"), &["api"]))
             .expect("embed backlog with partial failure");
 
-        assert_eq!(report.skipped_mtime, 2);
-        assert_eq!(report.embedded, 1);
+        assert_eq!(report.skipped_mtime_docs, 2);
+        assert_eq!(report.failed_docs, 1);
+        assert_eq!(report.embedded_chunks, 1);
         assert_eq!(report.errors.len(), 1);
         assert!(
             report.errors[0].path.ends_with("bad.md"),
@@ -3707,8 +3709,9 @@ fn update_backlog_embedding_advances_past_failed_prefix() {
             .update(update_options(Some("work"), &["api"]))
             .expect("embed backlog after failed prefix");
 
-        assert_eq!(report.skipped_mtime, 65);
-        assert_eq!(report.embedded, 1);
+        assert_eq!(report.skipped_mtime_docs, 65);
+        assert_eq!(report.failed_docs, 64);
+        assert_eq!(report.embedded_chunks, 1);
         assert!(
             report.errors.len() >= 64,
             "expected one error per failed prefix chunk, got {:?}",
@@ -3763,7 +3766,7 @@ fn update_records_embeddings_with_configured_embedding_model_key() {
             .update(update_options(Some("work"), &["api"]))
             .expect("update with embedder");
         assert!(
-            report.embedded > 0,
+            report.embedded_chunks > 0,
             "expected embedding phase to process chunks"
         );
 
@@ -3797,8 +3800,8 @@ fn update_markdown_uses_structural_chunking_and_heading_metadata() {
         let report = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("update markdown");
-        assert_eq!(report.scanned, 1);
-        assert_eq!(report.added, 1);
+        assert_eq!(report.scanned_docs, 1);
+        assert_eq!(report.added_docs, 1);
         assert!(
             report.errors.is_empty(),
             "unexpected errors: {:?}",
@@ -3853,7 +3856,7 @@ fn update_skipped_hash_preserves_extracted_markdown_title() {
         let first = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("initial update");
-        assert_eq!(first.added, 1);
+        assert_eq!(first.added_docs, 1);
 
         std::thread::sleep(std::time::Duration::from_millis(2));
         write_text_file(&file_path, "# Guide\n\nbody text\n");
@@ -3861,7 +3864,7 @@ fn update_skipped_hash_preserves_extracted_markdown_title() {
         let second = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("second update");
-        assert_eq!(second.skipped_hash, 1);
+        assert_eq!(second.skipped_hash_docs, 1);
 
         let space = engine.storage().get_space("work").expect("get work space");
         let collection = engine
@@ -3902,8 +3905,8 @@ fn update_code_files_use_code_chunking_profile() {
         let report = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("update code");
-        assert_eq!(report.scanned, 1);
-        assert_eq!(report.added, 1);
+        assert_eq!(report.scanned_docs, 1);
+        assert_eq!(report.added_docs, 1);
         assert!(
             report.errors.is_empty(),
             "unexpected errors: {:?}",
@@ -3965,8 +3968,8 @@ fn update_code_uses_blank_line_grouping_before_token_fallback() {
         let report = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("update code");
-        assert_eq!(report.scanned, 1);
-        assert_eq!(report.added, 1);
+        assert_eq!(report.scanned_docs, 1);
+        assert_eq!(report.added_docs, 1);
         assert!(
             report.errors.is_empty(),
             "unexpected errors: {:?}",
@@ -4044,8 +4047,8 @@ gamma delta
         let report = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("update markdown");
-        assert_eq!(report.scanned, 1);
-        assert_eq!(report.added, 1);
+        assert_eq!(report.scanned_docs, 1);
+        assert_eq!(report.added_docs, 1);
         assert!(
             report.errors.is_empty(),
             "unexpected errors: {:?}",
@@ -4103,8 +4106,8 @@ fn update_skips_hardcoded_ignored_paths() {
         let report = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("run update");
-        assert_eq!(report.scanned, 1);
-        assert_eq!(report.added, 1);
+        assert_eq!(report.scanned_docs, 1);
+        assert_eq!(report.added_docs, 1);
 
         let files = engine
             .list_files(Some("work"), "api", None)
@@ -4139,8 +4142,8 @@ fn update_applies_collection_ignore_patterns() {
         let report = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("run update");
-        assert_eq!(report.scanned, 1);
-        assert_eq!(report.added, 1);
+        assert_eq!(report.scanned_docs, 1);
+        assert_eq!(report.added_docs, 1);
 
         let files = engine
             .list_files(Some("work"), "api", None)
@@ -4196,6 +4199,9 @@ fn update_verbose_records_new_ignored_unsupported_and_extract_failed_decisions()
         let report = engine
             .update(verbose_update_options(Some("work"), &["api"]))
             .expect("run verbose update");
+
+        assert_eq!(report.added_docs, 1);
+        assert_eq!(report.failed_docs, 1);
 
         let new = report
             .decisions
@@ -4262,15 +4268,15 @@ fn update_tracks_modified_and_deactivated_documents() {
         let changed = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("changed update");
-        assert_eq!(changed.updated, 1);
-        assert_eq!(changed.added, 0);
-        assert_eq!(changed.deactivated, 0);
+        assert_eq!(changed.updated_docs, 1);
+        assert_eq!(changed.added_docs, 0);
+        assert_eq!(changed.deactivated_docs, 0);
 
         std::fs::remove_file(&file_path).expect("remove file");
         let removed = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("deactivate removed file");
-        assert_eq!(removed.deactivated, 1);
+        assert_eq!(removed.deactivated_docs, 1);
 
         let space = engine.storage().get_space("work").expect("get work space");
         let collection = engine
@@ -4380,7 +4386,7 @@ fn update_reap_purges_search_indexes_for_old_removed_files() {
         let report = engine
             .update(update_options(Some("work"), &["api"]))
             .expect("reap removed file");
-        assert_eq!(report.reaped, 1);
+        assert_eq!(report.reaped_docs, 1);
 
         let response = engine
             .search(SearchRequest {
@@ -4429,10 +4435,10 @@ fn update_dry_run_reports_changes_without_writing() {
         let mut options = update_options(Some("work"), &["api"]);
         options.dry_run = true;
         let report = engine.update(options).expect("dry run update");
-        assert_eq!(report.scanned, 1);
-        assert_eq!(report.added, 1);
-        assert_eq!(report.updated, 0);
-        assert_eq!(report.deactivated, 0);
+        assert_eq!(report.scanned_docs, 1);
+        assert_eq!(report.added_docs, 1);
+        assert_eq!(report.updated_docs, 0);
+        assert_eq!(report.deactivated_docs, 0);
 
         let space = engine.storage().get_space("work").expect("get work space");
         let collection = engine

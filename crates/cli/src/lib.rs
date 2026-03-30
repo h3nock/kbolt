@@ -890,15 +890,16 @@ fn format_update_report(report: &UpdateReport, verbose: bool) -> String {
         }
     }
 
-    lines.push(format!("scanned: {}", report.scanned));
-    lines.push(format!("skipped_mtime: {}", report.skipped_mtime));
-    lines.push(format!("skipped_hash: {}", report.skipped_hash));
-    lines.push(format!("added: {}", report.added));
-    lines.push(format!("updated: {}", report.updated));
-    lines.push(format!("deactivated: {}", report.deactivated));
-    lines.push(format!("reactivated: {}", report.reactivated));
-    lines.push(format!("reaped: {}", report.reaped));
-    lines.push(format!("embedded: {}", report.embedded));
+    lines.push(format!("scanned_docs: {}", report.scanned_docs));
+    lines.push(format!("skipped_mtime_docs: {}", report.skipped_mtime_docs));
+    lines.push(format!("skipped_hash_docs: {}", report.skipped_hash_docs));
+    lines.push(format!("added_docs: {}", report.added_docs));
+    lines.push(format!("updated_docs: {}", report.updated_docs));
+    lines.push(format!("failed_docs: {}", report.failed_docs));
+    lines.push(format!("deactivated_docs: {}", report.deactivated_docs));
+    lines.push(format!("reactivated_docs: {}", report.reactivated_docs));
+    lines.push(format!("reaped_docs: {}", report.reaped_docs));
+    lines.push(format!("embedded_chunks: {}", report.embedded_chunks));
     lines.push(format!("errors: {}", report.errors.len()));
     lines.push(format!("elapsed_ms: {}", report.elapsed_ms));
     lines.join("\n")
@@ -1623,7 +1624,7 @@ mod tests {
 
             let summary_index = output
                 .lines()
-                .position(|line| line.starts_with("scanned: "))
+                .position(|line| line.starts_with("scanned_docs: "))
                 .expect("expected summary output");
             assert!(summary_index > 0, "unexpected output: {output}");
             assert!(
