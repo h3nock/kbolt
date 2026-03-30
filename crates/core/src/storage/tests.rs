@@ -45,6 +45,27 @@ fn open_space_initializes_expected_tantivy_schema_fields() {
 }
 
 #[test]
+fn storage_instances_can_share_cache_before_any_tantivy_write() {
+    let tmp = tempdir().expect("create tempdir");
+    let cache_dir = tmp.path().join("cache");
+    let storage_a = Storage::new(&cache_dir).expect("create first storage");
+    storage_a.create_space("work", None).expect("create work");
+    storage_a.open_space("work").expect("open work");
+
+    let storage_b = Storage::new(&cache_dir).expect("create second storage");
+    let spaces = storage_b
+        .list_spaces()
+        .expect("list spaces from second storage");
+    assert_eq!(
+        spaces
+            .into_iter()
+            .map(|space| space.name)
+            .collect::<Vec<_>>(),
+        vec!["default".to_string(), "work".to_string()]
+    );
+}
+
+#[test]
 fn tantivy_index_and_query_returns_ranked_hits() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");

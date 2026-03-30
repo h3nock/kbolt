@@ -183,7 +183,7 @@ struct SpaceIndexes {
     _tantivy_dir: PathBuf,
     usearch_path: PathBuf,
     tantivy_index: Index,
-    tantivy_writer: Mutex<IndexWriter>,
+    tantivy_writer: Mutex<Option<IndexWriter>>,
     usearch_index: RwLock<usearch::Index>,
     fields: TantivyFields,
 }
@@ -318,7 +318,6 @@ CREATE TABLE IF NOT EXISTS embeddings (
         let tantivy_index = open_or_create_tantivy_index(&tantivy_dir)?;
         let usearch_index = open_or_create_usearch_index(&usearch_path)?;
         let fields = tantivy_fields_from_schema(&tantivy_index.schema())?;
-        let tantivy_writer = tantivy_index.writer(50_000_000)?;
 
         let mut spaces = self
             .spaces
@@ -330,7 +329,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
                 _tantivy_dir: tantivy_dir,
                 usearch_path,
                 tantivy_index,
-                tantivy_writer: Mutex::new(tantivy_writer),
+                tantivy_writer: Mutex::new(None),
                 usearch_index: RwLock::new(usearch_index),
                 fields,
             }));
@@ -1384,40 +1383,36 @@ CREATE TABLE IF NOT EXISTS embeddings (
         }
 
         let space_indexes = self.get_space_indexes(space)?;
-        let writer = space_indexes
-            .tantivy_writer
-            .lock()
-            .map_err(|_| CoreError::poisoned("tantivy writer"))?;
+        with_tantivy_writer(&space_indexes, |writer| {
+            for entry in entries {
+                let chunk_id = u64::try_from(entry.chunk_id).map_err(|_| {
+                    CoreError::Internal(format!(
+                        "chunk_id must be non-negative for tantivy indexing: {}",
+                        entry.chunk_id
+                    ))
+                })?;
+                let doc_id = u64::try_from(entry.doc_id).map_err(|_| {
+                    CoreError::Internal(format!(
+                        "doc_id must be non-negative for tantivy indexing: {}",
+                        entry.doc_id
+                    ))
+                })?;
 
-        for entry in entries {
-            let chunk_id = u64::try_from(entry.chunk_id).map_err(|_| {
-                CoreError::Internal(format!(
-                    "chunk_id must be non-negative for tantivy indexing: {}",
-                    entry.chunk_id
-                ))
-            })?;
-            let doc_id = u64::try_from(entry.doc_id).map_err(|_| {
-                CoreError::Internal(format!(
-                    "doc_id must be non-negative for tantivy indexing: {}",
-                    entry.doc_id
-                ))
-            })?;
-
-            let mut doc = TantivyDocument::default();
-            doc.add_u64(space_indexes.fields.chunk_id, chunk_id);
-            doc.add_u64(space_indexes.fields.doc_id, doc_id);
-            doc.add_text(space_indexes.fields.filepath, &entry.filepath);
-            if let Some(title) = &entry.semantic_title {
-                doc.add_text(space_indexes.fields.title, title);
+                let mut doc = TantivyDocument::default();
+                doc.add_u64(space_indexes.fields.chunk_id, chunk_id);
+                doc.add_u64(space_indexes.fields.doc_id, doc_id);
+                doc.add_text(space_indexes.fields.filepath, &entry.filepath);
+                if let Some(title) = &entry.semantic_title {
+                    doc.add_text(space_indexes.fields.title, title);
+                }
+                if let Some(heading) = &entry.heading {
+                    doc.add_text(space_indexes.fields.heading, heading);
+                }
+                doc.add_text(space_indexes.fields.body, &entry.body);
+                writer.add_document(doc)?;
             }
-            if let Some(heading) = &entry.heading {
-                doc.add_text(space_indexes.fields.heading, heading);
-            }
-            doc.add_text(space_indexes.fields.body, &entry.body);
-            writer.add_document(doc)?;
-        }
-
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn delete_tantivy(&self, space: &str, chunk_ids: &[i64]) -> Result<()> {
@@ -1426,39 +1421,34 @@ CREATE TABLE IF NOT EXISTS embeddings (
         }
 
         let space_indexes = self.get_space_indexes(space)?;
-        let writer = space_indexes
-            .tantivy_writer
-            .lock()
-            .map_err(|_| CoreError::poisoned("tantivy writer"))?;
+        with_tantivy_writer(&space_indexes, |writer| {
+            for chunk_id in chunk_ids {
+                let chunk_key = u64::try_from(*chunk_id).map_err(|_| {
+                    CoreError::Internal(format!(
+                        "chunk_id must be non-negative for tantivy delete: {chunk_id}"
+                    ))
+                })?;
+                writer.delete_term(Term::from_field_u64(
+                    space_indexes.fields.chunk_id,
+                    chunk_key,
+                ));
+            }
 
-        for chunk_id in chunk_ids {
-            let chunk_key = u64::try_from(*chunk_id).map_err(|_| {
-                CoreError::Internal(format!(
-                    "chunk_id must be non-negative for tantivy delete: {chunk_id}"
-                ))
-            })?;
-            writer.delete_term(Term::from_field_u64(
-                space_indexes.fields.chunk_id,
-                chunk_key,
-            ));
-        }
-
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn delete_tantivy_by_doc(&self, space: &str, doc_id: i64) -> Result<()> {
         let space_indexes = self.get_space_indexes(space)?;
-        let writer = space_indexes
-            .tantivy_writer
-            .lock()
-            .map_err(|_| CoreError::poisoned("tantivy writer"))?;
-        let doc_key = u64::try_from(doc_id).map_err(|_| {
-            CoreError::Internal(format!(
-                "doc_id must be non-negative for tantivy delete-by-doc: {doc_id}"
-            ))
-        })?;
-        writer.delete_term(Term::from_field_u64(space_indexes.fields.doc_id, doc_key));
-        Ok(())
+        with_tantivy_writer(&space_indexes, |writer| {
+            let doc_key = u64::try_from(doc_id).map_err(|_| {
+                CoreError::Internal(format!(
+                    "doc_id must be non-negative for tantivy delete-by-doc: {doc_id}"
+                ))
+            })?;
+            writer.delete_term(Term::from_field_u64(space_indexes.fields.doc_id, doc_key));
+            Ok(())
+        })
     }
 
     pub fn query_bm25(
@@ -1536,6 +1526,9 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .tantivy_writer
             .lock()
             .map_err(|_| CoreError::poisoned("tantivy writer"))?;
+        let Some(writer) = writer.as_mut() else {
+            return Ok(());
+        };
         writer.commit()?;
         Ok(())
     }
@@ -2081,6 +2074,25 @@ fn open_or_create_tantivy_index(path: &Path) -> Result<Index> {
     }
 
     Ok(Index::create_in_dir(path, tantivy_schema())?)
+}
+
+fn with_tantivy_writer<T>(
+    space_indexes: &SpaceIndexes,
+    f: impl FnOnce(&mut IndexWriter) -> Result<T>,
+) -> Result<T> {
+    let mut writer = space_indexes
+        .tantivy_writer
+        .lock()
+        .map_err(|_| CoreError::poisoned("tantivy writer"))?;
+
+    if writer.is_none() {
+        *writer = Some(space_indexes.tantivy_index.writer(50_000_000)?);
+    }
+
+    let writer = writer
+        .as_mut()
+        .ok_or_else(|| CoreError::Internal("failed to initialize tantivy writer".to_string()))?;
+    f(writer)
 }
 
 fn ensure_documents_title_source_column(conn: &Connection) -> Result<()> {
