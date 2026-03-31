@@ -46,6 +46,9 @@ pub enum KboltError {
     #[error("model not available: {name}")]
     ModelNotAvailable { name: String },
 
+    #[error("dense state for space '{space}' is inconsistent: {reason}. collection-targeted update cannot repair space-level vector state; run `kbolt --space {space} update`")]
+    SpaceDenseRepairRequired { space: String, reason: String },
+
     #[error("model download failed: {0}")]
     ModelDownload(String),
 

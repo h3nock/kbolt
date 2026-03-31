@@ -10,23 +10,21 @@ impl Engine {
     pub(super) fn update_unlocked(&self, options: UpdateOptions) -> Result<UpdateReport> {
         let started = Instant::now();
         let mut report = UpdateReport {
-            scanned: 0,
-            skipped_mtime: 0,
-            skipped_hash: 0,
-            added: 0,
-            updated: 0,
-            deactivated: 0,
-            reactivated: 0,
-            reaped: 0,
-            embedded: 0,
+            scanned_docs: 0,
+            skipped_mtime_docs: 0,
+            skipped_hash_docs: 0,
+            added_docs: 0,
+            updated_docs: 0,
+            failed_docs: 0,
+            deactivated_docs: 0,
+            reactivated_docs: 0,
+            reaped_docs: 0,
+            embedded_chunks: 0,
             decisions: Vec::new(),
             errors: Vec::new(),
             elapsed_ms: 0,
         };
-
-        if !options.dry_run {
-            self.replay_fts_dirty_documents(&mut report)?;
-        }
+        let mut failed_docs = HashSet::new();
 
         let targets = self.resolve_targets(TargetScope {
             space: options.space.as_deref(),
@@ -36,8 +34,13 @@ impl Engine {
             report.elapsed_ms = started.elapsed().as_millis() as u64;
             return Ok(report);
         }
+        let repair_scope = UpdateRepairScope::from_options_and_targets(&options, &targets);
 
-        self.reconcile_dense_integrity(&targets, &options)?;
+        self.reconcile_dense_integrity(&targets, &repair_scope, &options)?;
+
+        if !options.dry_run {
+            self.replay_fts_dirty_documents(&repair_scope, &mut report, &mut failed_docs)?;
+        }
 
         let mut fts_dirty_by_space: HashMap<String, HashSet<i64>> = HashMap::new();
         let mut pending_embeddings = Vec::new();
@@ -50,6 +53,7 @@ impl Engine {
                 &mut fts_dirty_by_space,
                 &mut pending_embeddings,
                 &mut failed_embedding_chunk_ids,
+                &mut failed_docs,
             )?;
         }
 
@@ -58,6 +62,7 @@ impl Engine {
                 &mut pending_embeddings,
                 &mut failed_embedding_chunk_ids,
                 &mut report,
+                &mut failed_docs,
             )?;
 
             for (space, doc_ids) in fts_dirty_by_space {
@@ -71,11 +76,16 @@ impl Engine {
                 self.storage.batch_clear_fts_dirty(&ids)?;
             }
 
-            self.embed_pending_chunks(&options, &mut failed_embedding_chunk_ids, &mut report)?;
+            self.embed_pending_chunks(
+                &repair_scope,
+                &options,
+                &mut failed_embedding_chunk_ids,
+                &mut report,
+                &mut failed_docs,
+            )?;
 
-            let reaped = self
-                .storage
-                .list_reapable_documents(self.config.reaping.days)?;
+            let reaped =
+                self.list_reapable_documents_for_scope(self.config.reaping.days, &repair_scope)?;
             let mut reaped_doc_ids = Vec::with_capacity(reaped.len());
             let mut chunk_ids_by_space: HashMap<String, Vec<i64>> = HashMap::new();
             for document in reaped {
@@ -91,9 +101,10 @@ impl Engine {
                 self.purge_space_chunks(&space, &chunk_ids)?;
             }
             self.storage.delete_documents(&reaped_doc_ids)?;
-            report.reaped = reaped_doc_ids.len();
+            report.reaped_docs = reaped_doc_ids.len();
         }
 
+        report.failed_docs = failed_docs.len();
         report.elapsed_ms = started.elapsed().as_millis() as u64;
         Ok(report)
     }
@@ -101,6 +112,7 @@ impl Engine {
     fn reconcile_dense_integrity(
         &self,
         targets: &[UpdateTarget],
+        repair_scope: &UpdateRepairScope,
         options: &UpdateOptions,
     ) -> Result<()> {
         if options.no_embed || options.dry_run {
@@ -117,20 +129,34 @@ impl Engine {
             let models = self
                 .storage
                 .list_embedding_models_in_space(target.collection.space_id)?;
+            let mut reasons = Vec::new();
             if models.iter().any(|model| model != expected_model) {
-                self.storage
-                    .delete_embeddings_for_space(target.collection.space_id)?;
-                self.storage.clear_usearch(&target.space)?;
-                continue;
+                reasons.push(format!(
+                    "stored embedding models {:?} do not match current model '{}'",
+                    models, expected_model
+                ));
             }
 
             let sqlite_count = self
                 .storage
                 .count_embedded_chunks(Some(target.collection.space_id))?;
             let usearch_count = self.storage.count_usearch(&target.space)?;
+            if sqlite_count != usearch_count {
+                reasons.push(format!(
+                    "sqlite embedded chunk count {sqlite_count} does not match USearch vector count {usearch_count}"
+                ));
+            }
 
-            if sqlite_count == usearch_count {
+            if reasons.is_empty() {
                 continue;
+            }
+
+            if !repair_scope.allows_space_dense_repair() {
+                return Err(KboltError::SpaceDenseRepairRequired {
+                    space: target.space.clone(),
+                    reason: reasons.join("; "),
+                }
+                .into());
             }
 
             self.storage
@@ -143,9 +169,11 @@ impl Engine {
 
     fn embed_pending_chunks(
         &self,
+        repair_scope: &UpdateRepairScope,
         options: &UpdateOptions,
         failed_chunk_ids: &mut HashSet<i64>,
         report: &mut UpdateReport,
+        failed_docs: &mut HashSet<UpdateDocKey>,
     ) -> Result<()> {
         if options.no_embed || options.dry_run {
             return Ok(());
@@ -158,9 +186,8 @@ impl Engine {
         let model = self.embedding_model_key();
         let mut after_chunk_id = 0_i64;
         loop {
-            let backlog = self
-                .storage
-                .get_unembedded_chunks(model, after_chunk_id, 64)?;
+            let backlog =
+                self.get_unembedded_chunks_for_scope(model, repair_scope, after_chunk_id, 64)?;
             if backlog.is_empty() {
                 break;
             }
@@ -187,6 +214,11 @@ impl Engine {
                                 Some(full_path.clone()),
                                 format!("embed read failed: {err}"),
                             ));
+                            failed_docs.insert(update_doc_key(
+                                &record.space_name,
+                                &record.collection_path,
+                                &record.doc_path,
+                            ));
                             None
                         }
                     };
@@ -207,6 +239,11 @@ impl Engine {
 
                 pending.push(PendingChunkEmbedding {
                     chunk_id: record.chunk_id,
+                    doc_key: update_doc_key(
+                        &record.space_name,
+                        &record.collection_path,
+                        &record.doc_path,
+                    ),
                     space_name: record.space_name,
                     path: full_path,
                     text,
@@ -217,8 +254,12 @@ impl Engine {
                 continue;
             }
 
-            let result =
-                self.embed_pending_batch_with_partial_failures(embedder.as_ref(), pending, report)?;
+            let result = self.embed_pending_batch_with_partial_failures(
+                embedder.as_ref(),
+                pending,
+                report,
+                failed_docs,
+            )?;
             failed_chunk_ids.extend(result.failed_chunk_ids);
             if !result.embeddings.is_empty() {
                 self.store_chunk_embeddings(model, result.embeddings, report)?;
@@ -233,6 +274,7 @@ impl Engine {
         pending_embeddings: &mut Vec<PendingChunkEmbedding>,
         failed_chunk_ids: &mut HashSet<i64>,
         report: &mut UpdateReport,
+        failed_docs: &mut HashSet<UpdateDocKey>,
     ) -> Result<()> {
         if pending_embeddings.is_empty() {
             return Ok(());
@@ -244,8 +286,12 @@ impl Engine {
         };
 
         let pending = std::mem::take(pending_embeddings);
-        let result =
-            self.embed_pending_batch_with_partial_failures(embedder.as_ref(), pending, report)?;
+        let result = self.embed_pending_batch_with_partial_failures(
+            embedder.as_ref(),
+            pending,
+            report,
+            failed_docs,
+        )?;
         failed_chunk_ids.extend(result.failed_chunk_ids);
         if result.embeddings.is_empty() {
             return Ok(());
@@ -259,6 +305,7 @@ impl Engine {
         embedder: &dyn crate::models::Embedder,
         pending: Vec<PendingChunkEmbedding>,
         report: &mut UpdateReport,
+        failed_docs: &mut HashSet<UpdateDocKey>,
     ) -> Result<EmbeddedPendingBatch> {
         if pending.is_empty() {
             return Ok(EmbeddedPendingBatch::default());
@@ -271,7 +318,13 @@ impl Engine {
         match embedder.embed_batch(crate::models::EmbeddingInputKind::Document, &texts) {
             Ok(vectors) => {
                 if let Some(detail) = invalid_pending_embedding_batch_detail(&pending, &vectors) {
-                    return self.split_pending_embedding_batch(embedder, pending, report, detail);
+                    return self.split_pending_embedding_batch(
+                        embedder,
+                        pending,
+                        report,
+                        failed_docs,
+                        detail,
+                    );
                 }
 
                 let embeddings = pending
@@ -284,9 +337,13 @@ impl Engine {
                     failed_chunk_ids: Vec::new(),
                 })
             }
-            Err(err) => {
-                self.split_pending_embedding_batch(embedder, pending, report, err.to_string())
-            }
+            Err(err) => self.split_pending_embedding_batch(
+                embedder,
+                pending,
+                report,
+                failed_docs,
+                err.to_string(),
+            ),
         }
     }
 
@@ -295,6 +352,7 @@ impl Engine {
         embedder: &dyn crate::models::Embedder,
         pending: Vec<PendingChunkEmbedding>,
         report: &mut UpdateReport,
+        failed_docs: &mut HashSet<UpdateDocKey>,
         detail: String,
     ) -> Result<EmbeddedPendingBatch> {
         if pending.len() == 1 {
@@ -306,6 +364,7 @@ impl Engine {
                 Some(embedding.path),
                 format!("embed failed: {detail}"),
             ));
+            failed_docs.insert(embedding.doc_key);
             return Ok(EmbeddedPendingBatch {
                 embeddings: Vec::new(),
                 failed_chunk_ids: vec![embedding.chunk_id],
@@ -317,9 +376,9 @@ impl Engine {
         let left = right.drain(..mid).collect::<Vec<_>>();
 
         let mut left_result =
-            self.embed_pending_batch_with_partial_failures(embedder, left, report)?;
+            self.embed_pending_batch_with_partial_failures(embedder, left, report, failed_docs)?;
         let right_result =
-            self.embed_pending_batch_with_partial_failures(embedder, right, report)?;
+            self.embed_pending_batch_with_partial_failures(embedder, right, report, failed_docs)?;
         left_result.embeddings.extend(right_result.embeddings);
         left_result
             .failed_chunk_ids
@@ -359,12 +418,17 @@ impl Engine {
         }
 
         self.storage.insert_embeddings(&embedding_rows)?;
-        report.embedded = report.embedded.saturating_add(embedding_rows.len());
+        report.embedded_chunks = report.embedded_chunks.saturating_add(embedding_rows.len());
         Ok(())
     }
 
-    fn replay_fts_dirty_documents(&self, report: &mut UpdateReport) -> Result<()> {
-        let records = self.storage.get_fts_dirty_documents()?;
+    fn replay_fts_dirty_documents(
+        &self,
+        repair_scope: &UpdateRepairScope,
+        report: &mut UpdateReport,
+        failed_docs: &mut HashSet<UpdateDocKey>,
+    ) -> Result<()> {
+        let records = self.get_fts_dirty_documents_for_scope(repair_scope)?;
         if records.is_empty() {
             return Ok(());
         }
@@ -384,6 +448,11 @@ impl Engine {
                 Ok(bytes) => bytes,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(err) => {
+                    failed_docs.insert(update_doc_key(
+                        &space_name,
+                        &record.collection_path,
+                        &record.doc_path,
+                    ));
                     report.errors.push(file_error(
                         Some(full_path),
                         format!("fts replay read failed: {err}"),
@@ -445,6 +514,59 @@ impl Engine {
         }
 
         Ok(())
+    }
+
+    fn get_fts_dirty_documents_for_scope(
+        &self,
+        repair_scope: &UpdateRepairScope,
+    ) -> Result<Vec<crate::storage::FtsDirtyRecord>> {
+        match repair_scope {
+            UpdateRepairScope::Global => self.storage.get_fts_dirty_documents(),
+            UpdateRepairScope::Space { space_id } => {
+                self.storage.get_fts_dirty_documents_in_space(*space_id)
+            }
+            UpdateRepairScope::Collections { collection_ids } => self
+                .storage
+                .get_fts_dirty_documents_in_collections(collection_ids),
+        }
+    }
+
+    fn get_unembedded_chunks_for_scope(
+        &self,
+        model: &str,
+        repair_scope: &UpdateRepairScope,
+        after_chunk_id: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::storage::EmbedRecord>> {
+        match repair_scope {
+            UpdateRepairScope::Global => {
+                self.storage
+                    .get_unembedded_chunks(model, after_chunk_id, limit)
+            }
+            UpdateRepairScope::Space { space_id } => {
+                self.storage
+                    .get_unembedded_chunks_in_space(model, *space_id, after_chunk_id, limit)
+            }
+            UpdateRepairScope::Collections { collection_ids } => self
+                .storage
+                .get_unembedded_chunks_in_collections(model, collection_ids, after_chunk_id, limit),
+        }
+    }
+
+    fn list_reapable_documents_for_scope(
+        &self,
+        older_than_days: u32,
+        repair_scope: &UpdateRepairScope,
+    ) -> Result<Vec<crate::storage::ReapableDocument>> {
+        match repair_scope {
+            UpdateRepairScope::Global => self.storage.list_reapable_documents(older_than_days),
+            UpdateRepairScope::Space { space_id } => self
+                .storage
+                .list_reapable_documents_in_space(older_than_days, *space_id),
+            UpdateRepairScope::Collections { collection_ids } => self
+                .storage
+                .list_reapable_documents_in_collections(older_than_days, collection_ids),
+        }
     }
 
     pub fn resolve_update_targets(&self, options: &UpdateOptions) -> Result<Vec<UpdateTarget>> {
@@ -534,6 +656,7 @@ impl Engine {
         fts_dirty_by_space: &mut HashMap<String, HashSet<i64>>,
         pending_embeddings: &mut Vec<PendingChunkEmbedding>,
         failed_chunk_ids: &mut HashSet<i64>,
+        failed_docs: &mut HashSet<UpdateDocKey>,
     ) -> Result<()> {
         let all_documents = self.storage.list_documents(target.collection.id, false)?;
         let mut docs_by_path: HashMap<String, DocumentRow> = all_documents
@@ -561,6 +684,17 @@ impl Engine {
             let entry = match entry {
                 Ok(item) => item,
                 Err(err) => {
+                    if let Some(path) = err.path() {
+                        if let Ok(relative_path) =
+                            collection_relative_path(&target.collection.path, path)
+                        {
+                            failed_docs.insert(update_doc_key(
+                                &target.space,
+                                &target.collection.path,
+                                &relative_path,
+                            ));
+                        }
+                    }
                     report.errors.push(file_error(
                         err.path().map(Path::to_path_buf),
                         format!("walkdir error: {err}"),
@@ -581,6 +715,11 @@ impl Engine {
                 match collection_relative_path(&target.collection.path, entry.path()) {
                     Ok(path) => path,
                     Err(err) => {
+                        failed_docs.insert(update_doc_key(
+                            &target.space,
+                            &target.collection.path,
+                            &entry.path().display().to_string(),
+                        ));
                         report.errors.push(file_error(
                             Some(entry.path().to_path_buf()),
                             err.to_string(),
@@ -630,13 +769,18 @@ impl Engine {
                 continue;
             };
 
-            report.scanned += 1;
+            report.scanned_docs += 1;
             seen_paths.insert(relative_path.clone());
 
             let metadata = match entry.metadata() {
                 Ok(data) => data,
                 Err(err) => {
                     let detail = format!("metadata error: {err}");
+                    failed_docs.insert(update_doc_key(
+                        &target.space,
+                        &target.collection.path,
+                        &relative_path,
+                    ));
                     push_update_decision(
                         report,
                         options,
@@ -656,6 +800,11 @@ impl Engine {
                 Ok(value) => value,
                 Err(err) => {
                     let detail = format!("modified timestamp error: {err}");
+                    failed_docs.insert(update_doc_key(
+                        &target.space,
+                        &target.collection.path,
+                        &relative_path,
+                    ));
                     push_update_decision(
                         report,
                         options,
@@ -673,7 +822,7 @@ impl Engine {
 
             if let Some(existing) = docs_by_path.get(&relative_path) {
                 if existing.active && existing.modified == modified {
-                    report.skipped_mtime += 1;
+                    report.skipped_mtime_docs += 1;
                     push_update_decision(
                         report,
                         options,
@@ -690,6 +839,11 @@ impl Engine {
                 Ok(data) => data,
                 Err(err) => {
                     let detail = err.to_string();
+                    failed_docs.insert(update_doc_key(
+                        &target.space,
+                        &target.collection.path,
+                        &relative_path,
+                    ));
                     push_update_decision(
                         report,
                         options,
@@ -710,10 +864,11 @@ impl Engine {
 
             let existing = docs_by_path.get(&relative_path).cloned();
             let pending_decision;
+            let pending_indexing;
             if let Some(doc) = existing.as_ref() {
                 if doc.hash == hash {
                     if doc.active {
-                        report.skipped_hash += 1;
+                        report.skipped_hash_docs += 1;
                         push_update_decision(
                             report,
                             options,
@@ -723,7 +878,7 @@ impl Engine {
                             None,
                         );
                     } else {
-                        report.reactivated += 1;
+                        report.reactivated_docs += 1;
                         push_update_decision(
                             report,
                             options,
@@ -740,20 +895,20 @@ impl Engine {
                     continue;
                 }
 
-                report.updated += 1;
-                if !doc.active {
-                    report.reactivated += 1;
-                }
+                pending_indexing = PendingDocumentIndexing::Updated {
+                    reactivated: !doc.active,
+                };
                 pending_decision = (
                     UpdateDecisionKind::Changed,
                     (!doc.active).then_some("reactivated".to_string()),
                 );
             } else {
-                report.added += 1;
+                pending_indexing = PendingDocumentIndexing::Added;
                 pending_decision = (UpdateDecisionKind::New, None);
             }
 
             if options.dry_run {
+                pending_indexing.record(report);
                 let (kind, detail) = pending_decision;
                 push_update_decision(report, options, target, &relative_path, kind, detail);
                 continue;
@@ -763,6 +918,11 @@ impl Engine {
                 Ok(document) => document,
                 Err(err) => {
                     let detail = format!("extract failed: {err}");
+                    failed_docs.insert(update_doc_key(
+                        &target.space,
+                        &target.collection.path,
+                        &relative_path,
+                    ));
                     push_update_decision(
                         report,
                         options,
@@ -830,6 +990,11 @@ impl Engine {
                         }
                         pending_embeddings.push(PendingChunkEmbedding {
                             chunk_id: *chunk_id,
+                            doc_key: update_doc_key(
+                                &target.space,
+                                &target.collection.path,
+                                &relative_path,
+                            ),
                             space_name: target.space.clone(),
                             path: entry.path().to_path_buf(),
                             text,
@@ -840,6 +1005,7 @@ impl Engine {
                             pending_embeddings,
                             failed_chunk_ids,
                             report,
+                            failed_docs,
                         )?;
                     }
                 }
@@ -885,6 +1051,7 @@ impl Engine {
                         ))
                     })?,
             );
+            pending_indexing.record(report);
             let (kind, detail) = pending_decision;
             push_update_decision(report, options, target, &relative_path, kind, detail);
             touched_collection = true;
@@ -899,7 +1066,7 @@ impl Engine {
 
         for doc in missing_docs {
             if doc.active && !seen_paths.contains(&doc.path) {
-                report.deactivated += 1;
+                report.deactivated_docs += 1;
                 push_update_decision(
                     report,
                     options,
@@ -927,6 +1094,7 @@ impl Engine {
 #[derive(Debug)]
 struct PendingChunkEmbedding {
     chunk_id: i64,
+    doc_key: UpdateDocKey,
     space_name: String,
     path: std::path::PathBuf,
     text: String,
@@ -936,6 +1104,69 @@ struct PendingChunkEmbedding {
 struct EmbeddedPendingBatch {
     embeddings: Vec<(i64, String, Vec<f32>)>,
     failed_chunk_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct UpdateDocKey {
+    space: String,
+    collection_path: std::path::PathBuf,
+    path: String,
+}
+
+#[derive(Debug, Clone)]
+enum UpdateRepairScope {
+    Global,
+    Space { space_id: i64 },
+    Collections { collection_ids: Vec<i64> },
+}
+
+impl UpdateRepairScope {
+    fn from_options_and_targets(options: &UpdateOptions, targets: &[UpdateTarget]) -> Self {
+        if options.collections.is_empty() {
+            if let Some(target) = targets.first() {
+                if options.space.is_some() {
+                    return Self::Space {
+                        space_id: target.collection.space_id,
+                    };
+                }
+            }
+            return Self::Global;
+        }
+
+        let mut collection_ids = targets
+            .iter()
+            .map(|target| target.collection.id)
+            .collect::<Vec<_>>();
+        collection_ids.sort_unstable();
+        collection_ids.dedup();
+        Self::Collections { collection_ids }
+    }
+
+    fn allows_space_dense_repair(&self) -> bool {
+        !matches!(self, Self::Collections { .. })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PendingDocumentIndexing {
+    Added,
+    Updated { reactivated: bool },
+}
+
+impl PendingDocumentIndexing {
+    fn record(self, report: &mut UpdateReport) {
+        match self {
+            Self::Added => {
+                report.added_docs += 1;
+            }
+            Self::Updated { reactivated } => {
+                report.updated_docs += 1;
+                if reactivated {
+                    report.reactivated_docs += 1;
+                }
+            }
+        }
+    }
 }
 
 fn invalid_pending_embedding_batch_detail(
@@ -982,4 +1213,12 @@ fn push_update_decision(
         kind,
         detail,
     });
+}
+
+fn update_doc_key(space: &str, collection_path: &Path, path: &str) -> UpdateDocKey {
+    UpdateDocKey {
+        space: space.to_string(),
+        collection_path: collection_path.to_path_buf(),
+        path: path.to_string(),
+    }
 }

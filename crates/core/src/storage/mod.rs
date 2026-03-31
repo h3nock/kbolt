@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use crate::error::{CoreError, Result};
 use crate::ingest::chunk::FinalChunkKind;
 use kbolt_types::{DiskUsage, KboltError};
+use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, Error, ErrorCode};
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, TermQuery};
@@ -1106,23 +1107,66 @@ CREATE TABLE IF NOT EXISTS embeddings (
     }
 
     pub fn list_reapable_documents(&self, older_than_days: u32) -> Result<Vec<ReapableDocument>> {
+        self.list_reapable_documents_filtered(older_than_days, "", Vec::new())
+    }
+
+    pub fn list_reapable_documents_in_space(
+        &self,
+        older_than_days: u32,
+        space_id: i64,
+    ) -> Result<Vec<ReapableDocument>> {
+        self.list_reapable_documents_filtered(
+            older_than_days,
+            " AND c.space_id = ?",
+            vec![SqlValue::Integer(space_id)],
+        )
+    }
+
+    pub fn list_reapable_documents_in_collections(
+        &self,
+        older_than_days: u32,
+        collection_ids: &[i64],
+    ) -> Result<Vec<ReapableDocument>> {
+        if collection_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = vec!["?"; collection_ids.len()].join(", ");
+        let clause = format!(" AND d.collection_id IN ({placeholders})");
+        let params = collection_ids
+            .iter()
+            .map(|id| SqlValue::Integer(*id))
+            .collect::<Vec<_>>();
+        self.list_reapable_documents_filtered(older_than_days, &clause, params)
+    }
+
+    fn list_reapable_documents_filtered(
+        &self,
+        older_than_days: u32,
+        scope_clause: &str,
+        scope_params: Vec<SqlValue>,
+    ) -> Result<Vec<ReapableDocument>> {
         let conn = self
             .db
             .lock()
             .map_err(|_| CoreError::poisoned("database"))?;
 
         let modifier = format!("-{} days", older_than_days);
-        let mut stmt = conn.prepare(
+        let sql = format!(
             "SELECT d.id, s.name
              FROM documents d
              JOIN collections c ON c.id = d.collection_id
              JOIN spaces s ON s.id = c.space_id
              WHERE d.active = 0
                AND d.deactivated_at IS NOT NULL
-               AND d.deactivated_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)
-             ORDER BY d.id ASC",
-        )?;
-        let rows = stmt.query_map(params![modifier], |row| {
+               AND d.deactivated_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?){scope_clause}
+             ORDER BY d.id ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut params = Vec::with_capacity(scope_params.len() + 1);
+        params.push(SqlValue::Text(modifier));
+        params.extend(scope_params);
+        let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })?;
         let headers = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1279,6 +1323,53 @@ CREATE TABLE IF NOT EXISTS embeddings (
         after_chunk_id: i64,
         limit: usize,
     ) -> Result<Vec<EmbedRecord>> {
+        self.get_unembedded_chunks_filtered(model, after_chunk_id, limit, "", Vec::new())
+    }
+
+    pub fn get_unembedded_chunks_in_space(
+        &self,
+        model: &str,
+        space_id: i64,
+        after_chunk_id: i64,
+        limit: usize,
+    ) -> Result<Vec<EmbedRecord>> {
+        self.get_unembedded_chunks_filtered(
+            model,
+            after_chunk_id,
+            limit,
+            " AND col.space_id = ?",
+            vec![SqlValue::Integer(space_id)],
+        )
+    }
+
+    pub fn get_unembedded_chunks_in_collections(
+        &self,
+        model: &str,
+        collection_ids: &[i64],
+        after_chunk_id: i64,
+        limit: usize,
+    ) -> Result<Vec<EmbedRecord>> {
+        if collection_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = vec!["?"; collection_ids.len()].join(", ");
+        let clause = format!(" AND d.collection_id IN ({placeholders})");
+        let params = collection_ids
+            .iter()
+            .map(|id| SqlValue::Integer(*id))
+            .collect::<Vec<_>>();
+        self.get_unembedded_chunks_filtered(model, after_chunk_id, limit, &clause, params)
+    }
+
+    fn get_unembedded_chunks_filtered(
+        &self,
+        model: &str,
+        after_chunk_id: i64,
+        limit: usize,
+        scope_clause: &str,
+        scope_params: Vec<SqlValue>,
+    ) -> Result<Vec<EmbedRecord>> {
         let conn = self
             .db
             .lock()
@@ -1286,19 +1377,24 @@ CREATE TABLE IF NOT EXISTS embeddings (
         let sql_limit = i64::try_from(limit)
             .map_err(|_| CoreError::Internal("limit too large for sqlite".to_string()))?;
 
-        let mut stmt = conn.prepare(
+        let sql = format!(
             "SELECT c.id, d.path, col.path, s.name, c.offset, c.length
              FROM chunks c
              JOIN documents d ON d.id = c.doc_id
              JOIN collections col ON col.id = d.collection_id
              JOIN spaces s ON s.id = col.space_id
-             LEFT JOIN embeddings e ON e.chunk_id = c.id AND e.model = ?1
-             WHERE d.active = 1 AND e.chunk_id IS NULL AND c.id > ?2
+             LEFT JOIN embeddings e ON e.chunk_id = c.id AND e.model = ?
+             WHERE d.active = 1 AND e.chunk_id IS NULL AND c.id > ?{scope_clause}
              ORDER BY c.id ASC
-             LIMIT ?3",
-        )?;
-
-        let rows = stmt.query_map(params![model, after_chunk_id, sql_limit], |row| {
+             LIMIT ?"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut params = Vec::with_capacity(scope_params.len() + 3);
+        params.push(SqlValue::Text(model.to_string()));
+        params.push(SqlValue::Integer(after_chunk_id));
+        params.extend(scope_params);
+        params.push(SqlValue::Integer(sql_limit));
+        let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
             let offset_value: i64 = row.get(4)?;
             let length_value: i64 = row.get(5)?;
             Ok(EmbedRecord {
@@ -1673,20 +1769,53 @@ CREATE TABLE IF NOT EXISTS embeddings (
     }
 
     pub fn get_fts_dirty_documents(&self) -> Result<Vec<FtsDirtyRecord>> {
+        self.get_fts_dirty_documents_filtered("", Vec::new())
+    }
+
+    pub fn get_fts_dirty_documents_in_space(&self, space_id: i64) -> Result<Vec<FtsDirtyRecord>> {
+        self.get_fts_dirty_documents_filtered(
+            " AND c.space_id = ?",
+            vec![SqlValue::Integer(space_id)],
+        )
+    }
+
+    pub fn get_fts_dirty_documents_in_collections(
+        &self,
+        collection_ids: &[i64],
+    ) -> Result<Vec<FtsDirtyRecord>> {
+        if collection_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = vec!["?"; collection_ids.len()].join(", ");
+        let clause = format!(" AND d.collection_id IN ({placeholders})");
+        let params = collection_ids
+            .iter()
+            .map(|id| SqlValue::Integer(*id))
+            .collect::<Vec<_>>();
+        self.get_fts_dirty_documents_filtered(&clause, params)
+    }
+
+    fn get_fts_dirty_documents_filtered(
+        &self,
+        scope_clause: &str,
+        scope_params: Vec<SqlValue>,
+    ) -> Result<Vec<FtsDirtyRecord>> {
         let conn = self
             .db
             .lock()
             .map_err(|_| CoreError::poisoned("database"))?;
 
-        let mut stmt = conn.prepare(
+        let sql = format!(
             "SELECT d.id, d.path, d.title, d.title_source, d.hash, c.path, s.name
              FROM documents d
              JOIN collections c ON c.id = d.collection_id
              JOIN spaces s ON s.id = c.space_id
-             WHERE d.fts_dirty = 1
-             ORDER BY d.id ASC",
-        )?;
-        let rows = stmt.query_map([], |row| {
+             WHERE d.fts_dirty = 1{scope_clause}
+             ORDER BY d.id ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(scope_params.iter()), |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,

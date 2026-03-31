@@ -261,7 +261,7 @@ impl Engine {
     pub fn resolve_space(&self, explicit: Option<&str>) -> Result<String>;
 
     // Collections
-    pub fn add_collection(&self, req: AddCollectionRequest) -> Result<CollectionInfo>;
+    pub fn add_collection(&self, req: AddCollectionRequest) -> Result<AddCollectionResult>;
     pub fn remove_collection(&self, space: Option<&str>, name: &str) -> Result<()>;
     pub fn rename_collection(&self, space: Option<&str>, old: &str, new: &str) -> Result<()>;
     pub fn describe_collection(&self, space: Option<&str>, name: &str, desc: &str) -> Result<()>;
@@ -590,6 +590,27 @@ pub struct CollectionInfo {
     pub created: String,
     pub updated: String,
 }
+
+pub struct AddCollectionResult {
+    pub collection: CollectionInfo,
+    pub initial_indexing: InitialIndexingOutcome,
+}
+
+pub enum InitialIndexingOutcome {
+    Skipped,                            // collection registered with --no-index
+    Indexed(UpdateReport),              // initial indexing ran; completeness comes from report
+    Blocked(InitialIndexingBlock),      // collection registered, but indexing could not start
+}
+
+pub enum InitialIndexingBlock {
+    SpaceDenseRepairRequired {
+        space: String,
+        reason: String,
+    },
+    ModelNotAvailable {
+        name: String,
+    },
+}
 ```
 
 #### Indexing Types
@@ -600,19 +621,21 @@ pub struct UpdateOptions {
     pub collections: Vec<String>,          // scope to collections (empty = all)
     pub no_embed: bool,                    // skip embedding (FTS-only indexing)
     pub dry_run: bool,                     // preview what would change, no writes
-    pub verbose: bool,                     // log per-file decisions to stderr
+    pub verbose: bool,                     // include per-file decisions in update output
 }
 
 pub struct UpdateReport {
-    pub scanned: usize,                    // files examined (stat'd)
-    pub skipped_mtime: usize,              // unchanged mtime → fast skip
-    pub skipped_hash: usize,               // mtime changed but hash unchanged
-    pub added: usize,                      // new files indexed
-    pub updated: usize,                    // changed files re-indexed
-    pub deactivated: usize,                // files disappeared from disk
-    pub reactivated: usize,                // previously deactivated files returned
-    pub reaped: usize,                     // hard-deleted past reaping period
-    pub embedded: usize,                   // chunks that received embeddings
+    pub scanned_docs: usize,               // candidate files examined as documents
+    pub skipped_mtime_docs: usize,         // active docs skipped by mtime fast path
+    pub skipped_hash_docs: usize,          // active docs skipped after hash match
+    pub added_docs: usize,                 // new docs indexed (or that would be indexed in dry-run)
+    pub updated_docs: usize,               // changed docs re-indexed (or that would be in dry-run)
+    pub failed_docs: usize,                // unique docs with non-fatal failures this run
+    pub deactivated_docs: usize,           // docs no longer seen in the collection scan
+    pub reactivated_docs: usize,           // previously inactive docs made active again
+    pub reaped_docs: usize,                // inactive docs hard-deleted by reaping
+    pub embedded_chunks: usize,            // chunks that received embeddings
+    pub decisions: Vec<UpdateDecision>,    // verbose per-doc decisions (only when verbose)
     pub errors: Vec<FileError>,            // per-file errors (non-fatal, indexing continues)
     pub elapsed_ms: u64,
 }
@@ -722,7 +745,11 @@ impl Storage {
     pub fn reactivate_document(&self, doc_id: i64) -> Result<()>;
     pub fn reap_documents(&self, older_than_days: u32) -> Result<Vec<i64>>;
     pub fn get_fts_dirty_documents(&self) -> Result<Vec<FtsDirtyRecord>>;  // documents with fts_dirty = 1, joined to collection for path resolution
+    pub fn get_fts_dirty_documents_in_space(&self, space_id: i64) -> Result<Vec<FtsDirtyRecord>>;
+    pub fn get_fts_dirty_documents_in_collections(&self, collection_ids: &[i64]) -> Result<Vec<FtsDirtyRecord>>;
     pub fn batch_clear_fts_dirty(&self, doc_ids: &[i64]) -> Result<()>;   // set fts_dirty = 0 for a batch of documents
+    pub fn list_reapable_documents_in_space(&self, older_than_days: u32, space_id: i64) -> Result<Vec<ReapableDocument>>;
+    pub fn list_reapable_documents_in_collections(&self, older_than_days: u32, collection_ids: &[i64]) -> Result<Vec<ReapableDocument>>;
 
     // --- Chunk operations (SQLite) ---
     pub fn insert_chunks(&self, doc_id: i64, chunks: &[ChunkInsert]) -> Result<Vec<i64>>;
@@ -732,7 +759,9 @@ impl Storage {
 
     // --- Embedding tracking (SQLite) ---
     pub fn insert_embeddings(&self, entries: &[(i64, &str)]) -> Result<()>;
-    pub fn get_unembedded_chunks(&self, model: &str, limit: usize) -> Result<Vec<EmbedRecord>>;  // chunks needing embedding, active documents only, with context for disk reads
+    pub fn get_unembedded_chunks(&self, model: &str, after_chunk_id: i64, limit: usize) -> Result<Vec<EmbedRecord>>;  // chunks needing embedding, active documents only, with context for disk reads
+    pub fn get_unembedded_chunks_in_space(&self, model: &str, space_id: i64, after_chunk_id: i64, limit: usize) -> Result<Vec<EmbedRecord>>;
+    pub fn get_unembedded_chunks_in_collections(&self, model: &str, collection_ids: &[i64], after_chunk_id: i64, limit: usize) -> Result<Vec<EmbedRecord>>;
     pub fn delete_embeddings_for_model(&self, model: &str) -> Result<usize>;
     pub fn count_embeddings(&self) -> Result<usize>;
 
@@ -1387,6 +1416,14 @@ Token counting: baseline V1 uses a deterministic whitespace token counter inside
 
 `kbolt update` is a single command that scans, extracts, chunks, indexes (FTS), and embeds (dense vectors). The `--no-embed` flag skips embedding if models aren't available.
 
+Update has three scope forms:
+
+- unscoped: no `--space`, no `--collection` → every collection in every space
+- space-scoped: `--space work` with no `--collection` → every collection in that space
+- collection-targeted: one or more `--collection` values, optionally constrained by `--space` → exactly the resolved target collections
+
+Phase 0, Phase 1, Phase 2 backlog embedding, and reaping all operate on that resolved target set. A scoped update must not replay or repair unrelated collections.
+
 ### Concurrency Model
 
 Document-level ingestion is **single-threaded** in V1. Files are processed one at a time through scan → extract → chunk → SQLite → Tantivy. Embedding runs as a separate second pass after all FTS indexing is complete. The pass queries `get_unembedded_chunks()` in bounded batches (default: 64 chunks), which returns chunk metadata plus the file paths needed to read chunk text from disk. This two-phase design is simple, testable, and matches the `--no-embed` flag naturally (just skip phase 2). The extraction/chunking phase is fast (~1ms per file for text processing) — embedding is the bottleneck, and batching it efficiently matters more than parallelizing extraction.
@@ -1397,7 +1434,10 @@ Note: the `Mutex`/`RwLock` wrappers on Storage fields are justified by search pa
 
 ```
 Phase 0: FTS Reconciliation (replay dirty documents from a previous crash)
-  Query get_fts_dirty_documents() → Vec<FtsDirtyRecord>
+  Query the dirty-document backlog for the resolved target set:
+  - unscoped → get_fts_dirty_documents()
+  - space-scoped → get_fts_dirty_documents_in_space(space_id)
+  - collection-targeted → get_fts_dirty_documents_in_collections(collection_ids)
   For each dirty document:
   │  Resolve file path: collection_path / doc_path
   │  Read file from disk, compute SHA-256 hash
@@ -1463,6 +1503,7 @@ Phase 1: Scan + Extract + Chunk + FTS Index (single-threaded, per file)
     │
     Reaping phase:
     │  └── Hard-delete documents deactivated longer than reaping period (default: 7 days)
+    │      within the same resolved target set only
     │      CASCADE removes chunks → embeddings; explicitly remove from Tantivy + USearch
     │
     Final: Commit Tantivy writer for any remaining uncommitted entries
@@ -1471,7 +1512,10 @@ Phase 1: Scan + Extract + Chunk + FTS Index (single-threaded, per file)
 Phase 2: Embedding (batched, skipped if --no-embed)
   [if models available and --no-embed not set]:
     Loop:
-    │  Query get_unembedded_chunks(current_model, limit=64) → Vec<EmbedRecord>
+    │  Query the embedding backlog for the resolved target set:
+    │  - unscoped → get_unembedded_chunks(current_model, after_chunk_id, limit=64)
+    │  - space-scoped → get_unembedded_chunks_in_space(current_model, space_id, after_chunk_id, limit=64)
+    │  - collection-targeted → get_unembedded_chunks_in_collections(current_model, collection_ids, after_chunk_id, limit=64)
     │  If empty → done
     │  For each chunk in batch:
     │  │  Resolve file path: collection_path / doc_path
@@ -1493,19 +1537,25 @@ The invariant: if the process crashes at any point during `kbolt update`, re-run
 
 **FTS recovery** uses the `fts_dirty` flag on the documents table. The flag is set to 1 in the same SQLite transaction that writes chunk mutations, and cleared to 0 only after the Tantivy commit that includes those chunks succeeds (via `batch_clear_fts_dirty` at each commit point). This ensures the flag accurately reflects whether Tantivy is in sync.
 
-- **Crash after SQLite commit but before Tantivy commit**: The document has `fts_dirty = 1` and chunks in SQLite. On next update, Phase 0 reads chunk metadata from SQLite, reads chunk text from the live file on disk, and replays the Tantivy writes. If the file has changed since indexing (hash mismatch), Phase 0 skips it — Phase 1 will detect the change and fully reprocess. If the file was deleted, Phase 0 skips it — Phase 1 will deactivate it.
+- **Crash after SQLite commit but before Tantivy commit**: The document has `fts_dirty = 1` and chunks in SQLite. On the next update that includes this document's collection in scope, Phase 0 reads chunk metadata from SQLite, reads chunk text from the live file on disk, and replays the Tantivy writes. If the file has changed since indexing (hash mismatch), Phase 0 skips it — Phase 1 will detect the change and fully reprocess. If the file was deleted, Phase 0 skips it — Phase 1 will deactivate it.
 - **Crash before SQLite commit**: SQLite rolls back the transaction. The document keeps its old hash. On next update, the file is re-detected as changed and fully reprocessed. `fts_dirty` was never set.
 - **Crash during Phase 0 itself**: The dirty documents remain dirty (`batch_clear_fts_dirty` hasn't run). Next update replays them again. Phase 0 is idempotent — re-indexing the same chunks into Tantivy is a no-op (same chunk_ids overwrite the same entries).
 
-**Dense/embedding recovery** is entirely separate. The `embeddings` table is the ledger for what should be in USearch. `get_unembedded_chunks()` picks up where it left off. The USearch sync check (count comparison) handles file-level divergence. If a file was deleted between Phase 1 and Phase 2, the embedding pass skips those chunks with a warning — the next update will deactivate the document and CASCADE-delete its chunks and embeddings.
+**Dense/embedding recovery** is entirely separate. The `embeddings` table is the ledger for what should be in USearch. The Phase 2 backlog queries pick up missing embeddings only within the current update scope. If a file was deleted between Phase 1 and Phase 2, the embedding pass skips those chunks with a warning — the next update that includes that collection in scope will deactivate the document and CASCADE-delete its chunks and embeddings.
 
 ### Embedding Integrity
 
-During `update`, the system automatically detects and corrects two embedding integrity problems. No user intervention or flags needed.
+During `update`, the system detects two embedding integrity problems. Their repair scope is intentionally different from Phase 2 backlog embedding.
 
-**Model mismatch detection**: The `embeddings` table records which model produced each embedding (the `model` column). On each update, the system compares stored model names against the current model in `index.toml`. If they differ — the user changed their embedding model — all existing embedding rows for the old model are deleted and the corresponding USearch vectors are removed. The affected chunks are then re-embedded with the new model. This happens transparently during the normal embedding phase.
+**Model mismatch detection**: The `embeddings` table records which model produced each embedding (the `model` column). On each update, the system compares stored model names against the current model in `index.toml` for each touched space. If they differ — the user changed their embedding model — the dense state for that space is invalid and must be rebuilt at the space level.
 
-**USearch sync check**: The `embeddings` table in SQLite is the ledger of what *should* be in USearch. USearch stores the actual float vectors. These can diverge — USearch file deleted, corrupted, or partially written. On each update, the system compares the count of embedding rows in SQLite against the count of vectors in USearch. If they disagree, the system clears both (embeddings rows + USearch vectors) and re-embeds all chunks from scratch. This is a coarse check — it catches file-level corruption, not individual vector corruption, which is sufficient because USearch either works or it doesn't.
+**USearch sync check**: The `embeddings` table in SQLite is the ledger of what *should* be in USearch. USearch stores the actual float vectors. These can diverge — USearch file deleted, corrupted, or partially written. On each update, the system compares the count of embedding rows in SQLite against the count of vectors in USearch for each touched space. If they disagree, the dense state for that space is invalid and must be rebuilt at the space level. This is a coarse check — it catches space-level ledger/index divergence, not individual vector corruption.
+
+**Repair contract**:
+
+- unscoped update: may rebuild dense state for any touched space automatically
+- space-scoped update: may rebuild dense state for that space automatically
+- collection-targeted update: must **not** auto-repair whole-space dense state. If model drift or a SQLite-vs-USearch count mismatch is detected in the touched space, the command fails clearly and instructs the user to run `kbolt --space <space> update`
 
 **Why no `--force-embed` flag**: Both real scenarios (model change, USearch corruption) are handled by auto-detection. A manual `--force-embed` flag would require the user to understand that embeddings exist as a separate layer, that they can go stale, and that the system might have missed something — three layers of internals. If auto-detection has a bug, the fix is to fix auto-detection, not to expose an escape hatch.
 
@@ -1538,6 +1588,8 @@ This two-level check (mtime first, hash second) means a "nothing changed" scan i
 - **Manual**: `kbolt update` (or scoped: `--space`, `--collection`)
 - **Scheduled**: `kbolt schedule add ...` persists a schedule and reconciles launchd/systemd user timer artifacts
 - **On collection add**: `kbolt collection add` triggers indexing immediately (unless `--no-index`)
+  - the command reports the initial indexing outcome from a collection/document point of view
+  - if indexing is blocked after registration (for example, space-level dense repair is required or a model is unavailable), the collection remains registered and the command tells the user what to run next
 
 ### Staleness Transparency
 
@@ -1844,7 +1896,7 @@ DOCUMENTS
   kbolt ls [collection] [prefix]    List files in collection
 
 SPACES
-  kbolt space add <name> [dirs...]  Create space, optionally add directories as collections
+  kbolt space add <name> [dirs...]  Create space, optionally register directories as collections
     --description <text>           Space description
   kbolt space remove <name>         Remove space and all its collections/data
   kbolt space rename <old> <new>

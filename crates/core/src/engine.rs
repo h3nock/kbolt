@@ -17,12 +17,12 @@ use crate::storage::{
 };
 use crate::Result;
 use kbolt_types::{
-    ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, CollectionStatus,
-    DocumentResponse, FileEntry, GetRequest, KboltError, Locator, ModelStatus, MultiGetRequest,
-    MultiGetResponse, OmitReason, OmittedFile, SearchMode, SearchPipeline, SearchPipelineNotice,
-    SearchPipelineStep, SearchPipelineUnavailableReason, SearchRequest, SearchResponse,
-    SearchResult, SearchSignals, SpaceInfo, SpaceStatus, StatusResponse, UpdateOptions,
-    UpdateReport,
+    ActiveSpace, ActiveSpaceSource, AddCollectionRequest, AddCollectionResult, CollectionInfo,
+    CollectionStatus, DocumentResponse, FileEntry, GetRequest, InitialIndexingBlock,
+    InitialIndexingOutcome, KboltError, Locator, ModelStatus, MultiGetRequest, MultiGetResponse,
+    OmitReason, OmittedFile, SearchMode, SearchPipeline, SearchPipelineNotice, SearchPipelineStep,
+    SearchPipelineUnavailableReason, SearchRequest, SearchResponse, SearchResult, SearchSignals,
+    SpaceInfo, SpaceStatus, StatusResponse, UpdateOptions, UpdateReport,
 };
 use walkdir::WalkDir;
 
@@ -197,9 +197,18 @@ impl Engine {
         Ok(self.config.default_space.clone())
     }
 
-    pub fn add_collection(&self, req: AddCollectionRequest) -> Result<CollectionInfo> {
+    pub fn add_collection(&self, req: AddCollectionRequest) -> Result<AddCollectionResult> {
         let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
-        let space = match req.space.as_deref() {
+        let AddCollectionRequest {
+            path,
+            space: requested_space,
+            name: requested_name,
+            description,
+            extensions,
+            no_index,
+        } = req;
+
+        let space = match requested_space.as_deref() {
             Some(space_name) => match self.storage.get_space(space_name) {
                 Ok(space) => space,
                 Err(CoreError::Domain(KboltError::SpaceNotFound { .. })) => {
@@ -210,40 +219,57 @@ impl Engine {
             },
             None => self.resolve_space_row(None, None)?,
         };
-        if !req.path.is_absolute() || !req.path.is_dir() {
-            return Err(KboltError::InvalidPath(req.path).into());
+        if !path.is_absolute() || !path.is_dir() {
+            return Err(KboltError::InvalidPath(path).into());
         }
 
-        let name = match req.name {
+        let name = match requested_name {
             Some(name) => name,
-            None => req
-                .path
+            None => path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .map(ToString::to_string)
-                .ok_or_else(|| KboltError::InvalidPath(req.path.clone()))?,
+                .ok_or_else(|| KboltError::InvalidPath(path.clone()))?,
         };
 
         self.storage.create_collection(
             space.id,
             &name,
-            &req.path,
-            req.description.as_deref(),
-            req.extensions.as_deref(),
+            &path,
+            description.as_deref(),
+            extensions.as_deref(),
         )?;
 
-        if !req.no_index {
-            self.update_unlocked(UpdateOptions {
+        let initial_indexing = if no_index {
+            InitialIndexingOutcome::Skipped
+        } else {
+            match self.update_unlocked(UpdateOptions {
                 space: Some(space.name.clone()),
                 collections: vec![name.clone()],
                 no_embed: false,
                 dry_run: false,
                 verbose: false,
-            })?;
-        }
+            }) {
+                Ok(report) => InitialIndexingOutcome::Indexed(report),
+                Err(CoreError::Domain(KboltError::SpaceDenseRepairRequired { space, reason })) => {
+                    InitialIndexingOutcome::Blocked(
+                        InitialIndexingBlock::SpaceDenseRepairRequired { space, reason },
+                    )
+                }
+                Err(CoreError::Domain(KboltError::ModelNotAvailable { name })) => {
+                    InitialIndexingOutcome::Blocked(InitialIndexingBlock::ModelNotAvailable {
+                        name,
+                    })
+                }
+                Err(err) => return Err(err),
+            }
+        };
 
         let collection = self.storage.get_collection(space.id, &name)?;
-        self.build_collection_info(&space.name, &collection)
+        Ok(AddCollectionResult {
+            collection: self.build_collection_info(&space.name, &collection)?,
+            initial_indexing,
+        })
     }
 
     pub fn remove_collection(&self, space: Option<&str>, name: &str) -> Result<()> {

@@ -101,6 +101,8 @@ kbolt space add {name} --description {description} {dir1} {dir2} ...
 
 When directories are provided, each becomes a collection named after its directory name. `--description` refers to the space. To set collection descriptions, use `kbolt collection describe` after creation.
 
+Directories added through `kbolt space add` are registered as collections without indexing. Run `kbolt --space {name} update` when you want to start indexing them.
+
 A `default` space always exists (created on first use). Collections added without `--space` go into the `default` space.
 
 ---

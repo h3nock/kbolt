@@ -1766,6 +1766,96 @@ fn get_unembedded_chunks_filters_active_and_model_specific_backlog() {
 }
 
 #[test]
+fn get_unembedded_chunks_can_scope_backlog_to_selected_collections() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let work_space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let notes_space_id = storage
+        .create_space("notes", None)
+        .expect("create notes space");
+    let work_collection_id = storage
+        .create_collection(
+            work_space_id,
+            "api",
+            std::path::Path::new("/tmp/work-api"),
+            None,
+            None,
+        )
+        .expect("create work collection");
+    let notes_collection_id = storage
+        .create_collection(
+            notes_space_id,
+            "wiki",
+            std::path::Path::new("/tmp/notes-wiki"),
+            None,
+            None,
+        )
+        .expect("create notes collection");
+
+    let work_doc_id = storage
+        .upsert_document(
+            work_collection_id,
+            "src/lib.rs",
+            "work doc",
+            DocumentTitleSource::Extracted,
+            "hash-work",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert work doc");
+    let notes_doc_id = storage
+        .upsert_document(
+            notes_collection_id,
+            "docs/guide.md",
+            "notes doc",
+            DocumentTitleSource::Extracted,
+            "hash-notes",
+            "2026-03-01T10:01:00Z",
+        )
+        .expect("insert notes doc");
+
+    let work_chunk_ids = storage
+        .insert_chunks(
+            work_doc_id,
+            &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 32,
+                heading: None,
+                kind: FinalChunkKind::Section,
+            }],
+        )
+        .expect("insert work chunk");
+    let notes_chunk_ids = storage
+        .insert_chunks(
+            notes_doc_id,
+            &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 48,
+                heading: None,
+                kind: FinalChunkKind::Section,
+            }],
+        )
+        .expect("insert notes chunk");
+
+    let work_only = storage
+        .get_unembedded_chunks_in_collections("model-a", &[work_collection_id], 0, 10)
+        .expect("query work-only backlog");
+    assert_eq!(work_only.len(), 1);
+    assert_eq!(work_only[0].chunk_id, work_chunk_ids[0]);
+    assert_eq!(work_only[0].space_name, "work");
+
+    let notes_only = storage
+        .get_unembedded_chunks_in_space("model-a", notes_space_id, 0, 10)
+        .expect("query notes-only backlog");
+    assert_eq!(notes_only.len(), 1);
+    assert_eq!(notes_only[0].chunk_id, notes_chunk_ids[0]);
+    assert_eq!(notes_only[0].space_name, "notes");
+}
+
+#[test]
 fn get_fts_dirty_documents_returns_context_and_chunks() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
