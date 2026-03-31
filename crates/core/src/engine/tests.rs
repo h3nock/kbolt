@@ -3230,7 +3230,7 @@ fn update_replays_fts_dirty_documents_before_mtime_fast_path() {
 }
 
 #[test]
-fn update_replay_skips_hash_mismatch_outside_scoped_targets() {
+fn update_does_not_replay_fts_dirty_documents_outside_scoped_targets() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
         engine.add_space("work", None).expect("add work");
@@ -3246,15 +3246,9 @@ fn update_replay_skips_hash_mismatch_outside_scoped_targets() {
 
         write_text_file(&work_path.join("src/lib.rs"), "worktoken\n");
         write_text_file(&notes_path.join("docs/guide.md"), "oldtoken\n");
-        let first = engine
+        engine
             .update(update_options(None, &[]))
             .expect("index initial fixtures");
-        assert_eq!(first.added_docs, 2);
-        assert!(
-            first.errors.is_empty(),
-            "unexpected errors: {:?}",
-            first.errors
-        );
 
         let notes_space = engine
             .storage()
@@ -3296,7 +3290,21 @@ fn update_replay_skips_hash_mismatch_outside_scoped_targets() {
             )
             .expect("mark notes document fts dirty");
 
-        write_text_file(&notes_path.join("docs/guide.md"), "newtoken\n");
+        let notes_hits_before = engine
+            .storage()
+            .query_bm25("notes", "oldtoken", &[("body", 1.0)], 10)
+            .expect("query notes bm25 before scoped update");
+        assert!(
+            notes_hits_before.is_empty(),
+            "notes Tantivy should be empty"
+        );
+
+        let dirty_before = engine
+            .storage()
+            .get_fts_dirty_documents()
+            .expect("load dirty docs before scoped update");
+        assert_eq!(dirty_before.len(), 1);
+        assert_eq!(dirty_before[0].doc_id, notes_doc.id);
 
         let scoped = engine
             .update(update_options(Some("work"), &["api"]))
@@ -3307,19 +3315,26 @@ fn update_replay_skips_hash_mismatch_outside_scoped_targets() {
             scoped.errors
         );
 
-        let notes_new_hits = engine
+        let notes_hits_after = engine
             .storage()
-            .query_bm25("notes", "newtoken", &[("body", 1.0)], 10)
-            .expect("query notes bm25 for newtoken");
+            .query_bm25("notes", "oldtoken", &[("body", 1.0)], 10)
+            .expect("query notes bm25 after scoped update");
         assert!(
-            notes_new_hits.is_empty(),
-            "hash-mismatched replay should be skipped for out-of-scope collection"
+            notes_hits_after.is_empty(),
+            "out-of-scope dirty doc should not be replayed"
         );
+
+        let dirty_after = engine
+            .storage()
+            .get_fts_dirty_documents()
+            .expect("load dirty docs after scoped update");
+        assert_eq!(dirty_after.len(), 1);
+        assert_eq!(dirty_after[0].doc_id, notes_doc.id);
     });
 }
 
 #[test]
-fn update_clears_mismatched_dense_state_before_scan() {
+fn space_scoped_update_clears_mismatched_dense_state_before_scan() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
         engine.add_space("work", None).expect("add work");
@@ -3379,7 +3394,7 @@ fn update_clears_mismatched_dense_state_before_scan() {
         );
 
         let second = engine
-            .update(update_options(Some("work"), &["api"]))
+            .update(update_options(Some("work"), &[]))
             .expect("second update");
         assert_eq!(second.scanned_docs, 1);
         assert_eq!(second.skipped_mtime_docs, 1);
@@ -3407,7 +3422,73 @@ fn update_clears_mismatched_dense_state_before_scan() {
 }
 
 #[test]
-fn update_clears_dense_state_when_embedding_model_drifts() {
+fn collection_targeted_update_errors_on_space_level_dense_integrity_issues() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        write_text_file(&collection_path.join("src/lib.rs"), "fn alpha() {}\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("first update");
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(work_space.id, "api")
+            .expect("get api collection");
+        let doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "src/lib.rs")
+            .expect("query document")
+            .expect("document should exist");
+        let chunks = engine
+            .storage()
+            .get_chunks_for_document(doc.id)
+            .expect("load chunks");
+        assert!(!chunks.is_empty(), "expected indexed chunks");
+
+        engine
+            .storage()
+            .insert_embeddings(&[(chunks[0].id, "stale-model")])
+            .expect("insert stale embedding row");
+
+        let err = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect_err("collection-targeted update should reject dense repair");
+        assert!(
+            err.to_string()
+                .contains("collection-targeted update cannot repair space-level vector state"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("stale-model"),
+            "expected model drift detail in error: {err}"
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(work_space.id))
+                .expect("count embedded chunks after error"),
+            1
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_usearch("work")
+                .expect("count usearch vectors after error"),
+            0
+        );
+    });
+}
+
+#[test]
+fn space_scoped_update_clears_dense_state_when_embedding_model_drifts() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
         engine.add_space("work", None).expect("add work");
@@ -3472,7 +3553,7 @@ fn update_clears_dense_state_when_embedding_model_drifts() {
         );
 
         let second = engine
-            .update(update_options(Some("work"), &["api"]))
+            .update(update_options(Some("work"), &[]))
             .expect("second update");
         assert_eq!(second.scanned_docs, 1);
         assert_eq!(second.skipped_mtime_docs, 1);
@@ -3672,6 +3753,88 @@ fn update_isolates_backlog_embedding_failures() {
                 .count_usearch("work")
                 .expect("count usearch vectors"),
             1
+        );
+    });
+}
+
+#[test]
+fn update_does_not_embed_backlog_outside_scoped_targets() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_embedder(Arc::new(DeterministicEmbedder));
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        let notes_path = root.path().join("notes-wiki");
+        std::fs::create_dir_all(&work_path).expect("create work dir");
+        std::fs::create_dir_all(&notes_path).expect("create notes dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+        add_collection_fixture(&engine, "notes", "wiki", notes_path.clone());
+
+        write_text_file(&work_path.join("src/lib.rs"), "worktoken\n");
+        write_text_file(&notes_path.join("docs/guide.md"), "notestoken\n");
+
+        engine
+            .update(UpdateOptions {
+                space: None,
+                collections: Vec::new(),
+                no_embed: true,
+                dry_run: false,
+                verbose: false,
+            })
+            .expect("index without embeddings");
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        let notes_space = engine
+            .storage()
+            .get_space("notes")
+            .expect("get notes space");
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(work_space.id))
+                .expect("count work embedded chunks before scoped update"),
+            0
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(notes_space.id))
+                .expect("count notes embedded chunks before scoped update"),
+            0
+        );
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("scoped update");
+        assert_eq!(report.scanned_docs, 1);
+        assert_eq!(report.skipped_mtime_docs, 1);
+        assert!(
+            report.embedded_chunks > 0,
+            "expected scoped update to repair in-scope backlog"
+        );
+
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(work_space.id))
+                .expect("count work embedded chunks after scoped update"),
+            report.embedded_chunks
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(notes_space.id))
+                .expect("count notes embedded chunks after scoped update"),
+            0
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_usearch("notes")
+                .expect("count notes usearch vectors after scoped update"),
+            0
         );
     });
 }
@@ -4415,6 +4578,59 @@ fn update_reap_purges_search_indexes_for_old_removed_files() {
             .expect("list documents");
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].path, "weak.md");
+    });
+}
+
+#[test]
+fn update_does_not_reap_documents_outside_scoped_targets() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_reaping_days(0);
+        engine.add_space("work", None).expect("add work");
+        engine.add_space("notes", None).expect("add notes");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        let notes_path = root.path().join("notes-wiki");
+        std::fs::create_dir_all(&work_path).expect("create work dir");
+        std::fs::create_dir_all(&notes_path).expect("create notes dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+        add_collection_fixture(&engine, "notes", "wiki", notes_path.clone());
+
+        write_text_file(&work_path.join("src/lib.rs"), "worktoken\n");
+        write_text_file(&notes_path.join("docs/guide.md"), "notestoken\n");
+        engine
+            .update(update_options(None, &[]))
+            .expect("index initial fixtures");
+
+        let notes_space = engine
+            .storage()
+            .get_space("notes")
+            .expect("get notes space");
+        let notes_collection = engine
+            .storage()
+            .get_collection(notes_space.id, "wiki")
+            .expect("get notes collection");
+        let notes_doc = engine
+            .storage()
+            .get_document_by_path(notes_collection.id, "docs/guide.md")
+            .expect("query notes document")
+            .expect("notes doc should exist");
+        engine
+            .storage()
+            .deactivate_document(notes_doc.id)
+            .expect("deactivate notes doc");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("run scoped update");
+        assert_eq!(report.reaped_docs, 0);
+
+        let notes_doc_after = engine
+            .storage()
+            .get_document_by_path(notes_collection.id, "docs/guide.md")
+            .expect("query notes document after scoped update")
+            .expect("notes doc should remain");
+        assert!(!notes_doc_after.active);
     });
 }
 

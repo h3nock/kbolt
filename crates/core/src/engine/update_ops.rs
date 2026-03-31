@@ -26,10 +26,6 @@ impl Engine {
         };
         let mut failed_docs = HashSet::new();
 
-        if !options.dry_run {
-            self.replay_fts_dirty_documents(&mut report, &mut failed_docs)?;
-        }
-
         let targets = self.resolve_targets(TargetScope {
             space: options.space.as_deref(),
             collections: &options.collections,
@@ -38,8 +34,13 @@ impl Engine {
             report.elapsed_ms = started.elapsed().as_millis() as u64;
             return Ok(report);
         }
+        let repair_scope = UpdateRepairScope::from_options_and_targets(&options, &targets);
 
-        self.reconcile_dense_integrity(&targets, &options)?;
+        self.reconcile_dense_integrity(&targets, &repair_scope, &options)?;
+
+        if !options.dry_run {
+            self.replay_fts_dirty_documents(&repair_scope, &mut report, &mut failed_docs)?;
+        }
 
         let mut fts_dirty_by_space: HashMap<String, HashSet<i64>> = HashMap::new();
         let mut pending_embeddings = Vec::new();
@@ -76,15 +77,15 @@ impl Engine {
             }
 
             self.embed_pending_chunks(
+                &repair_scope,
                 &options,
                 &mut failed_embedding_chunk_ids,
                 &mut report,
                 &mut failed_docs,
             )?;
 
-            let reaped = self
-                .storage
-                .list_reapable_documents(self.config.reaping.days)?;
+            let reaped =
+                self.list_reapable_documents_for_scope(self.config.reaping.days, &repair_scope)?;
             let mut reaped_doc_ids = Vec::with_capacity(reaped.len());
             let mut chunk_ids_by_space: HashMap<String, Vec<i64>> = HashMap::new();
             for document in reaped {
@@ -111,6 +112,7 @@ impl Engine {
     fn reconcile_dense_integrity(
         &self,
         targets: &[UpdateTarget],
+        repair_scope: &UpdateRepairScope,
         options: &UpdateOptions,
     ) -> Result<()> {
         if options.no_embed || options.dry_run {
@@ -127,20 +129,36 @@ impl Engine {
             let models = self
                 .storage
                 .list_embedding_models_in_space(target.collection.space_id)?;
+            let mut reasons = Vec::new();
             if models.iter().any(|model| model != expected_model) {
-                self.storage
-                    .delete_embeddings_for_space(target.collection.space_id)?;
-                self.storage.clear_usearch(&target.space)?;
-                continue;
+                reasons.push(format!(
+                    "stored embedding models {:?} do not match current model '{}'",
+                    models, expected_model
+                ));
             }
 
             let sqlite_count = self
                 .storage
                 .count_embedded_chunks(Some(target.collection.space_id))?;
             let usearch_count = self.storage.count_usearch(&target.space)?;
+            if sqlite_count != usearch_count {
+                reasons.push(format!(
+                    "sqlite embedded chunk count {sqlite_count} does not match USearch vector count {usearch_count}"
+                ));
+            }
 
-            if sqlite_count == usearch_count {
+            if reasons.is_empty() {
                 continue;
+            }
+
+            if !repair_scope.allows_space_dense_repair() {
+                return Err(KboltError::InvalidInput(format!(
+                    "dense state for space '{}' is inconsistent: {}. collection-targeted update cannot repair space-level vector state; run `kbolt --space {} update`",
+                    target.space,
+                    reasons.join("; "),
+                    target.space,
+                ))
+                .into());
             }
 
             self.storage
@@ -153,6 +171,7 @@ impl Engine {
 
     fn embed_pending_chunks(
         &self,
+        repair_scope: &UpdateRepairScope,
         options: &UpdateOptions,
         failed_chunk_ids: &mut HashSet<i64>,
         report: &mut UpdateReport,
@@ -169,9 +188,8 @@ impl Engine {
         let model = self.embedding_model_key();
         let mut after_chunk_id = 0_i64;
         loop {
-            let backlog = self
-                .storage
-                .get_unembedded_chunks(model, after_chunk_id, 64)?;
+            let backlog =
+                self.get_unembedded_chunks_for_scope(model, repair_scope, after_chunk_id, 64)?;
             if backlog.is_empty() {
                 break;
             }
@@ -408,10 +426,11 @@ impl Engine {
 
     fn replay_fts_dirty_documents(
         &self,
+        repair_scope: &UpdateRepairScope,
         report: &mut UpdateReport,
         failed_docs: &mut HashSet<UpdateDocKey>,
     ) -> Result<()> {
-        let records = self.storage.get_fts_dirty_documents()?;
+        let records = self.get_fts_dirty_documents_for_scope(repair_scope)?;
         if records.is_empty() {
             return Ok(());
         }
@@ -497,6 +516,59 @@ impl Engine {
         }
 
         Ok(())
+    }
+
+    fn get_fts_dirty_documents_for_scope(
+        &self,
+        repair_scope: &UpdateRepairScope,
+    ) -> Result<Vec<crate::storage::FtsDirtyRecord>> {
+        match repair_scope {
+            UpdateRepairScope::Global => self.storage.get_fts_dirty_documents(),
+            UpdateRepairScope::Space { space_id } => {
+                self.storage.get_fts_dirty_documents_in_space(*space_id)
+            }
+            UpdateRepairScope::Collections { collection_ids } => self
+                .storage
+                .get_fts_dirty_documents_in_collections(collection_ids),
+        }
+    }
+
+    fn get_unembedded_chunks_for_scope(
+        &self,
+        model: &str,
+        repair_scope: &UpdateRepairScope,
+        after_chunk_id: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::storage::EmbedRecord>> {
+        match repair_scope {
+            UpdateRepairScope::Global => {
+                self.storage
+                    .get_unembedded_chunks(model, after_chunk_id, limit)
+            }
+            UpdateRepairScope::Space { space_id } => {
+                self.storage
+                    .get_unembedded_chunks_in_space(model, *space_id, after_chunk_id, limit)
+            }
+            UpdateRepairScope::Collections { collection_ids } => self
+                .storage
+                .get_unembedded_chunks_in_collections(model, collection_ids, after_chunk_id, limit),
+        }
+    }
+
+    fn list_reapable_documents_for_scope(
+        &self,
+        older_than_days: u32,
+        repair_scope: &UpdateRepairScope,
+    ) -> Result<Vec<crate::storage::ReapableDocument>> {
+        match repair_scope {
+            UpdateRepairScope::Global => self.storage.list_reapable_documents(older_than_days),
+            UpdateRepairScope::Space { space_id } => self
+                .storage
+                .list_reapable_documents_in_space(older_than_days, *space_id),
+            UpdateRepairScope::Collections { collection_ids } => self
+                .storage
+                .list_reapable_documents_in_collections(older_than_days, collection_ids),
+        }
     }
 
     pub fn resolve_update_targets(&self, options: &UpdateOptions) -> Result<Vec<UpdateTarget>> {
@@ -1041,6 +1113,40 @@ struct UpdateDocKey {
     space: String,
     collection_path: std::path::PathBuf,
     path: String,
+}
+
+#[derive(Debug, Clone)]
+enum UpdateRepairScope {
+    Global,
+    Space { space_id: i64 },
+    Collections { collection_ids: Vec<i64> },
+}
+
+impl UpdateRepairScope {
+    fn from_options_and_targets(options: &UpdateOptions, targets: &[UpdateTarget]) -> Self {
+        if options.collections.is_empty() {
+            if let Some(target) = targets.first() {
+                if options.space.is_some() {
+                    return Self::Space {
+                        space_id: target.collection.space_id,
+                    };
+                }
+            }
+            return Self::Global;
+        }
+
+        let mut collection_ids = targets
+            .iter()
+            .map(|target| target.collection.id)
+            .collect::<Vec<_>>();
+        collection_ids.sort_unstable();
+        collection_ids.dedup();
+        Self::Collections { collection_ids }
+    }
+
+    fn allows_space_dense_repair(&self) -> bool {
+        !matches!(self, Self::Collections { .. })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
