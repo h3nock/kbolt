@@ -15,10 +15,11 @@ use crate::ingest::chunk::FinalChunkKind;
 use crate::storage::Storage;
 use crate::ModelPullEvent;
 use kbolt_types::{
-    ActiveSpaceSource, AddCollectionRequest, AddScheduleRequest, GetRequest, KboltError, Locator,
-    MultiGetRequest, OmitReason, RemoveScheduleRequest, RemoveScheduleSelector, ScheduleBackend,
-    ScheduleInterval, ScheduleIntervalUnit, ScheduleRunResult, ScheduleScope, ScheduleState,
-    ScheduleTrigger, ScheduleWeekday, SearchMode, SearchRequest, UpdateDecisionKind, UpdateOptions,
+    ActiveSpaceSource, AddCollectionRequest, AddScheduleRequest, GetRequest, InitialIndexingBlock,
+    InitialIndexingOutcome, KboltError, Locator, MultiGetRequest, OmitReason,
+    RemoveScheduleRequest, RemoveScheduleSelector, ScheduleBackend, ScheduleInterval,
+    ScheduleIntervalUnit, ScheduleRunResult, ScheduleScope, ScheduleState, ScheduleTrigger,
+    ScheduleWeekday, SearchMode, SearchRequest, UpdateDecisionKind, UpdateOptions,
 };
 
 #[derive(Default)]
@@ -1065,18 +1066,22 @@ fn add_collection_and_collection_info_with_explicit_space() {
             no_index: true,
         })
         .expect("add collection");
-    assert_eq!(added.name, "api");
-    assert_eq!(added.space, "work");
-    assert_eq!(added.path, collection_path);
-    assert_eq!(added.description.as_deref(), Some("API docs"));
+    assert!(matches!(
+        added.initial_indexing,
+        InitialIndexingOutcome::Skipped
+    ));
+    assert_eq!(added.collection.name, "api");
+    assert_eq!(added.collection.space, "work");
+    assert_eq!(added.collection.path, collection_path);
+    assert_eq!(added.collection.description.as_deref(), Some("API docs"));
     assert_eq!(
-        added.extensions,
+        added.collection.extensions,
         Some(vec!["rs".to_string(), "md".to_string()])
     );
-    assert_eq!(added.document_count, 0);
-    assert_eq!(added.active_document_count, 0);
-    assert_eq!(added.chunk_count, 0);
-    assert_eq!(added.embedded_chunk_count, 0);
+    assert_eq!(added.collection.document_count, 0);
+    assert_eq!(added.collection.active_document_count, 0);
+    assert_eq!(added.collection.chunk_count, 0);
+    assert_eq!(added.collection.embedded_chunk_count, 0);
 
     let info = engine
         .collection_info(Some("work"), "api")
@@ -1103,9 +1108,13 @@ fn add_collection_implicitly_creates_explicit_space_when_missing() {
         })
         .expect("add collection with implicit space");
 
-    assert_eq!(added.space, "work");
-    assert_eq!(added.name, "api");
-    assert_eq!(added.path, collection_path);
+    assert!(matches!(
+        added.initial_indexing,
+        InitialIndexingOutcome::Skipped
+    ));
+    assert_eq!(added.collection.space, "work");
+    assert_eq!(added.collection.name, "api");
+    assert_eq!(added.collection.path, collection_path);
 
     let space = engine.space_info("work").expect("fetch implicit space");
     assert_eq!(space.name, "work");
@@ -1136,12 +1145,95 @@ fn add_collection_without_no_index_triggers_initial_index_update() {
             no_index: false,
         })
         .expect("collection add should index by default");
-    assert_eq!(added.space, "work");
-    assert_eq!(added.name, "api");
-    assert_eq!(added.path, collection_path);
-    assert_eq!(added.document_count, 1);
-    assert_eq!(added.active_document_count, 1);
-    assert_eq!(added.chunk_count, 1);
+    let report = match &added.initial_indexing {
+        InitialIndexingOutcome::Indexed(report) => report,
+        other => panic!("expected indexed outcome, got: {other:?}"),
+    };
+    assert_eq!(added.collection.space, "work");
+    assert_eq!(added.collection.name, "api");
+    assert_eq!(added.collection.path, collection_path);
+    assert_eq!(added.collection.document_count, 1);
+    assert_eq!(added.collection.active_document_count, 1);
+    assert_eq!(added.collection.chunk_count, 1);
+    assert_eq!(report.added_docs, 1);
+    assert_eq!(report.failed_docs, 0);
+}
+
+#[test]
+fn add_collection_returns_blocked_outcome_when_space_dense_repair_is_required() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let first_path = root.path().join("work-api");
+        std::fs::create_dir_all(&first_path).expect("create first collection dir");
+        add_collection_fixture(&engine, "work", "api", first_path.clone());
+        write_text_file(&first_path.join("src/lib.rs"), "fn alpha() {}\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("index first collection");
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        let api = engine
+            .storage()
+            .get_collection(work_space.id, "api")
+            .expect("get api collection");
+        let doc = engine
+            .storage()
+            .get_document_by_path(api.id, "src/lib.rs")
+            .expect("query document")
+            .expect("document should exist");
+        let chunks = engine
+            .storage()
+            .get_chunks_for_document(doc.id)
+            .expect("load chunks");
+        assert!(!chunks.is_empty(), "expected indexed chunks");
+        engine
+            .storage()
+            .insert_embeddings(&[(chunks[0].id, "stale-model")])
+            .expect("insert stale embedding row");
+
+        let second_path = root.path().join("work-docs");
+        std::fs::create_dir_all(&second_path).expect("create second collection dir");
+        write_text_file(&second_path.join("guide.md"), "guide text\n");
+
+        let added = engine
+            .add_collection(AddCollectionRequest {
+                path: second_path.clone(),
+                space: Some("work".to_string()),
+                name: Some("docs".to_string()),
+                description: None,
+                extensions: None,
+                no_index: false,
+            })
+            .expect("collection registration should still succeed");
+
+        assert_eq!(added.collection.space, "work");
+        assert_eq!(added.collection.name, "docs");
+        assert_eq!(added.collection.path, second_path);
+        match added.initial_indexing {
+            InitialIndexingOutcome::Blocked(InitialIndexingBlock::SpaceDenseRepairRequired {
+                space,
+                reason,
+            }) => {
+                assert_eq!(space, "work");
+                assert!(
+                    reason.contains("stale-model"),
+                    "expected model drift detail in reason: {reason}"
+                );
+            }
+            other => panic!("expected dense-repair block, got: {other:?}"),
+        }
+
+        let info = engine
+            .collection_info(Some("work"), "docs")
+            .expect("collection should remain registered");
+        assert_eq!(info.name, "docs");
+        assert_eq!(info.space, "work");
+        assert_eq!(info.path, root.path().join("work-docs"));
+        assert_eq!(info.document_count, 0);
+    });
 }
 
 #[test]

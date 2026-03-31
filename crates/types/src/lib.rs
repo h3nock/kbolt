@@ -29,7 +29,10 @@ pub use search::{
     SearchMode, SearchPipeline, SearchPipelineNotice, SearchPipelineStep,
     SearchPipelineUnavailableReason, SearchRequest, SearchResponse, SearchResult, SearchSignals,
 };
-pub use space::{ActiveSpace, ActiveSpaceSource, AddCollectionRequest, CollectionInfo, SpaceInfo};
+pub use space::{
+    ActiveSpace, ActiveSpaceSource, AddCollectionRequest, AddCollectionResult, CollectionInfo,
+    InitialIndexingBlock, InitialIndexingOutcome, SpaceInfo,
+};
 pub use status::{
     CollectionStatus, DiskUsage, ModelInfo, ModelStatus, SpaceStatus, StatusResponse,
 };

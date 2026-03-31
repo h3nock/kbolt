@@ -908,6 +908,7 @@ fn json_error_kind(err: &RunError) -> &'static str {
         RunError::Core(CoreError::Domain(KboltError::AmbiguousSpace { .. })) => "ambiguous_space",
         RunError::Core(CoreError::Domain(KboltError::NoActiveSpace))
         | RunError::Core(CoreError::Domain(KboltError::InvalidInput(_)))
+        | RunError::Core(CoreError::Domain(KboltError::SpaceDenseRepairRequired { .. }))
         | RunError::Core(CoreError::Domain(KboltError::InvalidPath(_))) => "invalid_input",
         RunError::Core(CoreError::Domain(KboltError::ModelNotAvailable { .. })) => {
             "model_not_available"

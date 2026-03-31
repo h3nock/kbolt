@@ -6,13 +6,13 @@ use kbolt_core::engine::Engine;
 use kbolt_core::ModelPullEvent;
 use kbolt_core::Result;
 use kbolt_types::{
-    ActiveSpaceSource, AddCollectionRequest, AddScheduleRequest, EvalImportReport, EvalRunReport,
-    GetRequest, KboltError, Locator, MultiGetRequest, OmitReason, RemoveScheduleRequest,
-    ScheduleAddResponse, ScheduleBackend, ScheduleInterval, ScheduleIntervalUnit,
-    ScheduleRunResult, ScheduleScope, ScheduleState, ScheduleStatusResponse, ScheduleTrigger,
-    ScheduleWeekday, SearchMode, SearchPipeline, SearchPipelineNotice, SearchPipelineStep,
-    SearchPipelineUnavailableReason, SearchRequest, UpdateDecision, UpdateDecisionKind,
-    UpdateOptions, UpdateReport,
+    ActiveSpaceSource, AddCollectionRequest, AddCollectionResult, AddScheduleRequest,
+    EvalImportReport, EvalRunReport, GetRequest, InitialIndexingBlock, InitialIndexingOutcome,
+    KboltError, Locator, MultiGetRequest, OmitReason, RemoveScheduleRequest, ScheduleAddResponse,
+    ScheduleBackend, ScheduleInterval, ScheduleIntervalUnit, ScheduleRunResult, ScheduleScope,
+    ScheduleState, ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode,
+    SearchPipeline, SearchPipelineNotice, SearchPipelineStep, SearchPipelineUnavailableReason,
+    SearchRequest, UpdateDecision, UpdateDecisionKind, UpdateOptions, UpdateReport,
 };
 
 pub struct CliAdapter {
@@ -114,8 +114,8 @@ impl CliAdapter {
                 Ok(info) => successes.push(format!(
                     "- {} -> {}/{}",
                     dir.display(),
-                    info.space,
-                    info.name
+                    info.collection.space,
+                    info.collection.name
                 )),
                 Err(err) => {
                     if strict {
@@ -135,16 +135,16 @@ impl CliAdapter {
 
         let mut lines = Vec::new();
         lines.push(format!("space added: {}{suffix}", added.name));
-        lines.push(format!("collections added: {}", successes.len()));
+        lines.push(format!("collections registered: {}", successes.len()));
         lines.extend(successes);
         if !failures.is_empty() {
             lines.push(format!("collections failed: {}", failures.len()));
             lines.extend(failures);
         }
-        lines.push(
-            "note: collections were registered without indexing; run `kbolt update` to index them"
-                .to_string(),
-        );
+        lines.push(format!(
+            "note: collections were registered without indexing; run `kbolt --space {} update` to index them",
+            added.name
+        ));
 
         Ok(lines.join("\n"))
     }
@@ -274,7 +274,7 @@ impl CliAdapter {
             no_index,
         })?;
 
-        Ok(format!("collection added: {}/{}", added.space, added.name))
+        Ok(format_collection_add_result(&added))
     }
 
     pub fn collection_info(&self, space: Option<&str>, name: &str) -> Result<String> {
@@ -905,6 +905,82 @@ fn format_update_report(report: &UpdateReport, verbose: bool) -> String {
     lines.join("\n")
 }
 
+fn format_collection_add_result(result: &AddCollectionResult) -> String {
+    let collection = &result.collection;
+    let locator = format!("{}/{}", collection.space, collection.name);
+
+    match &result.initial_indexing {
+        InitialIndexingOutcome::Skipped => {
+            format!("collection added without indexing: {locator}")
+        }
+        InitialIndexingOutcome::Indexed(report) => {
+            format_collection_add_indexing_report(collection, &locator, report)
+        }
+        InitialIndexingOutcome::Blocked(block) => {
+            format_collection_add_block(collection, &locator, block)
+        }
+    }
+}
+
+fn format_collection_add_indexing_report(
+    collection: &kbolt_types::CollectionInfo,
+    locator: &str,
+    report: &UpdateReport,
+) -> String {
+    let mut lines = Vec::new();
+    if report.failed_docs == 0 {
+        lines.push(format!("collection added and indexed: {locator}"));
+    } else {
+        lines.push(format!("collection added: {locator}"));
+        lines.push("initial indexing incomplete".to_string());
+    }
+
+    lines.push(format!("scanned_docs: {}", report.scanned_docs));
+    lines.push(format!("added_docs: {}", report.added_docs));
+    lines.push(format!("updated_docs: {}", report.updated_docs));
+    lines.push(format!("failed_docs: {}", report.failed_docs));
+
+    if report.failed_docs > 0 {
+        lines.push(format!(
+            "rerun: kbolt --space {} update --collection {}",
+            collection.space, collection.name
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn format_collection_add_block(
+    collection: &kbolt_types::CollectionInfo,
+    locator: &str,
+    block: &InitialIndexingBlock,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("collection added: {locator}"));
+
+    match block {
+        InitialIndexingBlock::SpaceDenseRepairRequired { space, reason } => {
+            lines.push(format!(
+                "initial indexing blocked by space-level dense integrity issue in '{space}'"
+            ));
+            lines.push(format!("reason: {reason}"));
+            lines.push(format!("run: kbolt --space {space} update"));
+        }
+        InitialIndexingBlock::ModelNotAvailable { name } => {
+            lines.push(format!(
+                "initial indexing blocked: model '{name}' is not available"
+            ));
+            lines.push("run: kbolt models pull".to_string());
+            lines.push(format!(
+                "then run: kbolt --space {} update --collection {}",
+                collection.space, collection.name
+            ));
+        }
+    }
+
+    lines.join("\n")
+}
+
 fn format_update_decision(decision: &UpdateDecision) -> String {
     let locator = format!(
         "{}/{}/{}",
@@ -1270,17 +1346,18 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        format_eval_import_report, format_eval_run_report, format_schedule_add_response,
-        format_schedule_status_response, parse_editor_command, resolve_editor_command,
-        resolve_no_rerank_for_mode, CliAdapter, CliSearchOptions,
+        format_collection_add_result, format_eval_import_report, format_eval_run_report,
+        format_schedule_add_response, format_schedule_status_response, parse_editor_command,
+        resolve_editor_command, resolve_no_rerank_for_mode, CliAdapter, CliSearchOptions,
     };
     use kbolt_core::engine::Engine;
     use kbolt_types::{
-        AddCollectionRequest, EvalImportReport, EvalJudgment, EvalModeReport, EvalQueryReport,
-        EvalRunReport, ScheduleAddResponse, ScheduleBackend, ScheduleDefinition, ScheduleInterval,
-        ScheduleIntervalUnit, ScheduleOrphan, ScheduleRunResult, ScheduleRunState, ScheduleScope,
-        ScheduleState, ScheduleStatusEntry, ScheduleStatusResponse, ScheduleTrigger,
-        ScheduleWeekday, SearchMode,
+        AddCollectionRequest, AddCollectionResult, CollectionInfo, EvalImportReport, EvalJudgment,
+        EvalModeReport, EvalQueryReport, EvalRunReport, InitialIndexingBlock,
+        InitialIndexingOutcome, ScheduleAddResponse, ScheduleBackend, ScheduleDefinition,
+        ScheduleInterval, ScheduleIntervalUnit, ScheduleOrphan, ScheduleRunResult,
+        ScheduleRunState, ScheduleScope, ScheduleState, ScheduleStatusEntry,
+        ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode, UpdateReport,
     };
 
     struct EnvRestore {
@@ -1643,6 +1720,118 @@ mod tests {
                 output.contains("work/api/src/bad.rs: extract_failed (extract failed:"),
                 "unexpected output: {output}"
             );
+        });
+    }
+
+    #[test]
+    fn collection_add_result_formats_no_index_message() {
+        let output = format_collection_add_result(&AddCollectionResult {
+            collection: CollectionInfo {
+                name: "api".to_string(),
+                space: "work".to_string(),
+                path: PathBuf::from("/tmp/work-api"),
+                description: None,
+                extensions: None,
+                document_count: 0,
+                active_document_count: 0,
+                chunk_count: 0,
+                embedded_chunk_count: 0,
+                created: "2026-03-31T00:00:00Z".to_string(),
+                updated: "2026-03-31T00:00:00Z".to_string(),
+            },
+            initial_indexing: InitialIndexingOutcome::Skipped,
+        });
+
+        assert_eq!(output, "collection added without indexing: work/api");
+    }
+
+    #[test]
+    fn collection_add_result_formats_incomplete_initial_indexing() {
+        let output = format_collection_add_result(&AddCollectionResult {
+            collection: CollectionInfo {
+                name: "api".to_string(),
+                space: "work".to_string(),
+                path: PathBuf::from("/tmp/work-api"),
+                description: None,
+                extensions: None,
+                document_count: 3,
+                active_document_count: 3,
+                chunk_count: 3,
+                embedded_chunk_count: 2,
+                created: "2026-03-31T00:00:00Z".to_string(),
+                updated: "2026-03-31T00:00:00Z".to_string(),
+            },
+            initial_indexing: InitialIndexingOutcome::Indexed(UpdateReport {
+                scanned_docs: 3,
+                skipped_mtime_docs: 0,
+                skipped_hash_docs: 0,
+                added_docs: 2,
+                updated_docs: 0,
+                failed_docs: 1,
+                deactivated_docs: 0,
+                reactivated_docs: 0,
+                reaped_docs: 0,
+                embedded_chunks: 2,
+                decisions: Vec::new(),
+                errors: Vec::new(),
+                elapsed_ms: 5,
+            }),
+        });
+
+        assert!(output.contains("collection added: work/api"));
+        assert!(output.contains("initial indexing incomplete"));
+        assert!(output.contains("scanned_docs: 3"));
+        assert!(output.contains("added_docs: 2"));
+        assert!(output.contains("failed_docs: 1"));
+        assert!(output.contains("rerun: kbolt --space work update --collection api"));
+    }
+
+    #[test]
+    fn collection_add_result_formats_model_block_with_resume_steps() {
+        let output = format_collection_add_result(&AddCollectionResult {
+            collection: CollectionInfo {
+                name: "api".to_string(),
+                space: "work".to_string(),
+                path: PathBuf::from("/tmp/work-api"),
+                description: None,
+                extensions: None,
+                document_count: 0,
+                active_document_count: 0,
+                chunk_count: 0,
+                embedded_chunk_count: 0,
+                created: "2026-03-31T00:00:00Z".to_string(),
+                updated: "2026-03-31T00:00:00Z".to_string(),
+            },
+            initial_indexing: InitialIndexingOutcome::Blocked(
+                InitialIndexingBlock::ModelNotAvailable {
+                    name: "embed-model".to_string(),
+                },
+            ),
+        });
+
+        assert!(output.contains("collection added: work/api"));
+        assert!(output.contains("initial indexing blocked: model 'embed-model' is not available"));
+        assert!(output.contains("run: kbolt models pull"));
+        assert!(output.contains("then run: kbolt --space work update --collection api"));
+    }
+
+    #[test]
+    fn space_add_with_directories_reports_registration_without_indexing() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let adapter = CliAdapter::new(engine);
+
+            let work_path = new_collection_dir(root.path(), "work-api");
+            let notes_path = new_collection_dir(root.path(), "work-notes");
+
+            let output = adapter
+                .space_add("work", Some("work docs"), false, &[work_path, notes_path])
+                .expect("add space with directories");
+
+            assert!(output.contains("space added: work - work docs"));
+            assert!(output.contains("collections registered: 2"));
+            assert!(output.contains("run `kbolt --space work update` to index them"));
         });
     }
 

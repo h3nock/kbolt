@@ -152,12 +152,10 @@ impl Engine {
             }
 
             if !repair_scope.allows_space_dense_repair() {
-                return Err(KboltError::InvalidInput(format!(
-                    "dense state for space '{}' is inconsistent: {}. collection-targeted update cannot repair space-level vector state; run `kbolt --space {} update`",
-                    target.space,
-                    reasons.join("; "),
-                    target.space,
-                ))
+                return Err(KboltError::SpaceDenseRepairRequired {
+                    space: target.space.clone(),
+                    reason: reasons.join("; "),
+                }
                 .into());
             }
 

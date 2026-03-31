@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::indexing::UpdateReport;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ActiveSpaceSource {
     Flag,
@@ -48,4 +50,23 @@ pub struct CollectionInfo {
     pub embedded_chunk_count: usize,
     pub created: String,
     pub updated: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AddCollectionResult {
+    pub collection: CollectionInfo,
+    pub initial_indexing: InitialIndexingOutcome,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum InitialIndexingOutcome {
+    Skipped,
+    Indexed(UpdateReport),
+    Blocked(InitialIndexingBlock),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum InitialIndexingBlock {
+    SpaceDenseRepairRequired { space: String, reason: String },
+    ModelNotAvailable { name: String },
 }

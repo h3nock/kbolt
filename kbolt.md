@@ -263,7 +263,7 @@ impl Engine {
     pub fn resolve_space(&self, explicit: Option<&str>) -> Result<String>;
 
     // Collections
-    pub fn add_collection(&self, req: AddCollectionRequest) -> Result<CollectionInfo>;
+    pub fn add_collection(&self, req: AddCollectionRequest) -> Result<AddCollectionResult>;
     pub fn remove_collection(&self, space: Option<&str>, name: &str) -> Result<()>;
     pub fn rename_collection(&self, space: Option<&str>, old: &str, new: &str) -> Result<()>;
     pub fn describe_collection(&self, space: Option<&str>, name: &str, desc: &str) -> Result<()>;
@@ -595,6 +595,27 @@ pub struct CollectionInfo {
     pub embedded_chunk_count: usize,
     pub created: String,
     pub updated: String,
+}
+
+pub struct AddCollectionResult {
+    pub collection: CollectionInfo,
+    pub initial_indexing: InitialIndexingOutcome,
+}
+
+pub enum InitialIndexingOutcome {
+    Skipped,                            // collection registered with --no-index
+    Indexed(UpdateReport),              // initial indexing ran; completeness comes from report
+    Blocked(InitialIndexingBlock),      // collection registered, but indexing could not start
+}
+
+pub enum InitialIndexingBlock {
+    SpaceDenseRepairRequired {
+        space: String,
+        reason: String,
+    },
+    ModelNotAvailable {
+        name: String,
+    },
 }
 ```
 
@@ -1532,6 +1553,8 @@ This two-level check (mtime first, hash second) means a "nothing changed" scan i
 - **Manual**: `kbolt update` (or scoped: `--space`, `--collection`)
 - **Scheduled**: `kbolt schedule add ...` persists a schedule and reconciles launchd/systemd user timer artifacts
 - **On collection add**: `kbolt collection add` triggers indexing immediately (unless `--no-index`)
+  - the command reports the initial indexing outcome from a collection/document point of view
+  - if indexing is blocked after registration (for example, space-level dense repair is required or a model is unavailable), the collection remains registered and the command tells the user what to run next
 
 ### Staleness Transparency
 
@@ -1843,7 +1866,7 @@ DOCUMENTS
   kbolt ls [collection] [prefix]    List files in collection
 
 SPACES
-  kbolt space add <name> [dirs...]  Create space, optionally add directories as collections
+  kbolt space add <name> [dirs...]  Create space, optionally register directories as collections
     --description <text>           Space description
   kbolt space remove <name>         Remove space and all its collections/data
   kbolt space rename <old> <new>
