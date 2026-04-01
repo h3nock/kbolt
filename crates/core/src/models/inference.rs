@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use kbolt_types::KboltError;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::config::{Config, ProviderOperation};
 use crate::models::chat::{
@@ -16,7 +16,7 @@ use crate::models::gateway::{
 };
 use crate::models::http::{HttpJsonClient, HttpOperation};
 use crate::models::variants_expander::{ChatVariantsExpander, VARIANTS_GRAMMAR};
-use crate::models::{Embedder, EmbeddingInputKind, Expander, Reranker};
+use crate::models::{Embedder, EmbeddingDocumentSizer, EmbeddingInputKind, Expander, Reranker};
 use crate::Result;
 
 #[cfg(test)]
@@ -29,6 +29,12 @@ struct HttpApiEmbedder {
     client: HttpJsonClient,
     model: String,
     batch_size: usize,
+    endpoint_suffix: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct LlamaCppServerDocumentSizer {
+    client: HttpJsonClient,
     endpoint_suffix: &'static str,
 }
 
@@ -53,6 +59,7 @@ struct OpenAiCompatibleEndpointReranker {
 
 pub(crate) struct BuiltInferenceClients {
     pub embedder: Option<Arc<dyn Embedder>>,
+    pub embedding_document_sizer: Option<Arc<dyn EmbeddingDocumentSizer>>,
     pub reranker: Option<Arc<dyn Reranker>>,
     pub expander: Option<Arc<dyn Expander>>,
 }
@@ -61,6 +68,10 @@ impl std::fmt::Debug for BuiltInferenceClients {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BuiltInferenceClients")
             .field("embedder", &self.embedder.is_some())
+            .field(
+                "embedding_document_sizer",
+                &self.embedding_document_sizer.is_some(),
+            )
             .field("reranker", &self.reranker.is_some())
             .field("expander", &self.expander.is_some())
             .finish()
@@ -81,6 +92,12 @@ fn build_provider_bound_clients(
             .as_ref()
             .map(build_embedder_from_binding)
             .transpose()?,
+        embedding_document_sizer: bindings
+            .embedder
+            .as_ref()
+            .map(build_embedding_document_sizer_from_binding)
+            .transpose()?
+            .flatten(),
         reranker: bindings
             .reranker
             .as_ref()
@@ -117,6 +134,34 @@ fn build_embedder_from_binding(binding: &EmbedderBinding) -> Result<Arc<dyn Embe
         batch_size: binding.batch_size,
         endpoint_suffix: embedding_endpoint_suffix(binding.deployment.kind),
     }))
+}
+
+fn build_embedding_document_sizer_from_binding(
+    binding: &EmbedderBinding,
+) -> Result<Option<Arc<dyn EmbeddingDocumentSizer>>> {
+    if binding.deployment.operation != ProviderOperation::Embedding {
+        return Err(KboltError::Inference(format!(
+            "provider profile '{}' uses incompatible operation '{}' for embedder bindings",
+            binding.provider_name,
+            binding.deployment.operation.as_str()
+        ))
+        .into());
+    }
+
+    match binding.deployment.kind {
+        GatewayProviderKind::LlamaCppServer => Ok(Some(Arc::new(LlamaCppServerDocumentSizer {
+            client: HttpJsonClient::new(
+                &binding.deployment.base_url,
+                binding.deployment.api_key_env.as_deref(),
+                binding.deployment.timeout_ms,
+                binding.deployment.max_retries,
+                "embedding",
+                binding.deployment.kind.as_str(),
+            ),
+            endpoint_suffix: llama_cpp_tokenize_endpoint_suffix(),
+        }))),
+        GatewayProviderKind::OpenAiCompatible => Ok(None),
+    }
 }
 
 fn build_reranker_from_binding(binding: &RerankerBinding) -> Result<Arc<dyn Reranker>> {
@@ -231,6 +276,10 @@ fn openai_compatible_reranking_endpoint_suffix() -> &'static str {
     "rerank"
 }
 
+fn llama_cpp_tokenize_endpoint_suffix() -> &'static str {
+    "tokenize"
+}
+
 fn openai_expander_options(binding: &ExpanderBinding) -> ChatCompletionRequestOptions {
     ChatCompletionRequestOptions {
         output_mode: ChatCompletionOutputMode::Text,
@@ -317,6 +366,21 @@ impl Embedder for HttpApiEmbedder {
             self.batch_size,
             texts,
         )
+    }
+}
+
+impl EmbeddingDocumentSizer for LlamaCppServerDocumentSizer {
+    fn count_document_tokens(&self, text: &str) -> Result<usize> {
+        let payload = json!({
+            "content": text,
+            "add_special": true,
+        });
+        let response = self.client.post_json::<TokenizeResponseEnvelope>(
+            self.endpoint_suffix,
+            &payload,
+            HttpOperation::Tokenize,
+        )?;
+        response.token_count()
     }
 }
 
@@ -449,6 +513,13 @@ enum EmbeddingResponseEnvelope {
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
+enum TokenizeResponseEnvelope {
+    Wrapped { tokens: Vec<Value> },
+    Direct(Vec<Value>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
 enum RerankerResponse {
     Scores(Vec<f32>),
     Wrapped { scores: Vec<f32> },
@@ -549,6 +620,16 @@ impl EmbeddingResponseEnvelope {
         }
 
         Ok(std::mem::take(&mut vectors))
+    }
+}
+
+impl TokenizeResponseEnvelope {
+    fn token_count(self) -> Result<usize> {
+        let tokens = match self {
+            Self::Wrapped { tokens } => tokens,
+            Self::Direct(tokens) => tokens,
+        };
+        Ok(tokens.len())
     }
 }
 
@@ -866,6 +947,76 @@ mod tests {
             .embed_batch(EmbeddingInputKind::Document, &["hello".to_string()])
             .expect("embed");
         assert_eq!(vectors, vec![vec![0.1, 0.2]]);
+    }
+
+    #[test]
+    fn llama_cpp_embedder_builds_document_sizer_against_tokenize_endpoint() {
+        let (base_url, requests) = serve_once_capturing_request(200, r#"{"tokens":[1,2,3]}"#);
+        let mut config = base_config();
+        config.providers.insert(
+            "local_embed".to_string(),
+            ProviderProfileConfig::LlamaCppServer {
+                operation: ProviderOperation::Embedding,
+                base_url,
+                model: "embeddinggemma".to_string(),
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        );
+        config.roles.embedder = Some(EmbedderRoleConfig {
+            provider: "local_embed".to_string(),
+            batch_size: 64,
+        });
+
+        let built = build_inference_clients(&config).expect("build clients");
+        let sizer = built
+            .embedding_document_sizer
+            .expect("document sizer should exist");
+        let token_count = sizer
+            .count_document_tokens("hello world")
+            .expect("count tokens");
+        assert_eq!(token_count, 3);
+
+        let raw_request = requests
+            .recv_timeout(Duration::from_secs(1))
+            .expect("captured request");
+        let request = String::from_utf8(raw_request).expect("utf8 request");
+        assert!(
+            request.starts_with("POST /tokenize HTTP/1.1\r\n"),
+            "unexpected request line: {request}"
+        );
+        assert!(
+            request.contains("\"content\":\"hello world\""),
+            "missing content payload: {request}"
+        );
+        assert!(
+            request.contains("\"add_special\":true"),
+            "missing add_special payload: {request}"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_embedder_does_not_build_document_sizer() {
+        let body = r#"{"data":[{"index":0,"embedding":[0.1,0.2]}]}"#;
+        let mut config = base_config();
+        config.providers.insert(
+            "remote_embed".to_string(),
+            ProviderProfileConfig::OpenAiCompatible {
+                operation: ProviderOperation::Embedding,
+                base_url: serve_once(200, body),
+                model: "embed-model".to_string(),
+                api_key_env: None,
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        );
+        config.roles.embedder = Some(EmbedderRoleConfig {
+            provider: "remote_embed".to_string(),
+            batch_size: 64,
+        });
+
+        let built = build_inference_clients(&config).expect("build clients");
+        assert!(built.embedding_document_sizer.is_none());
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use crate::config::{ChunkPolicy, ChunkingConfig};
 use crate::ingest::extract::{BlockKind, ExtractedBlock, ExtractedDocument};
+use crate::Result;
 use kbolt_types::KboltError;
 
 const TABLE_HEADER_ATTR: &str = "__kbolt_table_header";
@@ -38,15 +39,15 @@ enum NarrativeBoundary {
 }
 
 pub trait TokenCounter {
-    fn count(&self, text: &str) -> usize;
+    fn count(&self, text: &str) -> Result<usize>;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WhitespaceTokenCounter;
 
 impl TokenCounter for WhitespaceTokenCounter {
-    fn count(&self, text: &str) -> usize {
-        count_whitespace_tokens(text)
+    fn count(&self, text: &str) -> Result<usize> {
+        Ok(count_whitespace_tokens(text))
     }
 }
 
@@ -65,7 +66,7 @@ impl FinalChunkKind {
 impl TryFrom<&str> for FinalChunkKind {
     type Error = KboltError;
 
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
+    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
         match value {
             "section" => Ok(Self::Section),
             "paragraph" => Ok(Self::Paragraph),
@@ -82,34 +83,36 @@ impl TryFrom<&str> for FinalChunkKind {
 pub fn chunk_document(document: &ExtractedDocument, policy: &ChunkPolicy) -> Vec<FinalChunk> {
     let counter = WhitespaceTokenCounter;
     chunk_document_with_counter(document, policy, &counter)
+        .expect("whitespace token counter should be infallible")
 }
 
 pub fn chunk_document_with_counter(
     document: &ExtractedDocument,
     policy: &ChunkPolicy,
     counter: &dyn TokenCounter,
-) -> Vec<FinalChunk> {
+) -> Result<Vec<FinalChunk>> {
     if document.blocks.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     debug_assert_valid_blocks(&document.blocks);
 
     let soft_max = normalized_soft_max(policy);
-    let expanded = expand_blocks_for_hard_max(&document.blocks, policy, counter);
+    let expanded = expand_blocks_for_hard_max(&document.blocks, policy, counter)?;
     let mut chunks = Vec::new();
     let mut current = Vec::new();
-    let mut current_tokens = 0usize;
 
     for block in &expanded {
-        let block_tokens = counter.count(block.text.as_str());
-        let candidate_tokens = current_tokens.saturating_add(block_tokens);
         let structurally_compatible = current
             .last()
             .is_none_or(|last| can_pack_together(last, block));
+        let candidate_tokens = if current.is_empty() || !structurally_compatible {
+            0
+        } else {
+            count_candidate_chunk_tokens(&current, block, counter)?
+        };
 
         if current.is_empty() || (structurally_compatible && candidate_tokens <= soft_max) {
-            current_tokens = candidate_tokens;
             current.push(block.clone());
             continue;
         }
@@ -117,14 +120,13 @@ pub fn chunk_document_with_counter(
         chunks.push(finalize_chunk(&current));
         current.clear();
         current.push(block.clone());
-        current_tokens = block_tokens;
     }
 
     if !current.is_empty() {
         chunks.push(finalize_chunk(&current));
     }
 
-    chunks
+    Ok(chunks)
 }
 
 /// Resolves the effective chunk policy for a file profile.
@@ -156,6 +158,35 @@ fn count_whitespace_tokens(text: &str) -> usize {
     text.split_whitespace().count()
 }
 
+fn countable_chunk_text(blocks: &[ExtractedBlock]) -> String {
+    blocks
+        .iter()
+        .map(|block| block.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn count_finalized_chunk_tokens(
+    blocks: &[ExtractedBlock],
+    counter: &dyn TokenCounter,
+) -> Result<usize> {
+    counter.count(countable_chunk_text(blocks).as_str())
+}
+
+fn count_candidate_chunk_tokens(
+    current: &[ExtractedBlock],
+    next: &ExtractedBlock,
+    counter: &dyn TokenCounter,
+) -> Result<usize> {
+    let mut candidate = current.to_vec();
+    candidate.push(next.clone());
+    count_finalized_chunk_tokens(&candidate, counter)
+}
+
+fn count_single_block_tokens(block: &ExtractedBlock, counter: &dyn TokenCounter) -> Result<usize> {
+    count_finalized_chunk_tokens(std::slice::from_ref(block), counter)
+}
+
 fn normalized_soft_max(policy: &ChunkPolicy) -> usize {
     let target = policy.target_tokens.max(1);
     policy.soft_max_tokens.max(target)
@@ -180,7 +211,7 @@ fn expand_blocks_for_hard_max(
     blocks: &[ExtractedBlock],
     policy: &ChunkPolicy,
     counter: &dyn TokenCounter,
-) -> Vec<ExtractedBlock> {
+) -> Result<Vec<ExtractedBlock>> {
     let hard_max = normalized_hard_max(policy);
     let target = normalized_target(policy);
     let overlap = normalized_overlap(policy, hard_max);
@@ -200,14 +231,14 @@ fn expand_blocks_for_hard_max(
 
         let tagged = attach_table_header_attr(block, active_table_header.as_deref());
 
-        if counter.count(tagged.text.as_str()) <= hard_max {
+        if count_single_block_tokens(&tagged, counter)? <= hard_max {
             expanded.push(tagged);
             continue;
         }
 
         if is_narrative_block_kind(&tagged.kind) {
             if let Some(sentence_splits) =
-                split_block_by_sentence_boundaries(&tagged, target, hard_max, overlap)
+                split_block_by_sentence_boundaries(&tagged, target, hard_max, overlap, counter)?
             {
                 expanded.extend(sentence_splits);
                 continue;
@@ -216,17 +247,17 @@ fn expand_blocks_for_hard_max(
 
         if tagged.kind == BlockKind::CodeFence {
             if let Some(code_splits) =
-                split_code_block_by_blank_lines(&tagged, hard_max, overlap, counter)
+                split_code_block_by_blank_lines(&tagged, hard_max, overlap, counter)?
             {
                 expanded.extend(code_splits);
                 continue;
             }
         }
 
-        expanded.extend(split_block_by_tokens(&tagged, hard_max, overlap));
+        expanded.extend(split_block_by_tokens(&tagged, hard_max, overlap, counter)?);
     }
 
-    expanded
+    Ok(expanded)
 }
 
 fn attach_table_header_attr(block: &ExtractedBlock, table_header: Option<&str>) -> ExtractedBlock {
@@ -293,31 +324,26 @@ fn split_block_by_tokens(
     block: &ExtractedBlock,
     hard_max: usize,
     overlap: usize,
-) -> Vec<ExtractedBlock> {
-    let spans = token_byte_spans(block.text.as_str());
-    if spans.is_empty() {
-        return vec![block.clone()];
+    counter: &dyn TokenCounter,
+) -> Result<Vec<ExtractedBlock>> {
+    if block.text.is_empty() {
+        return Ok(vec![block.clone()]);
     }
 
     let mut out = Vec::new();
-    let mut start_token = 0usize;
-    while start_token < spans.len() {
-        let end_token = (start_token + hard_max).min(spans.len());
-        out.push(split_block_range_by_tokens(
-            block,
-            &spans,
-            start_token,
-            end_token,
-        ));
+    let mut start_byte = 0usize;
+    while start_byte < block.text.len() {
+        let end_byte = find_largest_fitting_end_byte(block, start_byte, hard_max, counter)?;
+        out.push(split_block_range_by_bytes(block, start_byte, end_byte));
 
-        if end_token == spans.len() {
+        if end_byte == block.text.len() {
             break;
         }
 
-        start_token = next_start_token(start_token, end_token, overlap);
+        start_byte = next_start_byte(block, start_byte, end_byte, overlap, counter)?;
     }
 
-    out
+    Ok(out)
 }
 
 fn split_code_block_by_blank_lines(
@@ -325,49 +351,45 @@ fn split_code_block_by_blank_lines(
     hard_max: usize,
     overlap: usize,
     counter: &dyn TokenCounter,
-) -> Option<Vec<ExtractedBlock>> {
+) -> Result<Option<Vec<ExtractedBlock>>> {
     let groups = code_group_ranges(block.text.as_str());
     if groups.len() <= 1 {
-        return None;
+        return Ok(None);
     }
 
     let mut packed_ranges = Vec::new();
-    let mut current: Option<(usize, usize, usize)> = None;
+    let mut current: Option<(usize, usize)> = None;
     for (start, end) in groups {
-        let group_tokens = counter.count(&block.text[start..end]);
         match current {
             None => {
-                current = Some((start, end, group_tokens));
+                current = Some((start, end));
             }
-            Some((current_start, current_end, current_tokens)) => {
-                if current_tokens.saturating_add(group_tokens) <= hard_max {
-                    current = Some((
-                        current_start,
-                        end,
-                        current_tokens.saturating_add(group_tokens),
-                    ));
+            Some((current_start, current_end)) => {
+                let candidate = split_block_range_by_bytes(block, current_start, end);
+                if count_single_block_tokens(&candidate, counter)? <= hard_max {
+                    current = Some((current_start, end));
                 } else {
                     packed_ranges.push((current_start, current_end));
-                    current = Some((start, end, group_tokens));
+                    current = Some((start, end));
                 }
             }
         }
     }
-    if let Some((start, end, _)) = current {
+    if let Some((start, end)) = current {
         packed_ranges.push((start, end));
     }
 
     let mut out = Vec::new();
     for (start, end) in packed_ranges {
         let split = split_block_range_by_bytes(block, start, end);
-        if counter.count(split.text.as_str()) > hard_max {
-            out.extend(split_block_by_tokens(&split, hard_max, overlap));
+        if count_single_block_tokens(&split, counter)? > hard_max {
+            out.extend(split_block_by_tokens(&split, hard_max, overlap, counter)?);
         } else {
             out.push(split);
         }
     }
 
-    (out.len() > 1).then_some(out)
+    Ok((out.len() > 1).then_some(out))
 }
 
 fn split_block_by_sentence_boundaries(
@@ -375,83 +397,76 @@ fn split_block_by_sentence_boundaries(
     target_tokens: usize,
     hard_max: usize,
     overlap: usize,
-) -> Option<Vec<ExtractedBlock>> {
+    counter: &dyn TokenCounter,
+) -> Result<Option<Vec<ExtractedBlock>>> {
     let spans = token_byte_spans(block.text.as_str());
     if spans.is_empty() {
-        return Some(vec![block.clone()]);
+        return Ok(Some(vec![block.clone()]));
     }
 
-    let sentence_end_tokens = sentence_end_token_indices(block.text.as_str(), &spans);
-    let clause_end_tokens = clause_end_token_indices(block.text.as_str(), &spans);
+    let sentence_end_tokens = sentence_end_token_indices(block.text.as_str(), &spans)
+        .into_iter()
+        .map(|index| spans[index].1)
+        .collect::<Vec<_>>();
+    let clause_end_tokens = clause_end_token_indices(block.text.as_str(), &spans)
+        .into_iter()
+        .map(|index| spans[index].1)
+        .collect::<Vec<_>>();
     if sentence_end_tokens.is_empty() && clause_end_tokens.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let mut used_structural_boundary = false;
     let mut out = Vec::new();
-    let mut start_token = 0usize;
-    while start_token < spans.len() {
-        let max_end = (start_token + hard_max).min(spans.len());
+    let mut start_byte = 0usize;
+    while start_byte < block.text.len() {
         let mut candidates = sentence_end_tokens
             .iter()
             .copied()
-            .filter(|index| *index >= start_token && (*index + 1) <= max_end)
-            .map(|index| (index + 1, NarrativeBoundary::Sentence))
+            .filter(|end_byte| *end_byte > start_byte)
+            .map(|end_byte| (end_byte, NarrativeBoundary::Sentence))
             .collect::<Vec<_>>();
         candidates.extend(
             clause_end_tokens
                 .iter()
                 .copied()
-                .filter(|index| *index >= start_token && (*index + 1) <= max_end)
-                .map(|index| (index + 1, NarrativeBoundary::Clause)),
+                .filter(|end_byte| *end_byte > start_byte)
+                .map(|end_byte| (end_byte, NarrativeBoundary::Clause)),
         );
-        candidates.push((max_end, NarrativeBoundary::TokenWindow));
-        let end_token = best_narrative_cut(&candidates, target_tokens, start_token, spans.len())
-            .unwrap_or(max_end);
+        let fallback_end = find_largest_fitting_end_byte(block, start_byte, hard_max, counter)?;
+        candidates.push((fallback_end, NarrativeBoundary::TokenWindow));
+
+        let Some((end_byte, boundary)) = choose_best_narrative_boundary(
+            block,
+            start_byte,
+            target_tokens,
+            hard_max,
+            &candidates,
+            counter,
+        )?
+        else {
+            return Err(KboltError::Inference(
+                "failed to choose a fitting narrative split boundary".to_string(),
+            )
+            .into());
+        };
+
         if matches!(
-            candidates
-                .iter()
-                .find(|(candidate_end, _)| *candidate_end == end_token)
-                .map(|(_, boundary)| *boundary),
-            Some(NarrativeBoundary::Sentence | NarrativeBoundary::Clause)
+            boundary,
+            NarrativeBoundary::Sentence | NarrativeBoundary::Clause
         ) {
             used_structural_boundary = true;
         }
 
-        out.push(split_block_range_by_tokens(
-            block,
-            &spans,
-            start_token,
-            end_token,
-        ));
-        if end_token == spans.len() {
+        out.push(split_block_range_by_bytes(block, start_byte, end_byte));
+        if end_byte == block.text.len() {
             break;
         }
 
-        start_token = next_start_token(start_token, end_token, overlap);
+        start_byte = next_start_byte(block, start_byte, end_byte, overlap, counter)?;
     }
 
-    used_structural_boundary.then_some(out)
-}
-
-fn split_block_range_by_tokens(
-    block: &ExtractedBlock,
-    spans: &[(usize, usize)],
-    start_token: usize,
-    end_token: usize,
-) -> ExtractedBlock {
-    debug_assert!(
-        start_token < end_token,
-        "split range must include at least one token"
-    );
-    let byte_start = spans[start_token].0;
-    let byte_end = spans[end_token - 1].1;
-    debug_assert!(
-        byte_end <= block.text.len(),
-        "split range exceeds block text"
-    );
-
-    split_block_range_by_bytes(block, byte_start, byte_end)
+    Ok(used_structural_boundary.then_some(out))
 }
 
 fn split_block_range_by_bytes(
@@ -472,17 +487,196 @@ fn split_block_range_by_bytes(
     split
 }
 
-fn next_start_token(start_token: usize, end_token: usize, overlap: usize) -> usize {
-    debug_assert!(
-        end_token > start_token,
-        "end token must advance beyond start token"
-    );
-    let next = end_token.saturating_sub(overlap);
-    if next <= start_token {
-        end_token
-    } else {
-        next
+fn choose_best_narrative_boundary(
+    block: &ExtractedBlock,
+    start_byte: usize,
+    target_tokens: usize,
+    hard_max: usize,
+    candidates: &[(usize, NarrativeBoundary)],
+    counter: &dyn TokenCounter,
+) -> Result<Option<(usize, NarrativeBoundary)>> {
+    let mut best: Option<(usize, NarrativeBoundary, i64)> = None;
+    for (end_byte, boundary) in candidates {
+        if *end_byte <= start_byte {
+            continue;
+        }
+
+        let candidate = split_block_range_by_bytes(block, start_byte, *end_byte);
+        let token_count = count_single_block_tokens(&candidate, counter)?;
+        if token_count > hard_max {
+            continue;
+        }
+
+        let boundary_score = match boundary {
+            NarrativeBoundary::Sentence => 30,
+            NarrativeBoundary::Clause => 15,
+            NarrativeBoundary::TokenWindow => 0,
+        };
+        let distance = token_count.abs_diff(target_tokens) as i64;
+        let score = boundary_score - (distance * 10);
+        let replace = best
+            .as_ref()
+            .map(|(best_end_byte, _, best_score)| {
+                score > *best_score || (score == *best_score && *end_byte > *best_end_byte)
+            })
+            .unwrap_or(true);
+        if replace {
+            best = Some((*end_byte, *boundary, score));
+        }
     }
+
+    Ok(best.map(|(end_byte, boundary, _)| (end_byte, boundary)))
+}
+
+fn find_largest_fitting_end_byte(
+    block: &ExtractedBlock,
+    start_byte: usize,
+    hard_max: usize,
+    counter: &dyn TokenCounter,
+) -> Result<usize> {
+    let text = block.text.as_str();
+    let token_spans = token_byte_spans(text);
+    let mut token_boundaries = token_spans
+        .iter()
+        .map(|(_, end)| *end)
+        .filter(|end| *end > start_byte)
+        .collect::<Vec<_>>();
+    token_boundaries.dedup();
+
+    if let Some(end_byte) =
+        largest_fitting_boundary(block, start_byte, hard_max, &token_boundaries, counter)?
+    {
+        return Ok(end_byte);
+    }
+
+    let mut char_boundaries = text
+        .char_indices()
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .filter(|end| *end > start_byte)
+        .collect::<Vec<_>>();
+    char_boundaries.dedup();
+    largest_fitting_boundary(block, start_byte, hard_max, &char_boundaries, counter)?.ok_or_else(
+        || {
+            KboltError::Inference(format!(
+                "failed to find a fitting split boundary for block at offset {}",
+                block.offset
+            ))
+            .into()
+        },
+    )
+}
+
+fn largest_fitting_boundary(
+    block: &ExtractedBlock,
+    start_byte: usize,
+    hard_max: usize,
+    boundaries: &[usize],
+    counter: &dyn TokenCounter,
+) -> Result<Option<usize>> {
+    if boundaries.is_empty() {
+        return Ok(None);
+    }
+
+    let mut left = 0usize;
+    let mut right = boundaries.len();
+    let mut best = None;
+    while left < right {
+        let mid = left + (right - left) / 2;
+        let end_byte = boundaries[mid];
+        let candidate = split_block_range_by_bytes(block, start_byte, end_byte);
+        let token_count = count_single_block_tokens(&candidate, counter)?;
+        if token_count <= hard_max {
+            best = Some(end_byte);
+            left = mid + 1;
+        } else {
+            right = mid;
+        }
+    }
+
+    Ok(best)
+}
+
+fn next_start_byte(
+    block: &ExtractedBlock,
+    current_start_byte: usize,
+    end_byte: usize,
+    overlap: usize,
+    counter: &dyn TokenCounter,
+) -> Result<usize> {
+    debug_assert!(
+        end_byte > current_start_byte,
+        "end byte must advance beyond start byte"
+    );
+    if overlap == 0 {
+        return Ok(next_content_start_byte(block.text.as_str(), end_byte));
+    }
+
+    let text = block.text.as_str();
+    let token_starts = token_byte_spans(text)
+        .into_iter()
+        .map(|(start, _)| start)
+        .filter(|start| *start > current_start_byte && *start < end_byte)
+        .collect::<Vec<_>>();
+    if let Some(next_start) =
+        earliest_fitting_overlap_start(block, end_byte, overlap, &token_starts, counter)?
+    {
+        return Ok(next_start);
+    }
+
+    let char_starts = text
+        .char_indices()
+        .map(|(idx, _)| idx)
+        .filter(|idx| *idx > current_start_byte && *idx < end_byte)
+        .collect::<Vec<_>>();
+    Ok(
+        earliest_fitting_overlap_start(block, end_byte, overlap, &char_starts, counter)?
+            .map(|start| next_content_start_byte(text, start))
+            .unwrap_or_else(|| next_content_start_byte(text, end_byte)),
+    )
+}
+
+fn next_content_start_byte(text: &str, start_byte: usize) -> usize {
+    if start_byte >= text.len() {
+        return text.len();
+    }
+
+    for (idx, ch) in text[start_byte..].char_indices() {
+        if !ch.is_whitespace() {
+            return start_byte + idx;
+        }
+    }
+
+    text.len()
+}
+
+fn earliest_fitting_overlap_start(
+    block: &ExtractedBlock,
+    end_byte: usize,
+    overlap: usize,
+    candidates: &[usize],
+    counter: &dyn TokenCounter,
+) -> Result<Option<usize>> {
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let mut left = 0usize;
+    let mut right = candidates.len();
+    let mut best = None;
+    while left < right {
+        let mid = left + (right - left) / 2;
+        let start_byte = candidates[mid];
+        let candidate = split_block_range_by_bytes(block, start_byte, end_byte);
+        let token_count = count_single_block_tokens(&candidate, counter)?;
+        if token_count <= overlap {
+            best = Some(start_byte);
+            right = mid;
+        } else {
+            left = mid + 1;
+        }
+    }
+
+    Ok(best)
 }
 
 fn sentence_end_token_indices(text: &str, spans: &[(usize, usize)]) -> Vec<usize> {
@@ -513,6 +707,7 @@ fn token_ends_clause(token: &str) -> bool {
     trimmed.ends_with(',') || trimmed.ends_with(';') || trimmed.ends_with(':')
 }
 
+#[cfg(test)]
 fn best_narrative_cut(
     candidates: &[(usize, NarrativeBoundary)],
     target_tokens: usize,
@@ -537,6 +732,7 @@ fn best_narrative_cut(
         .map(|(end_token, _)| end_token)
 }
 
+#[cfg(test)]
 fn score_narrative_cut(
     target_tokens: usize,
     start_token: usize,
@@ -927,9 +1123,80 @@ mod tests {
     #[test]
     fn whitespace_token_counter_counts_word_boundaries() {
         let counter = WhitespaceTokenCounter;
-        assert_eq!(counter.count(""), 0);
-        assert_eq!(counter.count("alpha"), 1);
-        assert_eq!(counter.count("alpha beta\tgamma\n\ndelta"), 4);
+        assert_eq!(counter.count("").expect("count empty"), 0);
+        assert_eq!(counter.count("alpha").expect("count token"), 1);
+        assert_eq!(
+            counter
+                .count("alpha beta\tgamma\n\ndelta")
+                .expect("count whitespace"),
+            4
+        );
+    }
+
+    struct SeparatorAwareCounter;
+
+    impl TokenCounter for SeparatorAwareCounter {
+        fn count(&self, text: &str) -> crate::Result<usize> {
+            Ok(text.split_whitespace().count() + text.matches("\n\n").count())
+        }
+    }
+
+    struct CharCountCounter;
+
+    impl TokenCounter for CharCountCounter {
+        fn count(&self, text: &str) -> crate::Result<usize> {
+            Ok(text.chars().count())
+        }
+    }
+
+    #[test]
+    fn chunk_document_with_counter_sizes_candidate_chunk_text_not_additive_blocks() {
+        let policy = ChunkPolicy {
+            target_tokens: 2,
+            soft_max_tokens: 2,
+            hard_max_tokens: 8,
+            boundary_overlap_tokens: 0,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let document = ExtractedDocument {
+            blocks: vec![
+                block_with(BlockKind::Paragraph, "alpha", 0, &[]),
+                block_with(BlockKind::Paragraph, "beta", 8, &[]),
+            ],
+            metadata: HashMap::new(),
+            title: None,
+        };
+
+        let chunks = chunk_document_with_counter(&document, &policy, &SeparatorAwareCounter)
+            .expect("chunk with separator-aware counter");
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].text, "alpha");
+        assert_eq!(chunks[1].text, "beta");
+    }
+
+    #[test]
+    fn chunk_document_with_counter_falls_back_to_char_boundaries_for_single_oversized_token() {
+        let policy = ChunkPolicy {
+            target_tokens: 4,
+            soft_max_tokens: 4,
+            hard_max_tokens: 4,
+            boundary_overlap_tokens: 0,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let document = ExtractedDocument {
+            blocks: vec![block_with(BlockKind::CodeFence, "abcdefghij", 0, &[])],
+            metadata: HashMap::new(),
+            title: None,
+        };
+
+        let chunks = chunk_document_with_counter(&document, &policy, &CharCountCounter)
+            .expect("chunk oversized single token");
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].text, "abcd");
+        assert_eq!(chunks[1].text, "efgh");
+        assert_eq!(chunks[2].text, "ij");
     }
 
     #[test]
@@ -997,7 +1264,8 @@ mod tests {
         };
         let counter = WhitespaceTokenCounter;
 
-        let chunks = chunk_document_with_counter(&document, &policy, &counter);
+        let chunks =
+            chunk_document_with_counter(&document, &policy, &counter).expect("chunk empty input");
         assert!(chunks.is_empty());
     }
 

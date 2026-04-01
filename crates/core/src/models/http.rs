@@ -14,6 +14,7 @@ pub(super) enum HttpOperation {
     Embedding,
     Reranking,
     ChatCompletion,
+    Tokenize,
 }
 
 impl HttpOperation {
@@ -22,6 +23,7 @@ impl HttpOperation {
             Self::Embedding => "embedding",
             Self::Reranking => "reranking",
             Self::ChatCompletion => "chat completion",
+            Self::Tokenize => "tokenize",
         }
     }
 }

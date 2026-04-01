@@ -965,7 +965,35 @@ impl Engine {
             }
 
             let policy = resolve_policy(&self.config.chunking, Some(extractor.profile_key()), None);
-            let final_chunks = chunk_document(&extracted, &policy);
+            let final_chunks = match self.embedding_document_sizer.as_ref() {
+                Some(sizer) => {
+                    let sizer_counter = EmbeddingDocumentSizerCounter(sizer.as_ref());
+                    match chunk_document_with_counter(&extracted, &policy, &sizer_counter) {
+                        Ok(chunks) => chunks,
+                        Err(err) => {
+                            let detail = format!("chunking failed: {err}");
+                            failed_docs.insert(update_doc_key(
+                                &target.space,
+                                &target.collection.path,
+                                &relative_path,
+                            ));
+                            push_update_decision(
+                                report,
+                                options,
+                                target,
+                                &relative_path,
+                                UpdateDecisionKind::ExtractFailed,
+                                Some(detail.clone()),
+                            );
+                            report
+                                .errors
+                                .push(file_error(Some(entry.path().to_path_buf()), detail));
+                            continue;
+                        }
+                    }
+                }
+                None => chunk_document(&extracted, &policy),
+            };
 
             let chunk_inserts = final_chunks
                 .iter()
@@ -1111,6 +1139,14 @@ struct UpdateDocKey {
     space: String,
     collection_path: std::path::PathBuf,
     path: String,
+}
+
+struct EmbeddingDocumentSizerCounter<'a>(&'a dyn crate::models::EmbeddingDocumentSizer);
+
+impl crate::ingest::chunk::TokenCounter for EmbeddingDocumentSizerCounter<'_> {
+    fn count(&self, text: &str) -> Result<usize> {
+        self.0.count_document_tokens(text)
+    }
 }
 
 #[derive(Debug, Clone)]

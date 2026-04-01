@@ -6,7 +6,7 @@ use std::time::Instant;
 use crate::config;
 use crate::config::Config;
 use crate::error::CoreError;
-use crate::ingest::chunk::{chunk_document, resolve_policy};
+use crate::ingest::chunk::{chunk_document, chunk_document_with_counter, resolve_policy};
 use crate::ingest::extract::default_registry;
 use crate::lock::{LockMode, OperationLock};
 use crate::models;
@@ -55,6 +55,7 @@ pub struct Engine {
     storage: Storage,
     config: Config,
     embedder: Option<Arc<dyn models::Embedder>>,
+    embedding_document_sizer: Option<Arc<dyn models::EmbeddingDocumentSizer>>,
     reranker: Option<Arc<dyn models::Reranker>>,
     expander: Option<Arc<dyn models::Expander>>,
 }
@@ -111,6 +112,7 @@ impl Engine {
             storage,
             config,
             embedder: built_models.embedder,
+            embedding_document_sizer: built_models.embedding_document_sizer,
             reranker: built_models.reranker,
             expander: built_models.expander,
         })
@@ -144,6 +146,7 @@ impl Engine {
             storage,
             config,
             embedder: embedder.or(built_models.embedder),
+            embedding_document_sizer: built_models.embedding_document_sizer,
             reranker: reranker.or(built_models.reranker),
             expander: expander.or(built_models.expander),
         }
