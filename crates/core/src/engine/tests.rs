@@ -65,6 +65,28 @@ impl crate::models::Embedder for SelectiveFailureEmbedder {
 }
 
 #[derive(Default)]
+struct PanicEmbedder;
+
+impl crate::models::Embedder for PanicEmbedder {
+    fn embed_batch(
+        &self,
+        _kind: crate::models::EmbeddingInputKind,
+        _texts: &[String],
+    ) -> crate::Result<Vec<Vec<f32>>> {
+        panic!("embedder should not be called when preflight rejects the batch");
+    }
+}
+
+#[derive(Default)]
+struct CharCountDocumentSizer;
+
+impl crate::models::EmbeddingDocumentSizer for CharCountDocumentSizer {
+    fn count_document_tokens(&self, text: &str) -> crate::Result<usize> {
+        Ok(text.chars().count())
+    }
+}
+
+#[derive(Default)]
 struct DeterministicReranker;
 
 impl crate::models::Reranker for DeterministicReranker {
@@ -143,6 +165,22 @@ fn test_engine_with_embedder(embedder: Arc<dyn crate::models::Embedder>) -> Engi
     let storage = Storage::new(&cache_dir).expect("create storage");
     let config = base_test_config(config_dir, cache_dir);
     Engine::from_parts_with_embedder(storage, config, Some(embedder))
+}
+
+fn test_engine_with_embedding_runtime(
+    embedder: Arc<dyn crate::models::Embedder>,
+    document_sizer: Arc<dyn crate::models::EmbeddingDocumentSizer>,
+    chunking: ChunkingConfig,
+) -> Engine {
+    let root = tempdir().expect("create temp root");
+    let root_path = root.path().to_path_buf();
+    std::mem::forget(root);
+    let config_dir = root_path.join("config");
+    let cache_dir = root_path.join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+    let mut config = base_test_config(config_dir, cache_dir);
+    config.chunking = chunking;
+    Engine::from_parts_with_embedding_runtime(storage, config, Some(embedder), Some(document_sizer))
 }
 
 fn test_engine_with_search_models(
@@ -3233,6 +3271,123 @@ fn update_isolates_buffered_embedding_failures() {
             .expect("bad file entry");
         assert!(good.embedded, "good file should be embedded");
         assert!(!bad.embedded, "bad file should remain pending");
+    });
+}
+
+#[test]
+fn update_rejects_oversized_embedding_payload_before_embedding() {
+    with_kbolt_space_env(None, || {
+        let mut chunking = ChunkingConfig::default();
+        chunking.defaults.target_tokens = 12;
+        chunking.defaults.soft_max_tokens = 12;
+        chunking.defaults.hard_max_tokens = 12;
+        chunking.defaults.boundary_overlap_tokens = 0;
+        let engine = test_engine_with_embedding_runtime(
+            Arc::new(PanicEmbedder),
+            Arc::new(CharCountDocumentSizer),
+            chunking,
+        );
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        write_text_file(&collection_path.join("guide.md"), "alpha\n\n\n\n\nbeta\n");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update with preflight rejection");
+
+        assert_eq!(report.scanned_docs, 1);
+        assert_eq!(report.added_docs, 1);
+        assert_eq!(report.failed_docs, 1);
+        assert_eq!(report.embedded_chunks, 0);
+        assert_eq!(report.errors.len(), 1);
+        assert!(
+            report.errors[0].error.contains("embed preflight failed"),
+            "unexpected error: {:?}",
+            report.errors
+        );
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(work_space.id))
+                .expect("count embedded chunks"),
+            0
+        );
+        let files = engine
+            .list_files(Some("work"), "api", None)
+            .expect("list files");
+        assert_eq!(files.len(), 1);
+        assert!(!files[0].embedded, "file should remain unembedded");
+    });
+}
+
+#[test]
+fn update_rejects_oversized_backlog_payload_before_embedding() {
+    with_kbolt_space_env(None, || {
+        let mut chunking = ChunkingConfig::default();
+        chunking.defaults.target_tokens = 12;
+        chunking.defaults.soft_max_tokens = 12;
+        chunking.defaults.hard_max_tokens = 12;
+        chunking.defaults.boundary_overlap_tokens = 0;
+        let engine = test_engine_with_embedding_runtime(
+            Arc::new(PanicEmbedder),
+            Arc::new(CharCountDocumentSizer),
+            chunking,
+        );
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        write_text_file(&collection_path.join("guide.md"), "alpha\n\n\n\n\nbeta\n");
+
+        engine
+            .update(UpdateOptions {
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                no_embed: true,
+                dry_run: false,
+                verbose: false,
+            })
+            .expect("index without embeddings");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update backlog with preflight rejection");
+
+        assert_eq!(report.skipped_mtime_docs, 1);
+        assert_eq!(report.failed_docs, 1);
+        assert_eq!(report.embedded_chunks, 0);
+        assert_eq!(report.errors.len(), 1);
+        assert!(
+            report.errors[0].error.contains("embed preflight failed"),
+            "unexpected error: {:?}",
+            report.errors
+        );
+
+        let work_space = engine.storage().get_space("work").expect("get work space");
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(work_space.id))
+                .expect("count embedded chunks"),
+            0
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_usearch("work")
+                .expect("count usearch vectors"),
+            0
+        );
     });
 }
 

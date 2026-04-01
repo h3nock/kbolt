@@ -236,6 +236,21 @@ impl Engine {
                 if text.trim().is_empty() {
                     text = " ".to_string();
                 }
+                let max_document_tokens = match self.chunk_policy_for_path(&full_path) {
+                    Ok(policy) => effective_chunk_hard_max(&policy),
+                    Err(err) => {
+                        report.errors.push(file_error(
+                            Some(full_path.clone()),
+                            format!("embed preflight policy resolution failed: {err}"),
+                        ));
+                        failed_docs.insert(update_doc_key(
+                            &record.space_name,
+                            &record.collection_path,
+                            &record.doc_path,
+                        ));
+                        continue;
+                    }
+                };
 
                 pending.push(PendingChunkEmbedding {
                     chunk_id: record.chunk_id,
@@ -247,6 +262,7 @@ impl Engine {
                     space_name: record.space_name,
                     path: full_path,
                     text,
+                    max_document_tokens,
                 });
             }
 
@@ -311,6 +327,16 @@ impl Engine {
             return Ok(EmbeddedPendingBatch::default());
         }
 
+        let mut failed_chunk_ids = Vec::new();
+        let pending =
+            self.preflight_pending_embeddings(pending, report, failed_docs, &mut failed_chunk_ids)?;
+        if pending.is_empty() {
+            return Ok(EmbeddedPendingBatch {
+                embeddings: Vec::new(),
+                failed_chunk_ids,
+            });
+        }
+
         let texts = pending
             .iter()
             .map(|embedding| embedding.text.clone())
@@ -334,16 +360,21 @@ impl Engine {
                     .collect::<Vec<_>>();
                 Ok(EmbeddedPendingBatch {
                     embeddings,
-                    failed_chunk_ids: Vec::new(),
+                    failed_chunk_ids,
                 })
             }
-            Err(err) => self.split_pending_embedding_batch(
-                embedder,
-                pending,
-                report,
-                failed_docs,
-                err.to_string(),
-            ),
+            Err(err) => self
+                .split_pending_embedding_batch(
+                    embedder,
+                    pending,
+                    report,
+                    failed_docs,
+                    err.to_string(),
+                )
+                .map(|mut result| {
+                    result.failed_chunk_ids.extend(failed_chunk_ids);
+                    result
+                }),
         }
     }
 
@@ -420,6 +451,62 @@ impl Engine {
         self.storage.insert_embeddings(&embedding_rows)?;
         report.embedded_chunks = report.embedded_chunks.saturating_add(embedding_rows.len());
         Ok(())
+    }
+
+    fn preflight_pending_embeddings(
+        &self,
+        pending: Vec<PendingChunkEmbedding>,
+        report: &mut UpdateReport,
+        failed_docs: &mut HashSet<UpdateDocKey>,
+        failed_chunk_ids: &mut Vec<i64>,
+    ) -> Result<Vec<PendingChunkEmbedding>> {
+        let Some(sizer) = self.embedding_document_sizer.as_ref() else {
+            return Ok(pending);
+        };
+
+        let mut accepted = Vec::with_capacity(pending.len());
+        for embedding in pending {
+            match sizer.count_document_tokens(&embedding.text) {
+                Ok(token_count) if token_count <= embedding.max_document_tokens => {
+                    accepted.push(embedding);
+                }
+                Ok(token_count) => {
+                    report.errors.push(file_error(
+                        Some(embedding.path.clone()),
+                        format!(
+                            "embed preflight failed: payload has {token_count} tokens, exceeding hard_max_tokens {}",
+                            embedding.max_document_tokens
+                        ),
+                    ));
+                    failed_docs.insert(embedding.doc_key);
+                    failed_chunk_ids.push(embedding.chunk_id);
+                }
+                Err(err) => {
+                    report.errors.push(file_error(
+                        Some(embedding.path.clone()),
+                        format!("embed preflight token count failed: {err}"),
+                    ));
+                    failed_docs.insert(embedding.doc_key);
+                    failed_chunk_ids.push(embedding.chunk_id);
+                }
+            }
+        }
+
+        Ok(accepted)
+    }
+
+    fn chunk_policy_for_path(&self, path: &Path) -> Result<crate::config::ChunkPolicy> {
+        let extractor = default_registry().resolve_for_path(path).ok_or_else(|| {
+            KboltError::InvalidInput(format!(
+                "no extractor available for embedding preflight path {}",
+                path.display()
+            ))
+        })?;
+        Ok(resolve_policy(
+            &self.config.chunking,
+            Some(extractor.profile_key()),
+            None,
+        ))
     }
 
     fn replay_fts_dirty_documents(
@@ -965,6 +1052,7 @@ impl Engine {
             }
 
             let policy = resolve_policy(&self.config.chunking, Some(extractor.profile_key()), None);
+            let max_document_tokens = effective_chunk_hard_max(&policy);
             let final_chunks = match self.embedding_document_sizer.as_ref() {
                 Some(sizer) => {
                     let sizer_counter = EmbeddingDocumentSizerCounter(sizer.as_ref());
@@ -1026,6 +1114,7 @@ impl Engine {
                             space_name: target.space.clone(),
                             path: entry.path().to_path_buf(),
                             text,
+                            max_document_tokens,
                         });
                     }
                     if pending_embeddings.len() >= 64 {
@@ -1126,6 +1215,7 @@ struct PendingChunkEmbedding {
     space_name: String,
     path: std::path::PathBuf,
     text: String,
+    max_document_tokens: usize,
 }
 
 #[derive(Default)]
@@ -1257,4 +1347,12 @@ fn update_doc_key(space: &str, collection_path: &Path, path: &str) -> UpdateDocK
         collection_path: collection_path.to_path_buf(),
         path: path.to_string(),
     }
+}
+
+fn effective_chunk_hard_max(policy: &crate::config::ChunkPolicy) -> usize {
+    policy
+        .hard_max_tokens
+        .max(policy.soft_max_tokens)
+        .max(policy.target_tokens)
+        .max(1)
 }

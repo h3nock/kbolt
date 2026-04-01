@@ -129,7 +129,24 @@ impl Engine {
         config: Config,
         embedder: Option<Arc<dyn models::Embedder>>,
     ) -> Self {
-        Self::from_parts_with_models(storage, config, embedder, None, None)
+        Self::from_parts_with_inference(storage, config, embedder, None, None, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_parts_with_embedding_runtime(
+        storage: Storage,
+        config: Config,
+        embedder: Option<Arc<dyn models::Embedder>>,
+        embedding_document_sizer: Option<Arc<dyn models::EmbeddingDocumentSizer>>,
+    ) -> Self {
+        Self::from_parts_with_inference(
+            storage,
+            config,
+            embedder,
+            embedding_document_sizer,
+            None,
+            None,
+        )
     }
 
     #[cfg(test)]
@@ -140,13 +157,26 @@ impl Engine {
         reranker: Option<Arc<dyn models::Reranker>>,
         expander: Option<Arc<dyn models::Expander>>,
     ) -> Self {
+        Self::from_parts_with_inference(storage, config, embedder, None, reranker, expander)
+    }
+
+    #[cfg(test)]
+    fn from_parts_with_inference(
+        storage: Storage,
+        config: Config,
+        embedder: Option<Arc<dyn models::Embedder>>,
+        embedding_document_sizer: Option<Arc<dyn models::EmbeddingDocumentSizer>>,
+        reranker: Option<Arc<dyn models::Reranker>>,
+        expander: Option<Arc<dyn models::Expander>>,
+    ) -> Self {
         let built_models =
             models::build_inference_clients(&config).expect("build inference models");
         Self {
             storage,
             config,
             embedder: embedder.or(built_models.embedder),
-            embedding_document_sizer: built_models.embedding_document_sizer,
+            embedding_document_sizer: embedding_document_sizer
+                .or(built_models.embedding_document_sizer),
             reranker: reranker.or(built_models.reranker),
             expander: expander.or(built_models.expander),
         }

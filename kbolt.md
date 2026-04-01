@@ -140,7 +140,7 @@ Only `storage/`, `models/`, `config/`, and `engine/update_ops` touch the outside
 
 **Ownership** — Engine creates and holds as struct fields:
 - Engine -> Storage: creates at startup, holds for process lifetime
-- Engine -> Models role adapters: built at startup from Config (`Embedder`, `Reranker`, `Expander`)
+- Engine -> Models role adapters: built at startup from Config (`Embedder`, `EmbeddingDocumentSizer`, `Reranker`, `Expander`)
 - Engine -> Config: loads at startup via `config::load()`, holds for process lifetime
 
 **Delegation** — Engine dispatches into internal engine modules:
@@ -233,6 +233,7 @@ pub struct Engine {
     storage: Storage,
     config: Config,
     embedder: Option<Arc<dyn Embedder>>,
+    embedding_document_sizer: Option<Arc<dyn EmbeddingDocumentSizer>>,
     reranker: Option<Arc<dyn Reranker>>,
     expander: Option<Arc<dyn Expander>>,
 }
@@ -1408,7 +1409,14 @@ Each final chunk has two text views:
 Contextualized prefixes are deterministic and derived from indexed metadata (extracted document title only, heading path, selected frontmatter fields, code language, table header summary). Filename fallback titles are display-only and do not participate in semantic prefixing. Prefixes never mutate stored source spans.
 The retrieval text view is computed from source text + metadata at indexing/query time and is not persisted as a second chunks-table text column.
 
-Token counting: baseline V1 uses a deterministic whitespace token counter inside the chunker. Model-tokenizer-based counting is planned as a follow-up.
+Token counting:
+- when the embedder binding resolves to `llama_cpp_server`, chunk packing uses the provider's `/tokenize` endpoint as the document-token authority
+- the chunker still owns boundary selection, but candidate chunk text is evaluated in the embedder document-token space instead of whitespace counts
+- embedding preflight re-counts the actual payload just before `/v1/embeddings` and rejects oversized payloads locally instead of surfacing a backend 500
+- `openai_compatible` embedders do not yet expose an exact token-count capability through the gateway, so they continue to use the deterministic whitespace counter for chunk packing
+
+Operational requirement for local embedding deployments:
+- the `llama.cpp server` embedder must be launched with enough batch capacity to accept at least the configured `hard_max_tokens` document payloads; the tested local baseline is `-ub 2048` for `embeddinggemma`
 
 ---
 
@@ -1426,7 +1434,7 @@ Phase 0, Phase 1, Phase 2 backlog embedding, and reaping all operate on that res
 
 ### Concurrency Model
 
-Document-level ingestion is **single-threaded** in V1. Files are processed one at a time through scan → extract → chunk → SQLite → Tantivy. Embedding runs as a separate second pass after all FTS indexing is complete. The pass queries `get_unembedded_chunks()` in bounded batches (default: 64 chunks), which returns chunk metadata plus the file paths needed to read chunk text from disk. This two-phase design is simple, testable, and matches the `--no-embed` flag naturally (just skip phase 2). The extraction/chunking phase is fast (~1ms per file for text processing) — embedding is the bottleneck, and batching it efficiently matters more than parallelizing extraction.
+Document-level ingestion is **single-threaded** in V1. Files are processed one at a time through scan → extract → chunk → SQLite → Tantivy. Embedding runs as a separate second pass after all FTS indexing is complete. The pass queries `get_unembedded_chunks()` in bounded batches (default: 64 chunks), which returns chunk metadata plus the file paths needed to read chunk text from disk. For exact-size embedders, kbolt runs a token-count preflight on each pending payload before the batch call. This two-phase design is simple, testable, and matches the `--no-embed` flag naturally (just skip phase 2). The extraction/chunking phase is fast (~1ms per file for text processing) — embedding is the bottleneck, and batching it efficiently matters more than parallelizing extraction.
 
 Note: the `Mutex`/`RwLock` wrappers on Storage fields are justified by search parallelism (BM25 and dense retrieval run in parallel threads during search), not by ingest.
 

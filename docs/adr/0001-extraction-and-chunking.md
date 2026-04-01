@@ -44,6 +44,10 @@ Chunking uses a three-tier budget:
 - `soft_max_tokens`: tolerated overrun to preserve structural boundaries.
 - `hard_max_tokens`: absolute ceiling requiring split.
 
+For providers that expose exact embedding token counts, these budgets are interpreted in the
+embedder document-token space. When exact token counting is unavailable, the chunker falls back
+to the deterministic whitespace counter.
+
 Additional policy fields:
 
 - `boundary_overlap_tokens`: overlap only when a forced hard split occurs.
@@ -81,6 +85,11 @@ Markdown chunking:
    - code fence: blank-line boundaries, then fixed token windows
    - table: row groups with table-header carryover in retrieval text
 4. Apply `boundary_overlap_tokens` only in step 3 forced splits.
+
+For `llama.cpp server` embedders, the chunker asks the provider's `/tokenize` endpoint to
+evaluate candidate chunk text in the same token space used for embeddings. The later embedding
+phase re-checks the actual payload bytes before `/v1/embeddings` so byte-slice drift does not
+become a backend 500.
 
 Storage-level chunk kind is derived from block composition:
 
@@ -135,6 +144,7 @@ Positive:
 Tradeoffs:
 
 - More extractor and policy logic than a simple splitter.
+- Exact local token sizing adds extra provider calls during chunk packing and embedding preflight.
 - Additional testing required for markdown edge cases (tables, large code fences, malformed markdown).
 
 ## Non-goals for this ADR
