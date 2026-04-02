@@ -87,6 +87,19 @@ impl crate::models::EmbeddingDocumentSizer for CharCountDocumentSizer {
 }
 
 #[derive(Default)]
+struct SelectiveFailureDocumentSizer;
+
+impl crate::models::EmbeddingDocumentSizer for SelectiveFailureDocumentSizer {
+    fn count_document_tokens(&self, text: &str) -> crate::Result<usize> {
+        if text.contains("TOKENIZE_FAIL") {
+            return Err(KboltError::Inference("simulated tokenize failure".to_string()).into());
+        }
+
+        Ok(text.chars().count())
+    }
+}
+
+#[derive(Default)]
 struct DeterministicReranker;
 
 impl crate::models::Reranker for DeterministicReranker {
@@ -3392,6 +3405,293 @@ fn update_rejects_oversized_backlog_payload_before_embedding() {
 }
 
 #[test]
+fn update_preserves_existing_chunks_when_chunk_token_count_fails() {
+    with_kbolt_space_env(None, || {
+        let mut chunking = ChunkingConfig::default();
+        chunking.defaults.target_tokens = 32;
+        chunking.defaults.soft_max_tokens = 32;
+        chunking.defaults.hard_max_tokens = 32;
+        chunking.defaults.boundary_overlap_tokens = 0;
+        let engine = test_engine_with_embedding_runtime(
+            Arc::new(DeterministicEmbedder),
+            Arc::new(SelectiveFailureDocumentSizer),
+            chunking,
+        );
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("guide.md");
+        write_text_file(&file_path, "oldtoken body\n");
+
+        let first = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+        assert_eq!(first.added_docs, 1);
+        assert_eq!(first.failed_docs, 0);
+        assert!(
+            first.errors.is_empty(),
+            "unexpected errors: {:?}",
+            first.errors
+        );
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let original_doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.md")
+            .expect("query original document")
+            .expect("document exists");
+        let original_chunks = engine
+            .storage()
+            .get_chunks_for_document(original_doc.id)
+            .expect("load original chunks");
+        assert_eq!(original_chunks.len(), 1);
+        let original_chunk_ids = original_chunks
+            .iter()
+            .map(|chunk| chunk.id)
+            .collect::<Vec<_>>();
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        write_text_file(&file_path, "TOKENIZE_FAIL replacement\n");
+
+        let second = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update with token-count failure");
+        assert_eq!(second.scanned_docs, 1);
+        assert_eq!(second.updated_docs, 0);
+        assert_eq!(second.failed_docs, 1);
+        assert_eq!(second.errors.len(), 1);
+        assert!(
+            second.errors[0].error.contains("chunking failed"),
+            "unexpected errors: {:?}",
+            second.errors
+        );
+
+        let preserved_doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.md")
+            .expect("query preserved document")
+            .expect("document should still exist");
+        assert_eq!(preserved_doc.id, original_doc.id);
+        assert_eq!(preserved_doc.hash, original_doc.hash);
+        assert_eq!(preserved_doc.modified, original_doc.modified);
+
+        let preserved_chunks = engine
+            .storage()
+            .get_chunks_for_document(preserved_doc.id)
+            .expect("load preserved chunks");
+        let preserved_chunk_ids = preserved_chunks
+            .iter()
+            .map(|chunk| chunk.id)
+            .collect::<Vec<_>>();
+        assert_eq!(preserved_chunk_ids, original_chunk_ids);
+
+        let hits = engine
+            .storage()
+            .query_bm25("work", "oldtoken", &[("body", 1.0)], 10)
+            .expect("query preserved bm25");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk_id, original_chunk_ids[0]);
+    });
+}
+
+#[test]
+fn update_preserves_existing_chunks_when_preinsert_preflight_rejects_replacement() {
+    with_kbolt_space_env(None, || {
+        let mut chunking = ChunkingConfig::default();
+        chunking.defaults.target_tokens = 12;
+        chunking.defaults.soft_max_tokens = 12;
+        chunking.defaults.hard_max_tokens = 12;
+        chunking.defaults.boundary_overlap_tokens = 0;
+        let engine = test_engine_with_embedding_runtime(
+            Arc::new(DeterministicEmbedder),
+            Arc::new(CharCountDocumentSizer),
+            chunking,
+        );
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("guide.md");
+        write_text_file(&file_path, "alpha beta\n");
+
+        let first = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+        assert_eq!(first.added_docs, 1);
+        assert_eq!(first.failed_docs, 0);
+        assert!(
+            first.errors.is_empty(),
+            "unexpected errors: {:?}",
+            first.errors
+        );
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let original_doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.md")
+            .expect("query original document")
+            .expect("document exists");
+        let original_chunks = engine
+            .storage()
+            .get_chunks_for_document(original_doc.id)
+            .expect("load original chunks");
+        let original_chunk_ids = original_chunks
+            .iter()
+            .map(|chunk| chunk.id)
+            .collect::<Vec<_>>();
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        write_text_file(&file_path, "alpha\n\n\n\n\nbeta\n");
+
+        let second = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update with preflight rejection");
+        assert_eq!(second.scanned_docs, 1);
+        assert_eq!(second.updated_docs, 0);
+        assert_eq!(second.failed_docs, 1);
+        assert_eq!(second.errors.len(), 1);
+        assert!(
+            second.errors[0].error.contains("embed preflight failed"),
+            "unexpected errors: {:?}",
+            second.errors
+        );
+
+        let preserved_doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.md")
+            .expect("query preserved document")
+            .expect("document should still exist");
+        assert_eq!(preserved_doc.id, original_doc.id);
+        assert_eq!(preserved_doc.hash, original_doc.hash);
+        assert_eq!(preserved_doc.modified, original_doc.modified);
+
+        let preserved_chunks = engine
+            .storage()
+            .get_chunks_for_document(preserved_doc.id)
+            .expect("load preserved chunks");
+        let preserved_chunk_ids = preserved_chunks
+            .iter()
+            .map(|chunk| chunk.id)
+            .collect::<Vec<_>>();
+        assert_eq!(preserved_chunk_ids, original_chunk_ids);
+
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(space.id))
+                .expect("count embedded chunks after rejected replacement"),
+            original_chunks.len()
+        );
+    });
+}
+
+#[test]
+fn update_replaces_existing_chunks_after_successful_preinsert_preflight() {
+    with_kbolt_space_env(None, || {
+        let mut chunking = ChunkingConfig::default();
+        chunking.defaults.target_tokens = 32;
+        chunking.defaults.soft_max_tokens = 32;
+        chunking.defaults.hard_max_tokens = 32;
+        chunking.defaults.boundary_overlap_tokens = 0;
+        let engine = test_engine_with_embedding_runtime(
+            Arc::new(DeterministicEmbedder),
+            Arc::new(CharCountDocumentSizer),
+            chunking,
+        );
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("guide.md");
+        write_text_file(&file_path, "oldtoken body\n");
+
+        let first = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+        assert_eq!(first.added_docs, 1);
+        assert_eq!(first.failed_docs, 0);
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let original_doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.md")
+            .expect("query original document")
+            .expect("document exists");
+        let original_chunks = engine
+            .storage()
+            .get_chunks_for_document(original_doc.id)
+            .expect("load original chunks");
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        write_text_file(&file_path, "newtoken body\n");
+
+        let second = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("replacement update");
+        assert_eq!(second.updated_docs, 1);
+        assert_eq!(second.failed_docs, 0);
+        assert!(
+            second.errors.is_empty(),
+            "unexpected errors: {:?}",
+            second.errors
+        );
+
+        let updated_doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.md")
+            .expect("query updated document")
+            .expect("document should still exist");
+        assert_eq!(updated_doc.id, original_doc.id);
+        assert_ne!(updated_doc.hash, original_doc.hash);
+
+        let updated_chunks = engine
+            .storage()
+            .get_chunks_for_document(updated_doc.id)
+            .expect("load updated chunks");
+        let updated_chunk_ids = updated_chunks
+            .iter()
+            .map(|chunk| chunk.id)
+            .collect::<Vec<_>>();
+        assert_eq!(updated_chunks.len(), original_chunks.len());
+
+        let old_hits = engine
+            .storage()
+            .query_bm25("work", "oldtoken", &[("body", 1.0)], 10)
+            .expect("query old bm25 token");
+        assert!(old_hits.is_empty(), "stale oldtoken hit should be replaced");
+
+        let new_hits = engine
+            .storage()
+            .query_bm25("work", "newtoken", &[("body", 1.0)], 10)
+            .expect("query new bm25 token");
+        assert_eq!(new_hits.len(), 1);
+        assert_eq!(new_hits[0].chunk_id, updated_chunk_ids[0]);
+    });
+}
+
+#[test]
 fn update_isolates_backlog_embedding_failures() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_embedder(Arc::new(SelectiveFailureEmbedder));
@@ -3648,7 +3948,7 @@ fn update_markdown_uses_structural_chunking_and_heading_metadata() {
         std::fs::create_dir_all(&collection_path).expect("create collection dir");
         add_collection_fixture(&engine, "work", "api", collection_path.clone());
 
-        let repeated_words = std::iter::repeat_n("chunktoken", 900)
+        let repeated_words = std::iter::repeat_n("chunktoken", 1_300)
             .collect::<Vec<_>>()
             .join(" ");
         let markdown = format!("# Title\n\n{repeated_words}\n");

@@ -495,6 +495,53 @@ impl Engine {
         Ok(accepted)
     }
 
+    fn preflight_prepared_embeddings(
+        &self,
+        prepared: Vec<PreparedChunkEmbedding>,
+        report: &mut UpdateReport,
+        failed_docs: &mut HashSet<UpdateDocKey>,
+    ) -> Result<PreparedEmbeddingPreflight> {
+        let Some(sizer) = self.embedding_document_sizer.as_ref() else {
+            return Ok(PreparedEmbeddingPreflight {
+                accepted: prepared,
+                rejected_chunk_indexes: Vec::new(),
+            });
+        };
+
+        let mut preflight = PreparedEmbeddingPreflight {
+            accepted: Vec::with_capacity(prepared.len()),
+            rejected_chunk_indexes: Vec::new(),
+        };
+        for embedding in prepared {
+            match sizer.count_document_tokens(&embedding.text) {
+                Ok(token_count) if token_count <= embedding.max_document_tokens => {
+                    preflight.accepted.push(embedding);
+                }
+                Ok(token_count) => {
+                    report.errors.push(file_error(
+                        Some(embedding.path.clone()),
+                        format!(
+                            "embed preflight failed: payload has {token_count} tokens, exceeding hard_max_tokens {}",
+                            embedding.max_document_tokens
+                        ),
+                    ));
+                    failed_docs.insert(embedding.doc_key);
+                    preflight.rejected_chunk_indexes.push(embedding.chunk_index);
+                }
+                Err(err) => {
+                    report.errors.push(file_error(
+                        Some(embedding.path.clone()),
+                        format!("embed preflight token count failed: {err}"),
+                    ));
+                    failed_docs.insert(embedding.doc_key);
+                    preflight.rejected_chunk_indexes.push(embedding.chunk_index);
+                }
+            }
+        }
+
+        Ok(preflight)
+    }
+
     fn chunk_policy_for_path(&self, path: &Path) -> Result<crate::config::ChunkPolicy> {
         let extractor = default_registry().resolve_for_path(path).ok_or_else(|| {
             KboltError::InvalidInput(format!(
@@ -1034,23 +1081,6 @@ impl Engine {
                 title_source = DocumentTitleSource::Extracted;
             }
 
-            let doc_id = self.storage.upsert_document(
-                target.collection.id,
-                &relative_path,
-                &title,
-                title_source,
-                &hash,
-                &modified,
-            )?;
-
-            if let Some(doc) = existing.as_ref() {
-                let old_chunk_ids = self.storage.delete_chunks_for_document(doc.id)?;
-                if !old_chunk_ids.is_empty() {
-                    self.storage.delete_tantivy(&target.space, &old_chunk_ids)?;
-                    self.storage.delete_usearch(&target.space, &old_chunk_ids)?;
-                }
-            }
-
             let policy = resolve_policy(&self.config.chunking, Some(extractor.profile_key()), None);
             let max_document_tokens = effective_chunk_hard_max(&policy);
             let final_chunks = match self.embedding_document_sizer.as_ref() {
@@ -1083,6 +1113,7 @@ impl Engine {
                 None => chunk_document(&extracted, &policy),
             };
 
+            let doc_key = update_doc_key(&target.space, &target.collection.path, &relative_path);
             let chunk_inserts = final_chunks
                 .iter()
                 .enumerate()
@@ -1095,26 +1126,70 @@ impl Engine {
                 })
                 .collect::<Vec<_>>();
             let body = String::from_utf8_lossy(&bytes).into_owned();
+            let mut prepared_embeddings = Vec::new();
+            let mut rejected_chunk_indexes = Vec::new();
+            if !chunk_inserts.is_empty() && !options.no_embed && self.embedder.is_some() {
+                let preflight = self.preflight_prepared_embeddings(
+                    prepare_chunk_embeddings(
+                        &final_chunks,
+                        &bytes,
+                        &doc_key,
+                        target,
+                        entry.path(),
+                        max_document_tokens,
+                    ),
+                    report,
+                    failed_docs,
+                )?;
+                prepared_embeddings = preflight.accepted;
+                rejected_chunk_indexes = preflight.rejected_chunk_indexes;
+                if existing.is_some() && !rejected_chunk_indexes.is_empty() {
+                    push_update_decision(
+                        report,
+                        options,
+                        target,
+                        &relative_path,
+                        UpdateDecisionKind::ExtractFailed,
+                        Some("embed preflight failed".to_string()),
+                    );
+                    continue;
+                }
+            }
+
+            let doc_id = self.storage.upsert_document(
+                target.collection.id,
+                &relative_path,
+                &title,
+                title_source,
+                &hash,
+                &modified,
+            )?;
+
+            if let Some(doc) = existing.as_ref() {
+                let old_chunk_ids = self.storage.delete_chunks_for_document(doc.id)?;
+                if !old_chunk_ids.is_empty() {
+                    self.storage.delete_tantivy(&target.space, &old_chunk_ids)?;
+                    self.storage.delete_usearch(&target.space, &old_chunk_ids)?;
+                }
+            }
+
             let chunk_ids = self.storage.insert_chunks(doc_id, &chunk_inserts)?;
+            for chunk_index in rejected_chunk_indexes {
+                if let Some(chunk_id) = chunk_ids.get(chunk_index) {
+                    failed_chunk_ids.insert(*chunk_id);
+                }
+            }
 
             if !chunk_ids.is_empty() {
                 if !options.no_embed && self.embedder.is_some() {
-                    for (chunk_id, chunk) in chunk_ids.iter().zip(final_chunks.iter()) {
-                        let mut text = chunk_text_from_bytes(&bytes, chunk.offset, chunk.length);
-                        if text.trim().is_empty() {
-                            text = " ".to_string();
-                        }
+                    for prepared in prepared_embeddings {
                         pending_embeddings.push(PendingChunkEmbedding {
-                            chunk_id: *chunk_id,
-                            doc_key: update_doc_key(
-                                &target.space,
-                                &target.collection.path,
-                                &relative_path,
-                            ),
-                            space_name: target.space.clone(),
-                            path: entry.path().to_path_buf(),
-                            text,
-                            max_document_tokens,
+                            chunk_id: chunk_ids[prepared.chunk_index],
+                            doc_key: prepared.doc_key,
+                            space_name: prepared.space_name,
+                            path: prepared.path,
+                            text: prepared.text,
+                            max_document_tokens: prepared.max_document_tokens,
                         });
                     }
                     if pending_embeddings.len() >= 64 {
@@ -1209,6 +1284,22 @@ impl Engine {
 }
 
 #[derive(Debug)]
+struct PreparedChunkEmbedding {
+    chunk_index: usize,
+    doc_key: UpdateDocKey,
+    space_name: String,
+    path: std::path::PathBuf,
+    text: String,
+    max_document_tokens: usize,
+}
+
+#[derive(Debug, Default)]
+struct PreparedEmbeddingPreflight {
+    accepted: Vec<PreparedChunkEmbedding>,
+    rejected_chunk_indexes: Vec<usize>,
+}
+
+#[derive(Debug)]
 struct PendingChunkEmbedding {
     chunk_id: i64,
     doc_key: UpdateDocKey,
@@ -1237,6 +1328,34 @@ impl crate::ingest::chunk::TokenCounter for EmbeddingDocumentSizerCounter<'_> {
     fn count(&self, text: &str) -> Result<usize> {
         self.0.count_document_tokens(text)
     }
+}
+
+fn prepare_chunk_embeddings(
+    final_chunks: &[crate::ingest::chunk::FinalChunk],
+    bytes: &[u8],
+    doc_key: &UpdateDocKey,
+    target: &UpdateTarget,
+    path: &Path,
+    max_document_tokens: usize,
+) -> Vec<PreparedChunkEmbedding> {
+    final_chunks
+        .iter()
+        .enumerate()
+        .map(|(chunk_index, chunk)| {
+            let mut text = chunk_text_from_bytes(bytes, chunk.offset, chunk.length);
+            if text.trim().is_empty() {
+                text = " ".to_string();
+            }
+            PreparedChunkEmbedding {
+                chunk_index,
+                doc_key: doc_key.clone(),
+                space_name: target.space.clone(),
+                path: path.to_path_buf(),
+                text,
+                max_document_tokens,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
