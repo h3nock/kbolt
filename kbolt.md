@@ -1487,10 +1487,17 @@ Phase 1: Scan + Extract + Chunk + FTS Index (single-threaded, per file)
     │      └── Hash changed OR new file:
     │          Run extractor (Markdown/Code/Plaintext) → ExtractedBlocks
     │          Run file-independent chunker (target/soft_max/hard_max policy) → final Chunks
-    │          In a single SQLite transaction:
+    │          Build replacement chunk rows and embedding payloads in memory
+    │          If an exact document-token sizer exists:
+    │          │  preflight replacement embedding payloads before mutating storage
+    │          │  if an existing document has any rejected replacement payload, keep the old
+    │          │  chunks/Tantivy/USearch state intact, report the failure, and skip replacement
+    │          Persist the validated replacement:
     │          │  UPSERT document row (set fts_dirty = 1)
     │          │  DELETE old chunks for this document (CASCADE clears embeddings)
     │          │  INSERT new chunk rows
+    │          │  mark any rejected new-document chunk ids so the Phase 2 backlog pass does not
+    │          │  retry and double-report the same preflight failure
     │          delete_tantivy_by_doc(space, doc_id)  ← remove all old entries by document
     │          delete_usearch for old chunk_ids (if known) or by doc lookup
     │          Add new entries to Tantivy (chunk_id, doc_id, filepath, title, heading, body)
