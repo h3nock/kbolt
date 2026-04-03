@@ -160,9 +160,3 @@ Tradeoffs:
 3. Implement file-independent chunker in `core/ingest/chunk`.
 4. Update update/search flows to use neighbor expansion and contextual prefixes.
 5. Add unit and integration coverage for markdown edge cases and policy precedence.
-6. Add an explicit tokenizer contract for `openai_compatible` embedders so chunk packing and
-   embedding preflight do not rely on whitespace fallback when those deployments have strict token
-   limits.
-7. If an embedder role adapter introduces provider/model-specific query/document formatting, keep
-   the document-token sizer on the same formatted payload so chunking and preflight use the same
-   budget authority.
