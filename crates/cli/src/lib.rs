@@ -39,7 +39,7 @@ impl CliAdapter {
     }
 
     pub fn space_add(
-        &self,
+        &mut self,
         name: &str,
         description: Option<&str>,
         strict: bool,
@@ -154,12 +154,12 @@ impl CliAdapter {
         Ok(format!("space description updated: {name}"))
     }
 
-    pub fn space_rename(&self, old: &str, new: &str) -> Result<String> {
+    pub fn space_rename(&mut self, old: &str, new: &str) -> Result<String> {
         self.engine.rename_space(old, new)?;
         Ok(format!("space renamed: {old} -> {new}"))
     }
 
-    pub fn space_remove(&self, name: &str) -> Result<String> {
+    pub fn space_remove(&mut self, name: &str) -> Result<String> {
         self.engine.remove_space(name)?;
         if name == "default" {
             return Ok("default space cleared".to_string());
@@ -1876,7 +1876,7 @@ mod tests {
         with_isolated_xdg_dirs(|| {
             let root = tempdir().expect("create collection root");
             let engine = Engine::new(None).expect("create engine");
-            let adapter = CliAdapter::new(engine);
+            let mut adapter = CliAdapter::new(engine);
 
             let work_path = new_collection_dir(root.path(), "work-api");
             let notes_path = new_collection_dir(root.path(), "work-notes");

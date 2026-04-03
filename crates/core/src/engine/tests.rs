@@ -441,7 +441,7 @@ fn list_spaces_returns_default_and_added_spaces() {
 
 #[test]
 fn describe_rename_and_remove_space_delegate_to_storage() {
-    let engine = test_engine();
+    let mut engine = test_engine();
     engine.add_space("work", None).expect("add work");
 
     engine
@@ -471,6 +471,40 @@ fn describe_rename_and_remove_space_delegate_to_storage() {
         KboltError::SpaceNotFound { name } => assert_eq!(name, "team"),
         other => panic!("unexpected error: {other}"),
     }
+}
+
+#[test]
+fn remove_space_clears_matching_default_space() {
+    let mut engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+    engine
+        .set_default_space(Some("work"))
+        .expect("set default space");
+
+    engine.remove_space("work").expect("remove work");
+
+    assert_eq!(engine.config().default_space, None);
+    let loaded = crate::config::load(Some(engine.config().config_dir.as_path()))
+        .expect("reload config from disk");
+    assert_eq!(loaded.default_space, None);
+}
+
+#[test]
+fn rename_space_updates_matching_default_space() {
+    let mut engine = test_engine();
+    engine.add_space("work", None).expect("add work");
+    engine
+        .set_default_space(Some("work"))
+        .expect("set default space");
+
+    engine
+        .rename_space("work", "team")
+        .expect("rename default space");
+
+    assert_eq!(engine.config().default_space.as_deref(), Some("team"));
+    let loaded = crate::config::load(Some(engine.config().config_dir.as_path()))
+        .expect("reload config from disk");
+    assert_eq!(loaded.default_space.as_deref(), Some("team"));
 }
 
 #[test]

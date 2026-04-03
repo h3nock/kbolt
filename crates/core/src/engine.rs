@@ -189,14 +189,22 @@ impl Engine {
         self.build_space_info(&space)
     }
 
-    pub fn remove_space(&self, name: &str) -> Result<()> {
+    pub fn remove_space(&mut self, name: &str) -> Result<()> {
         let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
-        self.storage.delete_space(name)
+        self.storage.delete_space(name)?;
+        if self.config.default_space.as_deref() == Some(name) {
+            self.persist_default_space(None)?;
+        }
+        Ok(())
     }
 
-    pub fn rename_space(&self, old: &str, new: &str) -> Result<()> {
+    pub fn rename_space(&mut self, old: &str, new: &str) -> Result<()> {
         let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
-        self.storage.rename_space(old, new)
+        self.storage.rename_space(old, new)?;
+        if self.config.default_space.as_deref() == Some(old) {
+            self.persist_default_space(Some(new.to_string()))?;
+        }
+        Ok(())
     }
 
     pub fn describe_space(&self, name: &str, description: &str) -> Result<()> {
@@ -225,9 +233,18 @@ impl Engine {
             self.storage.get_space(space_name)?;
         }
 
-        self.config.default_space = name.map(ToString::to_string);
-        config::save(&self.config)?;
+        self.persist_default_space(name.map(ToString::to_string))?;
         Ok(self.config.default_space.clone())
+    }
+
+    fn persist_default_space(&mut self, default_space: Option<String>) -> Result<()> {
+        let previous = self.config.default_space.clone();
+        self.config.default_space = default_space;
+        if let Err(err) = config::save(&self.config) {
+            self.config.default_space = previous;
+            return Err(err);
+        }
+        Ok(())
     }
 
     pub fn add_collection(&self, req: AddCollectionRequest) -> Result<AddCollectionResult> {
