@@ -13,7 +13,13 @@ fn load_test_config(contents: &str) -> Config {
     let config_file = config_dir.join(CONFIG_FILENAME);
     fs::create_dir_all(&config_dir).expect("create config dir");
     fs::write(&config_file, contents).expect("write config file");
-    load_from_file(&config_file, &config_dir, &cache_dir).expect("load config")
+    load_from_file(
+        &config_file,
+        &config_dir,
+        &cache_dir,
+        ConfigLoadMode::CreateDefault,
+    )
+    .expect("load config")
 }
 
 fn load_test_config_error(contents: &str) -> String {
@@ -23,9 +29,14 @@ fn load_test_config_error(contents: &str) -> String {
     let config_file = config_dir.join(CONFIG_FILENAME);
     fs::create_dir_all(&config_dir).expect("create config dir");
     fs::write(&config_file, contents).expect("write config file");
-    load_from_file(&config_file, &config_dir, &cache_dir)
-        .expect_err("config should fail to load")
-        .to_string()
+    load_from_file(
+        &config_file,
+        &config_dir,
+        &cache_dir,
+        ConfigLoadMode::CreateDefault,
+    )
+    .expect_err("config should fail to load")
+    .to_string()
 }
 
 #[test]
@@ -35,7 +46,13 @@ fn load_creates_default_config_and_directories() {
     let cache_dir = tmp.path().join("cache");
     let config_file = config_dir.join(CONFIG_FILENAME);
 
-    let config = load_from_file(&config_file, &config_dir, &cache_dir).expect("load config");
+    let config = load_from_file(
+        &config_file,
+        &config_dir,
+        &cache_dir,
+        ConfigLoadMode::CreateDefault,
+    )
+    .expect("load config");
 
     assert!(config_file.exists());
     assert!(config_dir.is_dir());
@@ -175,8 +192,13 @@ embedder = "google/EmbeddingGemma-256"
     )
     .expect("write invalid config");
 
-    let err = load_from_file(&config_file, &config_dir, &cache_dir)
-        .expect_err("removed schema should fail");
+    let err = load_from_file(
+        &config_file,
+        &config_dir,
+        &cache_dir,
+        ConfigLoadMode::CreateDefault,
+    )
+    .expect_err("removed schema should fail");
     let message = err.to_string();
     assert!(
         message.contains("invalid config file"),

@@ -1,4 +1,5 @@
 pub mod config;
+pub mod doctor;
 pub mod engine;
 pub mod error;
 pub mod eval_import;

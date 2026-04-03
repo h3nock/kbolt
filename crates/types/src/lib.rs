@@ -1,3 +1,4 @@
+pub mod doctor;
 pub mod document;
 pub mod error;
 pub mod eval;
@@ -7,6 +8,7 @@ pub mod search;
 pub mod space;
 pub mod status;
 
+pub use doctor::{DoctorCheck, DoctorCheckStatus, DoctorReport, DoctorSetupStatus};
 pub use document::{
     DocumentResponse, FileEntry, GetRequest, Locator, MultiGetRequest, MultiGetResponse,
     OmitReason, OmittedFile,

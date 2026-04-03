@@ -7,9 +7,11 @@ use kbolt_cli::args::{
     SpaceCommand,
 };
 use kbolt_cli::{
-    format_eval_import_report, resolve_no_rerank_for_mode, CliAdapter, CliSearchOptions,
+    format_doctor_report, format_eval_import_report, resolve_no_rerank_for_mode, CliAdapter,
+    CliSearchOptions,
 };
 use kbolt_core::config;
+use kbolt_core::doctor;
 use kbolt_core::engine::Engine;
 use kbolt_core::error::CoreError;
 use kbolt_core::eval_import;
@@ -43,6 +45,9 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
 
     let cli = Cli::try_parse_from(argv)?;
     ensure_supported_output_format(cli.format, &cli.command)?;
+    if handle_doctor(&cli)? {
+        return Ok(());
+    }
     if handle_eval_import(&cli)? {
         return Ok(());
     }
@@ -63,6 +68,7 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
     let print_message = |line: &str| emit_message_output(output_format, line);
 
     match cli.command {
+        Command::Doctor => unreachable!("doctor command handled before engine setup"),
         Command::Space(space) => match space.command {
             SpaceCommand::Add {
                 name,
@@ -445,6 +451,25 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
     }
 
     Ok(())
+}
+
+fn handle_doctor(cli: &Cli) -> std::result::Result<bool, RunError> {
+    if !matches!(cli.command, Command::Doctor) {
+        return Ok(false);
+    }
+
+    let report = doctor::run(None);
+    if cli.format == OutputFormat::Json {
+        emit_structured_output(&report)?;
+    } else {
+        emit_text_output(cli.format, &format_doctor_report(&report));
+    }
+
+    if !report.ready {
+        std::process::exit(1);
+    }
+
+    Ok(true)
 }
 
 fn handle_eval_import(cli: &Cli) -> std::result::Result<bool, RunError> {

@@ -28,6 +28,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    Doctor,
     Space(SpaceArgs),
     Collection(CollectionArgs),
     Ignore(IgnoreArgs),
@@ -330,6 +331,12 @@ mod tests {
         assert_eq!(parsed.format, OutputFormat::Cli);
         let parsed = parse(["kbolt", "--format", "json", "status"]);
         assert_eq!(parsed.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_doctor_command() {
+        let parsed = parse(["kbolt", "doctor"]);
+        assert!(matches!(parsed.command, Command::Doctor));
     }
 
     #[test]

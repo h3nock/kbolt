@@ -423,11 +423,33 @@ pub fn load(config_path: Option<&Path>) -> Result<Config> {
     let cache_dir = default_cache_dir()?;
     let config_file = config_dir.join(CONFIG_FILENAME);
 
-    load_from_file(&config_file, &config_dir, &cache_dir)
+    load_from_file(
+        &config_file,
+        &config_dir,
+        &cache_dir,
+        ConfigLoadMode::CreateDefault,
+    )
+}
+
+pub fn load_existing(config_path: Option<&Path>) -> Result<Config> {
+    let config_dir = resolve_config_dir(config_path)?;
+    let cache_dir = default_cache_dir()?;
+    let config_file = config_dir.join(CONFIG_FILENAME);
+
+    load_from_file(
+        &config_file,
+        &config_dir,
+        &cache_dir,
+        ConfigLoadMode::ExistingOnly,
+    )
 }
 
 pub fn default_config_file_path() -> Result<PathBuf> {
-    Ok(default_config_dir()?.join(CONFIG_FILENAME))
+    resolve_config_file_path(None)
+}
+
+pub fn resolve_config_file_path(config_path: Option<&Path>) -> Result<PathBuf> {
+    Ok(resolve_config_dir(config_path)?.join(CONFIG_FILENAME))
 }
 
 pub fn save(config: &Config) -> Result<()> {
@@ -487,24 +509,42 @@ fn default_cache_dir() -> Result<PathBuf> {
     Ok(base.join(APP_NAME))
 }
 
-fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Result<Config> {
-    fs::create_dir_all(config_dir)?;
-    fs::create_dir_all(cache_dir)?;
+fn load_from_file(
+    config_file: &Path,
+    config_dir: &Path,
+    cache_dir: &Path,
+    mode: ConfigLoadMode,
+) -> Result<Config> {
+    match mode {
+        ConfigLoadMode::CreateDefault => {
+            fs::create_dir_all(config_dir)?;
+            fs::create_dir_all(cache_dir)?;
 
-    if !config_file.exists() {
-        let default_config = Config {
-            config_dir: config_dir.to_path_buf(),
-            cache_dir: cache_dir.to_path_buf(),
-            default_space: None,
-            providers: HashMap::new(),
-            roles: RoleBindingsConfig::default(),
-            reaping: ReapingConfig {
-                days: DEFAULT_REAP_DAYS,
-            },
-            chunking: ChunkingConfig::default(),
-            ranking: RankingConfig::default(),
-        };
-        save(&default_config)?;
+            if !config_file.exists() {
+                let default_config = Config {
+                    config_dir: config_dir.to_path_buf(),
+                    cache_dir: cache_dir.to_path_buf(),
+                    default_space: None,
+                    providers: HashMap::new(),
+                    roles: RoleBindingsConfig::default(),
+                    reaping: ReapingConfig {
+                        days: DEFAULT_REAP_DAYS,
+                    },
+                    chunking: ChunkingConfig::default(),
+                    ranking: RankingConfig::default(),
+                };
+                save(&default_config)?;
+            }
+        }
+        ConfigLoadMode::ExistingOnly => {
+            if !config_file.exists() {
+                return Err(KboltError::Config(format!(
+                    "config file not found: {}",
+                    config_file.display()
+                ))
+                .into());
+            }
+        }
     }
 
     let raw = fs::read_to_string(config_file)?;
@@ -531,6 +571,12 @@ fn load_from_file(config_file: &Path, config_dir: &Path, cache_dir: &Path) -> Re
         chunking: file_config.chunking,
         ranking: file_config.ranking,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigLoadMode {
+    CreateDefault,
+    ExistingOnly,
 }
 
 fn validate_chunking(chunking: &ChunkingConfig) -> Result<()> {

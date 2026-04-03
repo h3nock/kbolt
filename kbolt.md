@@ -883,8 +883,8 @@ Extraction/chunking remain in `core/src/ingest/` and are invoked from `engine/up
 // config/mod.rs
 
 pub struct Config {
-    pub config_dir: PathBuf,               // ~/.config/kbolt/
-    pub cache_dir: PathBuf,                // ~/.cache/kbolt/
+    pub config_dir: PathBuf,               // dirs::config_dir()/kbolt
+    pub cache_dir: PathBuf,                // dirs::cache_dir()/kbolt
     pub default_space: Option<String>,
     pub providers: HashMap<String, ProviderProfileConfig>,
     pub roles: RoleBindingsConfig,
@@ -1001,7 +1001,7 @@ pub fn load(config_path: Option<&Path>) -> Result<Config>;
 pub fn save(config: &Config) -> Result<()>;
 ```
 
-`load` reads `~/.config/kbolt/index.toml` (or creates it with defaults if missing). `save` writes back to disk. Config is loaded once at Engine construction time and held as a struct field. Adapter commands that modify config (like `kbolt space default`) call `save` after mutation.
+`load` reads `dirs::config_dir()/kbolt/index.toml` (or creates it with defaults if missing). `save` writes back to disk. Config is loaded once at Engine construction time and held as a struct field. Adapter commands that modify config (like `kbolt space default`) call `save` after mutation. `kbolt doctor` uses a non-mutating existing-config loader so it can report missing or invalid setup without creating a default config as a side effect.
 
 ### Models API
 
@@ -1950,6 +1950,9 @@ INDEXING
 MODELS
   kbolt models list                 Show configured role bindings and provider readiness
 
+DIAGNOSTICS
+  kbolt doctor                      Check config, storage, provider readiness, and role smoke tests
+
 EVALUATION
   kbolt eval run                    Run the default evaluation suite
     --file <path>                  Run a specific eval manifest instead of ~/.config/kbolt/eval.toml
@@ -2021,7 +2024,7 @@ In the provider-profile architecture, kbolt does not own local model artifact do
 
 Remote inference uses `openai_compatible` provider profiles. Different roles may bind to different remote deployments without changing engine/search code.
 
-`kbolt models list` reports configured role bindings plus endpoint readiness. Update/collection-add guidance now points users to configure role bindings or opt out of embedding when appropriate.
+`kbolt models list` reports configured role bindings plus endpoint readiness. `kbolt doctor` adds a config-driven setup report with timings, storage checks, and role-level smoke tests. Update/collection-add guidance now points users to configure role bindings or opt out of embedding when appropriate.
 
 ---
 

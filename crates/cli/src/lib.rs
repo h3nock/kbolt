@@ -6,13 +6,13 @@ use kbolt_core::engine::Engine;
 use kbolt_core::Result;
 use kbolt_types::{
     ActiveSpaceSource, AddCollectionRequest, AddCollectionResult, AddScheduleRequest,
-    EvalImportReport, EvalRunReport, GetRequest, InitialIndexingBlock, InitialIndexingOutcome,
-    KboltError, Locator, ModelInfo, MultiGetRequest, OmitReason, RemoveScheduleRequest,
-    ScheduleAddResponse, ScheduleBackend, ScheduleInterval, ScheduleIntervalUnit,
-    ScheduleRunResult, ScheduleScope, ScheduleState, ScheduleStatusResponse, ScheduleTrigger,
-    ScheduleWeekday, SearchMode, SearchPipeline, SearchPipelineNotice, SearchPipelineStep,
-    SearchPipelineUnavailableReason, SearchRequest, UpdateDecision, UpdateDecisionKind,
-    UpdateOptions, UpdateReport,
+    DoctorCheckStatus, DoctorReport, DoctorSetupStatus, EvalImportReport, EvalRunReport,
+    GetRequest, InitialIndexingBlock, InitialIndexingOutcome, KboltError, Locator, ModelInfo,
+    MultiGetRequest, OmitReason, RemoveScheduleRequest, ScheduleAddResponse, ScheduleBackend,
+    ScheduleInterval, ScheduleIntervalUnit, ScheduleRunResult, ScheduleScope, ScheduleState,
+    ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode, SearchPipeline,
+    SearchPipelineNotice, SearchPipelineStep, SearchPipelineUnavailableReason, SearchRequest,
+    UpdateDecision, UpdateDecisionKind, UpdateOptions, UpdateReport,
 };
 
 pub struct CliAdapter {
@@ -767,6 +767,56 @@ impl CliAdapter {
     }
 }
 
+pub fn format_doctor_report(report: &DoctorReport) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "setup: {}",
+        format_doctor_setup_status(report.setup_status)
+    ));
+    lines.push(format!("ready: {}", report.ready));
+    if let Some(path) = report.config_file.as_ref() {
+        lines.push(format!("config_file: {}", path.display()));
+    }
+    if let Some(path) = report.config_dir.as_ref() {
+        lines.push(format!("config_dir: {}", path.display()));
+    }
+    if let Some(path) = report.cache_dir.as_ref() {
+        lines.push(format!("cache_dir: {}", path.display()));
+    }
+    lines.push("checks:".to_string());
+    for check in &report.checks {
+        lines.push(format!(
+            "- [{}] {} {} ({}ms): {}",
+            format_doctor_check_status(check.status),
+            check.scope,
+            check.id,
+            check.elapsed_ms,
+            check.message
+        ));
+        if let Some(fix) = check.fix.as_deref() {
+            lines.push(format!("  fix: {fix}"));
+        }
+    }
+    lines.join("\n")
+}
+
+fn format_doctor_setup_status(status: DoctorSetupStatus) -> &'static str {
+    match status {
+        DoctorSetupStatus::ConfigMissing => "config_missing",
+        DoctorSetupStatus::ConfigInvalid => "config_invalid",
+        DoctorSetupStatus::NotConfigured => "not_configured",
+        DoctorSetupStatus::Configured => "configured",
+    }
+}
+
+fn format_doctor_check_status(status: DoctorCheckStatus) -> &'static str {
+    match status {
+        DoctorCheckStatus::Pass => "PASS",
+        DoctorCheckStatus::Warn => "WARN",
+        DoctorCheckStatus::Fail => "FAIL",
+    }
+}
+
 fn format_search_mode(mode: &SearchMode) -> &'static str {
     match mode {
         SearchMode::Auto => "auto",
@@ -1309,18 +1359,20 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        format_collection_add_result, format_eval_import_report, format_eval_run_report,
-        format_schedule_add_response, format_schedule_status_response, parse_editor_command,
-        resolve_editor_command, resolve_no_rerank_for_mode, CliAdapter, CliSearchOptions,
+        format_collection_add_result, format_doctor_report, format_eval_import_report,
+        format_eval_run_report, format_schedule_add_response, format_schedule_status_response,
+        parse_editor_command, resolve_editor_command, resolve_no_rerank_for_mode, CliAdapter,
+        CliSearchOptions,
     };
     use kbolt_core::engine::Engine;
     use kbolt_types::{
-        AddCollectionRequest, AddCollectionResult, CollectionInfo, EvalImportReport, EvalJudgment,
-        EvalModeReport, EvalQueryReport, EvalRunReport, InitialIndexingBlock,
-        InitialIndexingOutcome, ScheduleAddResponse, ScheduleBackend, ScheduleDefinition,
-        ScheduleInterval, ScheduleIntervalUnit, ScheduleOrphan, ScheduleRunResult,
-        ScheduleRunState, ScheduleScope, ScheduleState, ScheduleStatusEntry,
-        ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode, UpdateReport,
+        AddCollectionRequest, AddCollectionResult, CollectionInfo, DoctorCheck, DoctorCheckStatus,
+        DoctorReport, DoctorSetupStatus, EvalImportReport, EvalJudgment, EvalModeReport,
+        EvalQueryReport, EvalRunReport, InitialIndexingBlock, InitialIndexingOutcome,
+        ScheduleAddResponse, ScheduleBackend, ScheduleDefinition, ScheduleInterval,
+        ScheduleIntervalUnit, ScheduleOrphan, ScheduleRunResult, ScheduleRunState, ScheduleScope,
+        ScheduleState, ScheduleStatusEntry, ScheduleStatusResponse, ScheduleTrigger,
+        ScheduleWeekday, SearchMode, UpdateReport,
     };
 
     struct EnvRestore {
@@ -1525,6 +1577,50 @@ mod tests {
                 "unexpected output: {output}"
             );
         });
+    }
+
+    #[test]
+    fn doctor_report_formats_status_checks_and_fixes() {
+        let output = format_doctor_report(&DoctorReport {
+            setup_status: DoctorSetupStatus::Configured,
+            config_file: Some(PathBuf::from("/tmp/kbolt/index.toml")),
+            config_dir: Some(PathBuf::from("/tmp/kbolt")),
+            cache_dir: Some(PathBuf::from("/tmp/cache/kbolt")),
+            ready: false,
+            checks: vec![
+                DoctorCheck {
+                    id: "config.file_parses".to_string(),
+                    scope: "config".to_string(),
+                    status: DoctorCheckStatus::Pass,
+                    elapsed_ms: 2,
+                    message: "ok".to_string(),
+                    fix: None,
+                },
+                DoctorCheck {
+                    id: "roles.embedder.reachable".to_string(),
+                    scope: "roles.embedder".to_string(),
+                    status: DoctorCheckStatus::Fail,
+                    elapsed_ms: 17,
+                    message: "llama_cpp_server endpoint is unreachable".to_string(),
+                    fix: Some("Start the embedding server.".to_string()),
+                },
+            ],
+        });
+
+        assert!(output.contains("setup: configured"));
+        assert!(output.contains("ready: false"));
+        assert!(output.contains("config_file: /tmp/kbolt/index.toml"));
+        assert!(
+            output.contains("- [PASS] config config.file_parses (2ms): ok"),
+            "unexpected output: {output}"
+        );
+        assert!(
+            output.contains(
+                "- [FAIL] roles.embedder roles.embedder.reachable (17ms): llama_cpp_server endpoint is unreachable"
+            ),
+            "unexpected output: {output}"
+        );
+        assert!(output.contains("  fix: Start the embedding server."));
     }
 
     #[test]
