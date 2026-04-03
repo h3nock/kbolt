@@ -346,6 +346,17 @@ pub enum EmbeddingInputKind {
 }
 ```
 
+Current implementation follow-ups:
+- `HttpApiEmbedder` receives `EmbeddingInputKind` but currently sends the same raw text shape for
+  query and document embeddings. That is acceptable for symmetric embedders, but asymmetric or
+  instruction-tuned embedders may need provider/model-specific query-vs-document formatting in
+  the role adapter. If that formatting is added, the document token sizer must count the
+  post-formatting payload so chunking and preflight stay aligned.
+- Exact document-token sizing is currently implemented only for `llama_cpp_server` embedders via
+  `/tokenize`. `openai_compatible` embedders still use the deterministic whitespace counter for
+  chunk packing and skip exact preflight until the gateway exposes an explicit tokenizer source or
+  provider-specific token-count capability.
+
 ### Adapter Pattern (CLI and MCP)
 
 Both adapters follow the same pattern — thin translation layers between external interface and Engine:
@@ -1875,7 +1886,12 @@ Notes:
 - Native Google embeddings API support is intentionally deferred to V2.
 - Local inference profiles point at externally managed `llama.cpp server` deployments; kbolt does not download or supervise those server processes in V1.
 - Roles can bind to different deployments even when they share the same backend family, for example separate local embedding/reranking/chat endpoints or different remote OpenAI-compatible endpoints.
-- The embedder path still uses EmbeddingGemma query/document normalization internally; the reranker path still uses the Qwen3-style reranker contract; the expander path still generates plain query variants as JSON strings. Those are role-adapter behaviors, not user-configurable local runtime ownership.
+- Current HTTP embedders pass raw input text unchanged for both query and document embeddings.
+  Adding provider/model-specific query/document formatting is a tracked follow-up for asymmetric
+  embedding models.
+- The reranker path still uses the Qwen3-style reranker contract; the expander path still generates
+  plain query variants as JSON strings. Those are role-adapter behaviors, not user-configurable
+  local runtime ownership.
 
 ---
 

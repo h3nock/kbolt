@@ -170,3 +170,13 @@ presence_penalty = 0.5
 - remote vendor support remains extensible without changing the core schema
 - provider profiles and role bindings are the only authoritative inference schema
 - readiness/status is now deployment-oriented rather than artifact-oriented
+
+## Known Implementation Follow-ups
+
+- `HttpApiEmbedder` currently ignores `EmbeddingInputKind` and forwards raw text for both query
+  and document embeddings. That keeps the provider client simple, but models that require
+  asymmetric query/document instructions or prefixes need a provider/model-aware formatting layer
+  in the embedder role adapter.
+- Exact document-token sizing is currently available only for `llama_cpp_server` embedders via
+  `/tokenize`. `openai_compatible` embedders do not yet expose a tokenizer contract through the
+  gateway, so chunking falls back to deterministic whitespace counting for those deployments.
