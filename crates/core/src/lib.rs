@@ -5,6 +5,7 @@ pub mod error;
 pub mod eval_import;
 mod eval_store;
 pub mod ingest;
+pub mod local;
 mod lock;
 mod models;
 mod schedule_backend;

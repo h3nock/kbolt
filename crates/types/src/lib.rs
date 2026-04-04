@@ -3,6 +3,7 @@ pub mod document;
 pub mod error;
 pub mod eval;
 pub mod indexing;
+pub mod local;
 pub mod schedule;
 pub mod search;
 pub mod space;
@@ -19,6 +20,7 @@ pub use eval::{
     EvalQueryReport, EvalRunReport,
 };
 pub use indexing::{FileError, UpdateDecision, UpdateDecisionKind, UpdateOptions, UpdateReport};
+pub use local::{LocalAction, LocalReport, LocalServiceReport};
 pub use schedule::{
     AddScheduleRequest, RemoveScheduleRequest, RemoveScheduleSelector, ScheduleAddResponse,
     ScheduleBackend, ScheduleDefinition, ScheduleInterval, ScheduleIntervalUnit, ScheduleOrphan,

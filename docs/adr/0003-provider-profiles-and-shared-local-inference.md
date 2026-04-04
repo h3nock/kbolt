@@ -97,8 +97,10 @@ schema is authoritative.
 
 ### Let kbolt continue to own local model pulls and local runtime setup
 Rejected because it conflicts with the chosen local architecture. Once local inference is served
-by externally managed `llama.cpp server` deployments, kbolt should report readiness and bind
-roles, not download or supervise those models itself.
+by `llama.cpp server` deployments, kbolt should keep the inference boundary at HTTP provider
+profiles. Kbolt may still offer a convenience setup path that downloads default local models and
+launches managed `llama-server` processes, but inference code should continue to bind roles
+through provider profiles rather than rebuilding an in-process runtime.
 
 ### Force one remote vendor
 Rejected because remote providers already own serving/scheduling and users will have different

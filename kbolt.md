@@ -1873,7 +1873,7 @@ Collection-level chunking overrides are deferred in V1. When implemented, they w
 Notes:
 - Google embedding access through OpenAI-compatible endpoints is covered by `provider = "openai_compatible"` with the corresponding Google-compatible base URL.
 - Native Google embeddings API support is intentionally deferred to V2.
-- Local inference profiles point at externally managed `llama.cpp server` deployments; kbolt does not download or supervise those server processes in V1.
+- Local inference profiles may point at externally managed `llama.cpp server` deployments, or may be written by `kbolt setup local`, which downloads the default local models and starts managed `llama-server` processes for the default embedder/reranker path.
 - Roles can bind to different deployments even when they share the same backend family, for example separate local embedding/reranking/chat endpoints or different remote OpenAI-compatible endpoints.
 - The embedder path still uses EmbeddingGemma query/document normalization internally; the reranker path still uses the Qwen3-style reranker contract; the expander path still generates plain query variants as JSON strings. Those are role-adapter behaviors, not user-configurable local runtime ownership.
 
@@ -1953,6 +1953,13 @@ MODELS
 DIAGNOSTICS
   kbolt doctor                      Check config, storage, provider readiness, and role smoke tests
 
+SETUP
+  kbolt setup local                 Download default local models, start managed local servers, and write local provider bindings
+  kbolt local status                Show managed local service state, ports, pid files, and logs
+  kbolt local start                 Start configured managed local services
+  kbolt local stop                  Stop managed local services started by kbolt
+  kbolt local enable deep           Download and enable the optional local expander service
+
 EVALUATION
   kbolt eval run                    Run the default evaluation suite
     --file <path>                  Run a specific eval manifest instead of ~/.config/kbolt/eval.toml
@@ -2018,13 +2025,13 @@ Injected into LLM system prompt on connection:
 |---|---|---|---|---|
 | Embedding | embeddinggemma 300M | GGUF Q8 | ~314MB | `llama.cpp server` |
 | Reranker | Qwen3-Reranker 0.6B | GGUF Q8 | ~640MB | `llama.cpp server` |
-| Expander | Qwen3 1.7B | GGUF Q8 | ~1.7GB | `llama.cpp server` |
+| Expander | query expansion 1.7B | GGUF Q4_K_M | ~1.1GB | `llama.cpp server` |
 
-In the provider-profile architecture, kbolt does not own local model artifact download or process supervision. Local inference is served by one or more externally managed `llama.cpp server` deployments, and kbolt binds roles to those deployments through `providers.*` + `roles.*`.
+In the provider-profile architecture, local inference still crosses an HTTP boundary through `providers.*` + `roles.*`. The default convenience path is now `kbolt setup local`, which downloads the default local models into the kbolt cache, starts managed `llama-server` processes, and writes provider-role bindings into `index.toml`. Advanced users can still point profiles at their own externally managed `llama.cpp server` deployments.
 
 Remote inference uses `openai_compatible` provider profiles. Different roles may bind to different remote deployments without changing engine/search code.
 
-`kbolt models list` reports configured role bindings plus endpoint readiness. `kbolt doctor` adds a config-driven setup report with timings, storage checks, and role-level smoke tests. Update/collection-add guidance now points users to configure role bindings or opt out of embedding when appropriate.
+`kbolt models list` reports configured role bindings plus endpoint readiness. `kbolt doctor` adds a config-driven setup report with timings, storage checks, and role-level smoke tests. `kbolt local status/start/stop` manage only the default local services created by `kbolt setup local`; they do not adopt or stop unrelated `llama-server` processes.
 
 ---
 

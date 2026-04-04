@@ -2,26 +2,27 @@ use std::ffi::OsString;
 
 use clap::Parser;
 use kbolt_cli::args::{
-    Cli, CollectionCommand, Command, EvalCommand, EvalImportCommand, IgnoreCommand, ModelsCommand,
-    OutputFormat, ScheduleAddArgs, ScheduleCommand, ScheduleDayArg, ScheduleRemoveArgs,
-    SpaceCommand,
+    Cli, CollectionCommand, Command, EvalCommand, EvalImportCommand, IgnoreCommand, LocalCommand,
+    LocalFeature, ModelsCommand, OutputFormat, ScheduleAddArgs, ScheduleCommand, ScheduleDayArg,
+    ScheduleRemoveArgs, SetupCommand, SpaceCommand,
 };
 use kbolt_cli::{
-    format_doctor_report, format_eval_import_report, resolve_no_rerank_for_mode, CliAdapter,
-    CliSearchOptions,
+    format_doctor_report, format_eval_import_report, format_local_report,
+    resolve_no_rerank_for_mode, CliAdapter, CliSearchOptions,
 };
 use kbolt_core::config;
 use kbolt_core::doctor;
 use kbolt_core::engine::Engine;
 use kbolt_core::error::CoreError;
 use kbolt_core::eval_import;
+use kbolt_core::local;
 use kbolt_mcp::stdio;
 use kbolt_mcp::McpAdapter;
 use kbolt_types::{
-    ActiveSpace, AddScheduleRequest, CollectionInfo, FileEntry, GetRequest, KboltError, Locator,
-    ModelStatus, MultiGetRequest, RemoveScheduleRequest, RemoveScheduleSelector, ScheduleInterval,
-    ScheduleIntervalUnit, ScheduleScope, ScheduleTrigger, ScheduleWeekday, SearchMode,
-    SearchRequest, SpaceInfo, UpdateOptions,
+    ActiveSpace, AddScheduleRequest, CollectionInfo, FileEntry, GetRequest, KboltError,
+    LocalAction, LocalReport, Locator, ModelStatus, MultiGetRequest, RemoveScheduleRequest,
+    RemoveScheduleSelector, ScheduleInterval, ScheduleIntervalUnit, ScheduleScope, ScheduleTrigger,
+    ScheduleWeekday, SearchMode, SearchRequest, SpaceInfo, UpdateOptions,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -48,6 +49,9 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
     if handle_doctor(&cli)? {
         return Ok(());
     }
+    if handle_local_commands(&cli)? {
+        return Ok(());
+    }
     if handle_eval_import(&cli)? {
         return Ok(());
     }
@@ -69,6 +73,8 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
 
     match cli.command {
         Command::Doctor => unreachable!("doctor command handled before engine setup"),
+        Command::Setup(_) => unreachable!("setup command handled before engine setup"),
+        Command::Local(_) => unreachable!("local command handled before engine setup"),
         Command::Space(space) => match space.command {
             SpaceCommand::Add {
                 name,
@@ -466,6 +472,46 @@ fn handle_doctor(cli: &Cli) -> std::result::Result<bool, RunError> {
     }
 
     if !report.ready {
+        std::process::exit(1);
+    }
+
+    Ok(true)
+}
+
+fn local_command_succeeds(report: &LocalReport) -> bool {
+    match report.action {
+        LocalAction::Stop => true,
+        _ => report.ready,
+    }
+}
+
+fn handle_local_commands(cli: &Cli) -> std::result::Result<bool, RunError> {
+    let report = match &cli.command {
+        Command::Setup(setup) => match setup.command {
+            SetupCommand::Local => Some(local::setup_local(None)?),
+        },
+        Command::Local(local_args) => match local_args.command {
+            LocalCommand::Status => Some(local::local_status(None)?),
+            LocalCommand::Start => Some(local::start_local(None)?),
+            LocalCommand::Stop => Some(local::stop_local(None)?),
+            LocalCommand::Enable { feature } => match feature {
+                LocalFeature::Deep => Some(local::enable_deep(None)?),
+            },
+        },
+        _ => None,
+    };
+
+    let Some(report) = report else {
+        return Ok(false);
+    };
+
+    if cli.format == OutputFormat::Json {
+        emit_structured_output(&report)?;
+    } else {
+        emit_text_output(cli.format, &format_local_report(&report));
+    }
+
+    if !local_command_succeeds(&report) {
         std::process::exit(1);
     }
 
@@ -908,7 +954,7 @@ fn maybe_print_first_run_inference_hint(command: &Command, format: OutputFormat)
         config_file.exists(),
     ) {
         eprintln!(
-            "hint: configure [providers] and [roles.*] in {} to enable embedding, reranking, and expansion. keyword search works without provider bindings.",
+            "hint: run `kbolt setup local` for the default local path, or configure [providers] and [roles.*] in {} manually. keyword search works without provider bindings.",
             config_file.display()
         );
     }
@@ -931,7 +977,7 @@ fn stdin_stdout_are_tty() -> bool {
 fn with_update_model_missing_guidance(err: CoreError) -> CoreError {
     if is_model_not_available_error(&err) {
         return CoreError::Domain(KboltError::InvalidInput(format!(
-            "{err}. configure [roles.embedder] to an embedding provider profile in index.toml or re-run with `--no-embed`"
+            "{err}. run `kbolt setup local`, configure [roles.embedder] in index.toml, or re-run with `--no-embed`"
         )));
     }
     err
@@ -940,7 +986,7 @@ fn with_update_model_missing_guidance(err: CoreError) -> CoreError {
 fn with_collection_add_model_missing_guidance(err: CoreError) -> CoreError {
     if is_model_not_available_error(&err) {
         return CoreError::Domain(KboltError::InvalidInput(format!(
-            "{err}. configure [roles.embedder] to an embedding provider profile in index.toml or re-run with `--no-index`"
+            "{err}. run `kbolt setup local`, configure [roles.embedder] in index.toml, or re-run with `--no-index`"
         )));
     }
     err
@@ -955,10 +1001,10 @@ mod tests {
 
     use super::{
         ensure_eval_uses_local_scope, ensure_schedule_uses_local_scope,
-        ensure_supported_output_format, is_model_not_available_error, parse_internal_schedule_run,
-        parse_schedule_interval, render_error_output, render_message_output,
-        render_structured_output, requested_output_format_from_args, schedule_add_request,
-        schedule_remove_request, should_show_first_run_inference_hint,
+        ensure_supported_output_format, is_model_not_available_error, local_command_succeeds,
+        parse_internal_schedule_run, parse_schedule_interval, render_error_output,
+        render_message_output, render_structured_output, requested_output_format_from_args,
+        schedule_add_request, schedule_remove_request, should_show_first_run_inference_hint,
         with_collection_add_model_missing_guidance, with_update_model_missing_guidance,
         DefaultSpaceJsonResponse, IgnoreShowJsonResponse, RunError, INTERNAL_SCHEDULE_RUN_COMMAND,
     };
@@ -967,10 +1013,11 @@ mod tests {
     };
     use kbolt_core::error::CoreError;
     use kbolt_types::{
-        FileError, KboltError, RemoveScheduleSelector, ScheduleInterval, ScheduleIntervalUnit,
-        ScheduleScope, ScheduleTrigger, ScheduleWeekday, UpdateDecision, UpdateDecisionKind,
-        UpdateReport,
+        FileError, KboltError, LocalAction, LocalReport, RemoveScheduleSelector, ScheduleInterval,
+        ScheduleIntervalUnit, ScheduleScope, ScheduleTrigger, ScheduleWeekday, UpdateDecision,
+        UpdateDecisionKind, UpdateReport,
     };
+    use std::path::PathBuf;
 
     #[test]
     fn eval_rejects_top_level_space_flag() {
@@ -1207,6 +1254,36 @@ mod tests {
                 "default_space": "work",
             })
         );
+    }
+
+    #[test]
+    fn local_stop_is_success_even_when_services_end_stopped() {
+        let report = LocalReport {
+            action: LocalAction::Stop,
+            config_file: PathBuf::from("/tmp/index.toml"),
+            cache_dir: PathBuf::from("/tmp/cache"),
+            llama_server_path: None,
+            ready: false,
+            notes: Vec::new(),
+            services: Vec::new(),
+        };
+
+        assert!(local_command_succeeds(&report));
+    }
+
+    #[test]
+    fn local_status_requires_ready_state_for_success() {
+        let report = LocalReport {
+            action: LocalAction::Status,
+            config_file: PathBuf::from("/tmp/index.toml"),
+            cache_dir: PathBuf::from("/tmp/cache"),
+            llama_server_path: None,
+            ready: false,
+            notes: Vec::new(),
+            services: Vec::new(),
+        };
+
+        assert!(!local_command_succeeds(&report));
     }
 
     #[test]

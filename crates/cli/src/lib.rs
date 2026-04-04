@@ -7,12 +7,12 @@ use kbolt_core::Result;
 use kbolt_types::{
     ActiveSpaceSource, AddCollectionRequest, AddCollectionResult, AddScheduleRequest,
     DoctorCheckStatus, DoctorReport, DoctorSetupStatus, EvalImportReport, EvalRunReport,
-    GetRequest, InitialIndexingBlock, InitialIndexingOutcome, KboltError, Locator, ModelInfo,
-    MultiGetRequest, OmitReason, RemoveScheduleRequest, ScheduleAddResponse, ScheduleBackend,
-    ScheduleInterval, ScheduleIntervalUnit, ScheduleRunResult, ScheduleScope, ScheduleState,
-    ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode, SearchPipeline,
-    SearchPipelineNotice, SearchPipelineStep, SearchPipelineUnavailableReason, SearchRequest,
-    UpdateDecision, UpdateDecisionKind, UpdateOptions, UpdateReport,
+    GetRequest, InitialIndexingBlock, InitialIndexingOutcome, KboltError, LocalAction, LocalReport,
+    Locator, ModelInfo, MultiGetRequest, OmitReason, RemoveScheduleRequest, ScheduleAddResponse,
+    ScheduleBackend, ScheduleInterval, ScheduleIntervalUnit, ScheduleRunResult, ScheduleScope,
+    ScheduleState, ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode,
+    SearchPipeline, SearchPipelineNotice, SearchPipelineStep, SearchPipelineUnavailableReason,
+    SearchRequest, UpdateDecision, UpdateDecisionKind, UpdateOptions, UpdateReport,
 };
 
 pub struct CliAdapter {
@@ -800,12 +800,67 @@ pub fn format_doctor_report(report: &DoctorReport) -> String {
     lines.join("\n")
 }
 
+pub fn format_local_report(report: &LocalReport) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("action: {}", format_local_action(report.action)));
+    lines.push(format!("ready: {}", report.ready));
+    lines.push(format!("config_file: {}", report.config_file.display()));
+    lines.push(format!("cache_dir: {}", report.cache_dir.display()));
+    if let Some(path) = report.llama_server_path.as_ref() {
+        lines.push(format!("llama_server: {}", path.display()));
+    } else {
+        lines.push("llama_server: missing".to_string());
+    }
+    if !report.notes.is_empty() {
+        lines.push("notes:".to_string());
+        for note in &report.notes {
+            lines.push(format!("- {note}"));
+        }
+    }
+    lines.push("services:".to_string());
+    for service in &report.services {
+        lines.push(format!(
+            "- {}: {} | configured={} | enabled={} | managed={} | running={} | ready={} | model={} | endpoint={} | model_path={} | pid={} | pid_file={} | log_file={}",
+            service.name,
+            service.provider,
+            service.configured,
+            service.enabled,
+            service.managed,
+            service.running,
+            service.ready,
+            service.model,
+            service.endpoint,
+            service.model_path.display(),
+            service
+                .pid
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            service.pid_file.display(),
+            service.log_file.display()
+        ));
+        if let Some(issue) = service.issue.as_deref() {
+            lines.push(format!("  issue: {issue}"));
+        }
+    }
+    lines.join("\n")
+}
+
 fn format_doctor_setup_status(status: DoctorSetupStatus) -> &'static str {
     match status {
         DoctorSetupStatus::ConfigMissing => "config_missing",
         DoctorSetupStatus::ConfigInvalid => "config_invalid",
         DoctorSetupStatus::NotConfigured => "not_configured",
         DoctorSetupStatus::Configured => "configured",
+    }
+}
+
+fn format_local_action(action: LocalAction) -> &'static str {
+    match action {
+        LocalAction::Setup => "setup",
+        LocalAction::Start => "start",
+        LocalAction::Stop => "stop",
+        LocalAction::Status => "status",
+        LocalAction::EnableDeep => "enable_deep",
     }
 }
 
@@ -1360,16 +1415,16 @@ mod tests {
 
     use super::{
         format_collection_add_result, format_doctor_report, format_eval_import_report,
-        format_eval_run_report, format_schedule_add_response, format_schedule_status_response,
-        parse_editor_command, resolve_editor_command, resolve_no_rerank_for_mode, CliAdapter,
-        CliSearchOptions,
+        format_eval_run_report, format_local_report, format_schedule_add_response,
+        format_schedule_status_response, parse_editor_command, resolve_editor_command,
+        resolve_no_rerank_for_mode, CliAdapter, CliSearchOptions,
     };
     use kbolt_core::engine::Engine;
     use kbolt_types::{
         AddCollectionRequest, AddCollectionResult, CollectionInfo, DoctorCheck, DoctorCheckStatus,
         DoctorReport, DoctorSetupStatus, EvalImportReport, EvalJudgment, EvalModeReport,
-        EvalQueryReport, EvalRunReport, InitialIndexingBlock, InitialIndexingOutcome,
-        ScheduleAddResponse, ScheduleBackend, ScheduleDefinition, ScheduleInterval,
+        EvalQueryReport, EvalRunReport, InitialIndexingBlock, InitialIndexingOutcome, LocalAction,
+        LocalReport, ScheduleAddResponse, ScheduleBackend, ScheduleDefinition, ScheduleInterval,
         ScheduleIntervalUnit, ScheduleOrphan, ScheduleRunResult, ScheduleRunState, ScheduleScope,
         ScheduleState, ScheduleStatusEntry, ScheduleStatusResponse, ScheduleTrigger,
         ScheduleWeekday, SearchMode, UpdateReport,
@@ -1621,6 +1676,41 @@ mod tests {
             "unexpected output: {output}"
         );
         assert!(output.contains("  fix: Start the embedding server."));
+    }
+
+    #[test]
+    fn local_report_formats_service_state_and_notes() {
+        let output = format_local_report(&LocalReport {
+            action: LocalAction::Setup,
+            config_file: PathBuf::from("/tmp/kbolt/index.toml"),
+            cache_dir: PathBuf::from("/tmp/cache/kbolt"),
+            llama_server_path: Some(PathBuf::from("/opt/homebrew/bin/llama-server")),
+            ready: false,
+            notes: vec!["started embedder on http://127.0.0.1:8101".to_string()],
+            services: vec![kbolt_types::LocalServiceReport {
+                name: "embedder".to_string(),
+                provider: "kbolt_local_embed".to_string(),
+                enabled: true,
+                configured: true,
+                managed: true,
+                running: true,
+                ready: false,
+                model: "embeddinggemma".to_string(),
+                model_path: PathBuf::from("/tmp/cache/kbolt/models/embedder/model.gguf"),
+                endpoint: "http://127.0.0.1:8101".to_string(),
+                port: 8101,
+                pid: Some(42),
+                pid_file: PathBuf::from("/tmp/cache/kbolt/run/embedder.pid"),
+                log_file: PathBuf::from("/tmp/cache/kbolt/logs/embedder.log"),
+                issue: Some("service is not ready".to_string()),
+            }],
+        });
+
+        assert!(output.contains("action: setup"));
+        assert!(output.contains("llama_server: /opt/homebrew/bin/llama-server"));
+        assert!(output.contains("- started embedder on http://127.0.0.1:8101"));
+        assert!(output.contains("configured=true"));
+        assert!(output.contains("issue: service is not ready"));
     }
 
     #[test]

@@ -29,6 +29,8 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Doctor,
+    Setup(SetupArgs),
+    Local(LocalArgs),
     Space(SpaceArgs),
     Collection(CollectionArgs),
     Ignore(IgnoreArgs),
@@ -48,6 +50,18 @@ pub enum Command {
 pub struct SpaceArgs {
     #[command(subcommand)]
     pub command: SpaceCommand,
+}
+
+#[derive(Debug, Args)]
+pub struct SetupArgs {
+    #[command(subcommand)]
+    pub command: SetupCommand,
+}
+
+#[derive(Debug, Args)]
+pub struct LocalArgs {
+    #[command(subcommand)]
+    pub command: LocalCommand,
 }
 
 #[derive(Debug, Args)]
@@ -186,6 +200,24 @@ pub enum SpaceCommand {
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum SetupCommand {
+    Local,
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum LocalCommand {
+    Status,
+    Start,
+    Stop,
+    Enable { feature: LocalFeature },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LocalFeature {
+    Deep,
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum CollectionCommand {
     Add {
         path: PathBuf,
@@ -317,8 +349,9 @@ mod tests {
 
     use super::{
         Cli, CollectionCommand, Command, EvalCommand, EvalImportArgs, EvalImportBeirArgs,
-        EvalImportCommand, EvalRunArgs, GetArgs, MultiGetArgs, OutputFormat, ScheduleAddArgs,
-        ScheduleCommand, ScheduleDayArg, ScheduleRemoveArgs, SearchArgs, SpaceCommand, UpdateArgs,
+        EvalImportCommand, EvalRunArgs, GetArgs, LocalCommand, LocalFeature, MultiGetArgs,
+        OutputFormat, ScheduleAddArgs, ScheduleCommand, ScheduleDayArg, ScheduleRemoveArgs,
+        SearchArgs, SetupCommand, SpaceCommand, UpdateArgs,
     };
 
     fn parse<const N: usize>(args: [&str; N]) -> Cli {
@@ -337,6 +370,27 @@ mod tests {
     fn parses_doctor_command() {
         let parsed = parse(["kbolt", "doctor"]);
         assert!(matches!(parsed.command, Command::Doctor));
+    }
+
+    #[test]
+    fn parses_setup_local_command() {
+        let parsed = parse(["kbolt", "setup", "local"]);
+        assert!(matches!(
+            parsed.command,
+            Command::Setup(args) if args.command == SetupCommand::Local
+        ));
+    }
+
+    #[test]
+    fn parses_local_enable_deep_command() {
+        let parsed = parse(["kbolt", "local", "enable", "deep"]);
+        assert!(matches!(
+            parsed.command,
+            Command::Local(args)
+                if args.command == LocalCommand::Enable {
+                    feature: LocalFeature::Deep
+                }
+        ));
     }
 
     #[test]
