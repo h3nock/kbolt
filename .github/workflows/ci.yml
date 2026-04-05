@@ -7,7 +7,7 @@ on:
   pull_request:
 
 jobs:
-  checks:
+  fmt:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -24,5 +24,44 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+  test-and-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-13
+          - macos-14
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
       - name: Run tests
-        run: cargo test
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --locked --release --bin kbolt
+
+      - name: Smoke test release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./target/release/kbolt --help >/dev/null
+
+          tmp_home="$(mktemp -d)"
+          set +e
+          HOME="$tmp_home" ./target/release/kbolt doctor >/dev/null
+          status=$?
+          set -e
+
+          if [ "$status" -ne 1 ]; then
+            echo "expected kbolt doctor on a fresh HOME to exit 1, got $status" >&2
+            exit 1
+          fi
