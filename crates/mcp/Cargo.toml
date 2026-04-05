@@ -3,10 +3,13 @@ name = "kbolt-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "MCP adapter for kbolt"
+repository.workspace = true
+readme = "README.md"
 
 [dependencies]
-kbolt-core = { path = "../core" }
-kbolt-types = { path = "../types" }
+kbolt-core = { path = "../core", version = "0.1.0" }
+kbolt-types = { path = "../types", version = "0.1.0" }
 serde.workspace = true
 serde_json.workspace = true
 
