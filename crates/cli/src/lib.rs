@@ -1038,7 +1038,8 @@ fn format_collection_add_block(
             lines.push(format!(
                 "initial indexing blocked: model '{name}' is not available"
             ));
-            lines.push("run: kbolt models pull".to_string());
+            lines.push("run: kbolt setup local".to_string());
+            lines.push("or configure [roles.embedder] in index.toml".to_string());
             lines.push(format!(
                 "then run: kbolt --space {} update --collection {}",
                 collection.space, collection.name
@@ -1957,7 +1958,8 @@ mod tests {
 
         assert!(output.contains("collection added: work/api"));
         assert!(output.contains("initial indexing blocked: model 'embed-model' is not available"));
-        assert!(output.contains("run: kbolt models pull"));
+        assert!(output.contains("run: kbolt setup local"));
+        assert!(output.contains("configure [roles.embedder] in index.toml"));
         assert!(output.contains("then run: kbolt --space work update --collection api"));
     }
 
