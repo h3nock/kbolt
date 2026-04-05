@@ -1,16 +1,3 @@
-pub(crate) fn tokenize_terms(text: &str) -> Vec<String> {
-    text.split(|ch: char| !ch.is_alphanumeric())
-        .filter_map(|term| {
-            let lowered = term.trim().to_ascii_lowercase();
-            if lowered.is_empty() {
-                None
-            } else {
-                Some(lowered)
-            }
-        })
-        .collect::<Vec<_>>()
-}
-
 pub(crate) fn strip_json_fences(content: &str) -> &str {
     let trimmed = content.trim();
     let Some(without_prefix) = trimmed.strip_prefix("```") else {
@@ -36,19 +23,7 @@ pub(crate) fn strip_json_fences(content: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{strip_json_fences, tokenize_terms};
-
-    #[test]
-    fn tokenize_terms_splits_and_normalizes() {
-        assert_eq!(
-            tokenize_terms("Rust_trait-object!"),
-            vec![
-                "rust".to_string(),
-                "trait".to_string(),
-                "object".to_string()
-            ]
-        );
-    }
+    use super::strip_json_fences;
 
     #[test]
     fn strip_json_fences_removes_json_markdown_wrapper() {

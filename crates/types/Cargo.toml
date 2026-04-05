@@ -3,6 +3,9 @@ name = "kbolt-types"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Shared request and response types for kbolt"
+repository.workspace = true
+readme = "README.md"
 
 [dependencies]
 serde.workspace = true

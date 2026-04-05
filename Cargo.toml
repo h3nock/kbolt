@@ -6,6 +6,7 @@ resolver = "2"
 edition = "2021"
 license = "MIT"
 version = "0.1.0"
+repository = "https://github.com/h3nock/kbolt"
 
 [workspace.dependencies]
 dirs = "6.0"
@@ -13,8 +14,6 @@ fs2 = "0.4"
 hf-hub = "0.4"
 httpdate = "1.0"
 ignore = "0.4"
-llama-cpp-2 = { path = "vendor/llama-cpp-2" }
-ort = "2.0.0-rc.12"
 pulldown-cmark = "0.13"
 rusqlite = "0.33"
 serde = { version = "1.0", features = ["derive"] }
@@ -24,7 +23,6 @@ sha2 = "0.10"
 tantivy = "0.24"
 thiserror = "2.0"
 time = { version = "0.3", features = ["formatting"] }
-tokenizers = "0.22"
 toml = "0.9"
 usearch = "2.23"
 ureq = { version = "2.12", features = ["json"] }
