@@ -36,47 +36,46 @@ cargo install kbolt
 After install, `kbolt` command is available. No configuration needed yet — the system creates `~/.config/kbolt/` and `~/.cache/kbolt/` on first use.
 
 On first interactive CLI use (before `~/.config/kbolt/index.toml` exists), kbolt prints a one-time reminder:
-`Run kbolt models pull to download semantic/rerank models. Keyword search works without models.`
+`Run kbolt setup local for the default local path, or configure [providers] and [roles.*] manually. Keyword search works without provider bindings.`
 
 ---
 
-### 2. Download models
+### 2. Set up local inference
 
 **Actor**: CLI user
-**Goal**: Pre-download ML models before first use
+**Goal**: Install the default local inference path before first semantic or reranked use
 
 ```
-kbolt models pull
+kbolt setup local
 ```
 
-Downloads role artifacts via the configured model provider (default: HuggingFace Hub) to `~/.cache/kbolt/models/{role}/` (`embedder`, `reranker`, `expander`). In V1 this is selective per role (embedder: one ONNX + tokenizer for `local_onnx`, or one GGUF for `local_gguf`; text roles: one GGUF each), with per-model progress events and a final download summary.
+Downloads the default local embedder and reranker models into the kbolt cache, starts managed `llama-server` processes, verifies the endpoints, and writes the local provider bindings into `~/.config/kbolt/index.toml`.
 
-Embedding inference provider scope (V1):
-- supported: `openai_compatible`, `voyage`, `local_onnx`, `local_gguf`
-- deferred to V2: native Google embeddings API provider (add only if we need native-only controls/parity)
+To enable deep search later:
 
-Text inference provider scope for reranker/expander (V1):
-- supported: `openai_compatible`, `local_llama`
+```
+kbolt local enable deep
+```
 
-If models are missing when a command needs them (search, update with embedding), prompt/fallback behavior is CLI-only:
-- interactive CLI (TTY): kbolt prompts "Models not downloaded. Download now and continue? (Y/n)".
-- non-interactive CLI: no prompt; command fails with actionable guidance (`kbolt models pull`; for update also `--no-embed` when appropriate).
-- MCP/agent usage: no prompt; return deterministic error behavior.
+For a manual or remote setup instead of the managed local path:
+- configure `[providers]` and `[roles.*]` in `index.toml`
+- run `kbolt doctor`
 
-When the user declines the interactive prompt in auto search mode, kbolt falls back to keyword-only search. For explicitly requested semantic/deep modes, kbolt fails instead of silently changing mode.
+When provider bindings are missing, keyword search still works. Commands that require embeddings fail with actionable guidance.
 
 ---
 
-### 3. Check model status
+### 3. Check model and provider status
 
 **Actor**: CLI user
-**Goal**: See which models are downloaded and ready
+**Goal**: See whether the configured roles are present and ready to use
 
 ```
 kbolt models list
+kbolt doctor
 ```
 
-Shows each model: name, role (embed/rerank/expand), status (downloaded/missing), file size, path on disk.
+`kbolt models list` shows each role binding and whether it is configured and ready. `kbolt doctor` validates config, storage, and live provider connectivity.
 
 ---
 
@@ -463,7 +462,7 @@ kbolt update --space {name} --collection {name} --no-embed
 - **--space** (optional) — scope to a specific space
 - **--collection** (optional) — scope to specific collections
 
-Useful when models aren't downloaded yet, or for a quick index pass where keyword search is sufficient. Embedding can be done later by running `kbolt update` normally (it will embed any unembedded chunks). All flags compose independently — `--no-embed` can be combined with `--space`, `--collection`, `--dry-run`, and `--verbose`.
+Useful when provider bindings are not configured yet, local inference is unavailable, or a quick keyword-only index pass is sufficient. Embedding can be done later by running `kbolt update` normally (it will embed any unembedded chunks). All flags compose independently — `--no-embed` can be combined with `--space`, `--collection`, `--dry-run`, and `--verbose`.
 
 ---
 
