@@ -8,7 +8,9 @@ use kbolt_types::{KboltError, ScheduleBackend, ScheduleDefinition};
 
 use crate::Result;
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) mod launchd;
+#[cfg(any(target_os = "linux", test))]
 pub(crate) mod systemd;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -179,11 +181,11 @@ pub(crate) fn command_failure(program: &str, args: &[&str], output: &CommandOutp
 }
 
 #[cfg(target_os = "macos")]
-fn launchd_paths(config_dir: &Path, cache_dir: &Path) -> Result<launchd::LaunchdPaths> {
+fn launchd_paths(_config_dir: &Path, cache_dir: &Path) -> Result<launchd::LaunchdPaths> {
     #[cfg(test)]
     {
         Ok(launchd::LaunchdPaths {
-            agents_dir: config_dir.join("launchd/LaunchAgents"),
+            agents_dir: _config_dir.join("launchd/LaunchAgents"),
             log_dir: cache_dir.join("schedules/logs"),
             domain: "gui/test".to_string(),
         })
