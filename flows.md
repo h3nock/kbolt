@@ -17,14 +17,10 @@ Every flow is one actor performing one action to achieve one goal.
 **Actor**: CLI user
 **Goal**: Get kbolt binary available on PATH
 
-```
-curl -fsSL https://... | sh
-```
-
-Or via Homebrew:
+Recommended on macOS and Linux x86_64 with Homebrew:
 
 ```
-brew install kbolt
+brew install h3nock/kbolt/kbolt
 ```
 
 Or for Rust developers:
@@ -33,7 +29,11 @@ Or for Rust developers:
 cargo install kbolt
 ```
 
+Or download a prebuilt archive from GitHub Releases.
+
 After install, `kbolt` command is available. No configuration needed yet — the system creates `~/.config/kbolt/` and `~/.cache/kbolt/` on first use.
+
+If `llama-server` is not already available and you did not install via Homebrew, install `llama.cpp` using the official [llama.cpp install guide](https://github.com/ggml-org/llama.cpp/wiki).
 
 On first interactive CLI use (before `~/.config/kbolt/index.toml` exists), kbolt prints a one-time reminder:
 `Run kbolt setup local for the default local path, or configure [providers] and [roles.*] manually. Keyword search works without provider bindings.`

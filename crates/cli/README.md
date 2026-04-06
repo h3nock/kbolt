@@ -13,7 +13,21 @@
 
 ## Typical flow
 
-Install `llama.cpp` so `llama-server` is available, then run:
+Install with Cargo:
+
+```bash
+cargo install kbolt
+```
+
+Or on macOS and Linux x86_64 with Homebrew:
+
+```bash
+brew install h3nock/kbolt/kbolt
+```
+
+If `llama-server` is not already available and you did not install via Homebrew, follow the official [llama.cpp install guide](https://github.com/ggml-org/llama.cpp/wiki).
+
+Then run:
 
 ```bash
 kbolt setup local

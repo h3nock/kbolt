@@ -16,15 +16,33 @@
 ## How it works
 
 1. Register one or more directories as collections with `kbolt collection add`.
-2. `kbolt` extracts content, chunks documents, builds the keyword index, and stores embeddings.
+2. `kbolt` extracts content, chunks documents, builds the keyword index, and stores embeddings when configured.
 3. Search across all indexed content or scope to a space or collection.
 4. Use `get`, `multi-get`, and `ls` to pull the source files behind search results.
 
 `kbolt collection add` indexes immediately by default. Use `--no-index` if you only want to register a collection first.
 
+## Install
+
+Recommended on macOS and Linux x86_64 with Homebrew:
+
+```bash
+brew install h3nock/kbolt/kbolt
+```
+
+For Rust users:
+
+```bash
+cargo install kbolt
+```
+
+Prebuilt binaries are also available from [GitHub Releases](https://github.com/h3nock/kbolt/releases).
+
+If `llama-server` is not already available and you did not install via Homebrew, install `llama.cpp` by following the official [llama.cpp install guide](https://github.com/ggml-org/llama.cpp/wiki).
+
 ## Quick start
 
-Install `llama.cpp` so `llama-server` is available, then run:
+Once `kbolt` and `llama-server` are available, run:
 
 ```bash
 kbolt setup local
