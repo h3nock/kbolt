@@ -82,9 +82,8 @@ const EXPANDER_SPEC: ManagedServiceSpec = ManagedServiceSpec {
 
 pub fn setup_local(config_path: Option<&Path>) -> Result<LocalReport> {
     let llama_server_path = find_llama_server()?;
-    let mut config = config::load(config_path)?;
+    let (mut config, mut notes) = load_setup_config(config_path)?;
     let mut reserved_ports = HashSet::new();
-    let mut notes = Vec::new();
     let mut started = Vec::new();
 
     prepare_runtime_dirs(&config.cache_dir)?;
@@ -135,6 +134,68 @@ pub fn setup_local(config_path: Option<&Path>) -> Result<LocalReport> {
         notes,
         &[EMBEDDER_SPEC, RERANKER_SPEC, EXPANDER_SPEC],
     )
+}
+
+fn load_setup_config(config_path: Option<&Path>) -> Result<(Config, Vec<String>)> {
+    let config_file = config::resolve_config_file_path(config_path)?;
+    match config::load(config_path) {
+        Ok(config) => Ok((config, Vec::new())),
+        Err(err @ crate::error::CoreError::Domain(KboltError::Config(_)))
+            if config_file.exists() =>
+        {
+            if !looks_like_legacy_config(&config_file)? {
+                return Err(err);
+            }
+            let backup_path = backup_invalid_config(&config_file)?;
+            let config = config::load(config_path)?;
+            Ok((
+                config,
+                vec![format!(
+                    "moved incompatible legacy config to {} and created a fresh current config",
+                    backup_path.display()
+                )],
+            ))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn looks_like_legacy_config(config_file: &Path) -> Result<bool> {
+    let raw = fs::read_to_string(config_file)?;
+    Ok(raw
+        .lines()
+        .map(str::trim)
+        .any(|line| matches!(line, "[embeddings]" | "[models]")))
+}
+
+fn backup_invalid_config(config_file: &Path) -> Result<PathBuf> {
+    let Some(file_name) = config_file.file_name().and_then(|name| name.to_str()) else {
+        return Err(KboltError::Internal(format!(
+            "invalid config path: {}",
+            config_file.display()
+        ))
+        .into());
+    };
+    let parent = config_file.parent().ok_or_else(|| {
+        KboltError::Internal(format!(
+            "config file has no parent: {}",
+            config_file.display()
+        ))
+    })?;
+
+    for suffix in std::iter::once(".invalid.bak".to_string())
+        .chain((1usize..).map(|index| format!(".invalid.{index}.bak")))
+    {
+        let candidate = parent.join(format!("{file_name}{suffix}"));
+        if candidate.exists() {
+            continue;
+        }
+
+        fs::rename(config_file, &candidate)?;
+        return Ok(candidate);
+    }
+
+    unreachable!("backup suffix iterator is infinite");
 }
 
 pub fn enable_deep(config_path: Option<&Path>) -> Result<LocalReport> {
@@ -981,7 +1042,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        apply_managed_service_config, endpoint_for_port, managed_model_path,
+        apply_managed_service_config, endpoint_for_port, load_setup_config, managed_model_path,
         missing_service_report, select_port, EMBEDDER_SPEC, EXPANDER_SPEC, RERANKER_SPEC,
     };
     use crate::config::{self, Config};
@@ -1021,6 +1082,67 @@ mod tests {
         );
         assert!(config.providers.contains_key("kbolt_local_embed"));
         assert!(config.providers.contains_key("kbolt_local_rerank"));
+    }
+
+    #[test]
+    fn load_setup_config_moves_incompatible_index_toml_aside() {
+        let tmp = tempdir().expect("tempdir");
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).expect("config dir");
+        let config_file = config_dir.join("index.toml");
+        fs::write(
+            &config_file,
+            r#"
+[embeddings]
+provider = "legacy"
+"#,
+        )
+        .expect("write invalid config");
+
+        let (config, notes) =
+            load_setup_config(Some(&config_dir)).expect("setup config should recover");
+
+        let backup_path = config_dir.join("index.toml.invalid.bak");
+        assert!(backup_path.is_file(), "backup should exist");
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("moved incompatible legacy config")),
+            "expected recovery note, got {notes:?}"
+        );
+        assert!(
+            config.providers.is_empty(),
+            "fresh config should be created"
+        );
+        assert!(config.roles.embedder.is_none());
+        assert!(config.roles.reranker.is_none());
+    }
+
+    #[test]
+    fn load_setup_config_keeps_non_legacy_invalid_config_as_error() {
+        let tmp = tempdir().expect("tempdir");
+        let config_dir = tmp.path().join("config");
+        fs::create_dir_all(&config_dir).expect("config dir");
+        let config_file = config_dir.join("index.toml");
+        fs::write(
+            &config_file,
+            r#"
+[providers.bad]
+operation = "embedding"
+"#,
+        )
+        .expect("write invalid config");
+
+        let err = load_setup_config(Some(&config_dir)).expect_err("invalid config should fail");
+        assert!(
+            err.to_string().contains("invalid config file"),
+            "unexpected error: {err}"
+        );
+        assert!(config_file.is_file(), "invalid file should remain in place");
+        assert!(
+            !config_dir.join("index.toml.invalid.bak").exists(),
+            "non-legacy config should not be backed up automatically"
+        );
     }
 
     #[test]
