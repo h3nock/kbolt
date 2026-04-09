@@ -3,7 +3,7 @@
 This repository treats `kbolt` as an application first:
 
 - GitHub Releases are the canonical release surface.
-- Homebrew and crates.io can be added later, but they are intentionally out of scope for the current release setup.
+- crates.io and the Homebrew tap should stay in sync with the tagged release version.
 
 ## Versioning and tags
 
@@ -51,9 +51,34 @@ It:
 - generates `SHA256SUMS`
 - publishes a GitHub Release with generated notes
 
+## Additional release surfaces
+
+### crates.io
+
+Publish in dependency order:
+
+1. `kbolt-types`
+2. `kbolt-core`
+3. `kbolt-mcp`
+4. `kbolt`
+
+Use `cargo publish --workspace --locked --dry-run` before the real publish sequence.
+
+### Homebrew tap
+
+The custom tap lives at `h3nock/homebrew-kbolt`.
+
+After the GitHub Release is live:
+
+1. update `Formula/kbolt.rb` to the new versioned archive URLs
+2. update the corresponding SHA256 values
+3. commit and push the tap repo
+
 ## Recommended release order
 
 1. Make sure CI is green on `main`.
 2. Bump the workspace version if needed.
 3. Create and push a `vX.Y.Z` tag.
 4. Wait for `release.yml` to finish and verify the published GitHub Release.
+5. Publish crates.io packages for the same version.
+6. Update the Homebrew tap formula to the same version.
