@@ -1,4 +1,9 @@
 use std::ffi::OsString;
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use kbolt_cli::args::{
@@ -70,6 +75,7 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
     let mut adapter = CliAdapter::new(engine);
     let print_text = |line: &str| emit_text_output(output_format, line);
     let print_message = |line: &str| emit_message_output(output_format, line);
+    let show_activity = should_show_activity_indicator(output_format, stdout_stderr_are_tty());
 
     match cli.command {
         Command::Doctor => unreachable!("doctor command handled before engine setup"),
@@ -156,8 +162,11 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
                         no_index,
                     )
                 };
-                let line =
-                    run_collection_add().map_err(with_collection_add_model_missing_guidance)?;
+                let line = run_with_activity_indicator(
+                    show_activity && !no_index,
+                    collection_add_activity_label(no_index),
+                    || run_collection_add().map_err(with_collection_add_model_missing_guidance),
+                )?;
                 print_message(&line);
             }
             CollectionCommand::List => {
@@ -379,8 +388,11 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
                     )
                 };
 
-                let line =
-                    run_update(update.no_embed).map_err(with_update_model_missing_guidance)?;
+                let line = run_with_activity_indicator(
+                    show_activity,
+                    update_activity_label(update.no_embed, update.dry_run),
+                    || run_update(update.no_embed).map_err(with_update_model_missing_guidance),
+                )?;
                 print_message(&line);
             }
         }
@@ -851,6 +863,43 @@ fn emit_error(format: OutputFormat, err: &RunError) {
     }
 }
 
+fn run_with_activity_indicator<T, E>(
+    enabled: bool,
+    label: &'static str,
+    action: impl FnOnce() -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    if !enabled {
+        return action();
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let printed = Arc::new(AtomicBool::new(false));
+    let stop_signal = Arc::clone(&stop);
+    let printed_signal = Arc::clone(&printed);
+    let label = label.to_string();
+
+    let handle = thread::spawn(move || {
+        let started = Instant::now();
+        while !stop_signal.load(Ordering::Relaxed) {
+            eprint!(
+                "\r{}",
+                render_activity_status_line(&label, started.elapsed())
+            );
+            let _ = std::io::stderr().flush();
+            printed_signal.store(true, Ordering::Relaxed);
+            thread::sleep(Duration::from_millis(250));
+        }
+    });
+
+    let result = action();
+    stop.store(true, Ordering::Relaxed);
+    let _ = handle.join();
+    if printed.load(Ordering::Relaxed) {
+        eprintln!();
+    }
+    result
+}
+
 fn render_text_output(format: OutputFormat, line: &str) -> String {
     match format {
         OutputFormat::Cli | OutputFormat::Json => line.to_string(),
@@ -894,6 +943,32 @@ fn render_error_output(format: OutputFormat, err: &RunError) -> String {
             }
         })
         .to_string(),
+    }
+}
+
+fn render_activity_status_line(label: &str, elapsed: Duration) -> String {
+    format!("{label}... {}s", elapsed.as_secs())
+}
+
+fn should_show_activity_indicator(format: OutputFormat, is_tty: bool) -> bool {
+    format == OutputFormat::Cli && is_tty
+}
+
+fn collection_add_activity_label(no_index: bool) -> &'static str {
+    if no_index {
+        "adding collection"
+    } else {
+        "adding and indexing collection"
+    }
+}
+
+fn update_activity_label(no_embed: bool, dry_run: bool) -> &'static str {
+    if dry_run {
+        "scanning update"
+    } else if no_embed {
+        "updating keyword index"
+    } else {
+        "updating index"
     }
 }
 
@@ -974,6 +1049,11 @@ fn stdin_stdout_are_tty() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
+fn stdout_stderr_are_tty() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal() && std::io::stderr().is_terminal()
+}
+
 fn with_update_model_missing_guidance(err: CoreError) -> CoreError {
     if is_model_not_available_error(&err) {
         return CoreError::Domain(KboltError::InvalidInput(format!(
@@ -995,16 +1075,19 @@ fn with_collection_add_model_missing_guidance(err: CoreError) -> CoreError {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    use std::time::Duration;
 
     use clap::CommandFactory;
     use serde_json::json;
 
     use super::{
-        ensure_eval_uses_local_scope, ensure_schedule_uses_local_scope,
-        ensure_supported_output_format, is_model_not_available_error, local_command_succeeds,
-        parse_internal_schedule_run, parse_schedule_interval, render_error_output,
+        collection_add_activity_label, ensure_eval_uses_local_scope,
+        ensure_schedule_uses_local_scope, ensure_supported_output_format,
+        is_model_not_available_error, local_command_succeeds, parse_internal_schedule_run,
+        parse_schedule_interval, render_activity_status_line, render_error_output,
         render_message_output, render_structured_output, requested_output_format_from_args,
-        schedule_add_request, schedule_remove_request, should_show_first_run_inference_hint,
+        schedule_add_request, schedule_remove_request, should_show_activity_indicator,
+        should_show_first_run_inference_hint, stdout_stderr_are_tty, update_activity_label,
         with_collection_add_model_missing_guidance, with_update_model_missing_guidance,
         DefaultSpaceJsonResponse, IgnoreShowJsonResponse, RunError, INTERNAL_SCHEDULE_RUN_COMMAND,
     };
@@ -1455,5 +1538,35 @@ mod tests {
 
         ensure_supported_output_format(OutputFormat::Cli, &Command::Mcp)
             .expect("cli output should remain valid for mcp");
+    }
+
+    #[test]
+    fn activity_indicator_visibility_requires_cli_tty() {
+        assert!(should_show_activity_indicator(OutputFormat::Cli, true));
+        assert!(!should_show_activity_indicator(OutputFormat::Cli, false));
+        assert!(!should_show_activity_indicator(OutputFormat::Json, true));
+    }
+
+    #[test]
+    fn activity_labels_match_update_modes() {
+        assert_eq!(
+            collection_add_activity_label(false),
+            "adding and indexing collection"
+        );
+        assert_eq!(collection_add_activity_label(true), "adding collection");
+        assert_eq!(update_activity_label(false, false), "updating index");
+        assert_eq!(update_activity_label(true, false), "updating keyword index");
+        assert_eq!(update_activity_label(false, true), "scanning update");
+    }
+
+    #[test]
+    fn activity_status_line_includes_elapsed_seconds() {
+        let line = render_activity_status_line("updating index", Duration::from_secs(7));
+        assert_eq!(line, "updating index... 7s");
+    }
+
+    #[test]
+    fn stdout_stderr_tty_helper_is_boolean() {
+        let _ = stdout_stderr_are_tty();
     }
 }
