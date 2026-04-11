@@ -808,36 +808,31 @@ impl Engine {
         let extractor_registry = default_registry();
         let mut touched_collection = false;
 
-        for entry in WalkDir::new(&target.collection.path)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|entry| {
-                !entry.file_type().is_dir() || !is_hard_ignored_dir_name(entry.file_name())
-            })
-        {
+        for entry in super::ignore_helpers::build_collection_walk(&target.collection.path) {
             let entry = match entry {
                 Ok(item) => item,
                 Err(err) => {
-                    if let Some(path) = err.path() {
-                        if let Ok(relative_path) =
-                            collection_relative_path(&target.collection.path, path)
-                        {
-                            failed_docs.insert(update_doc_key(
-                                &target.space,
-                                &target.collection.path,
-                                &relative_path,
-                            ));
-                        }
+                    let error_path = walk_error_path(&err).map(Path::to_path_buf);
+                    if let Some(path) = error_path.as_deref() {
+                        let failed_path = collection_relative_path(&target.collection.path, path)
+                            .unwrap_or_else(|_| path.display().to_string());
+                        failed_docs.insert(update_doc_key(
+                            &target.space,
+                            &target.collection.path,
+                            &failed_path,
+                        ));
                     }
-                    report.errors.push(file_error(
-                        err.path().map(Path::to_path_buf),
-                        format!("walkdir error: {err}"),
-                    ));
+                    report
+                        .errors
+                        .push(file_error(error_path, format!("walk error: {err}")));
                     continue;
                 }
             };
 
-            if !entry.file_type().is_file() {
+            if !entry
+                .file_type()
+                .is_some_and(|file_type| file_type.is_file())
+            {
                 continue;
             }
 
@@ -1280,6 +1275,21 @@ impl Engine {
         }
 
         Ok(())
+    }
+}
+
+fn walk_error_path(err: &ignore::Error) -> Option<&Path> {
+    match err {
+        ignore::Error::Partial(errors) => errors.iter().find_map(walk_error_path),
+        ignore::Error::WithLineNumber { err, .. } | ignore::Error::WithDepth { err, .. } => {
+            walk_error_path(err)
+        }
+        ignore::Error::WithPath { path, .. } => Some(path.as_path()),
+        ignore::Error::Loop { child, .. } => Some(child.as_path()),
+        ignore::Error::Io(_)
+        | ignore::Error::Glob { .. }
+        | ignore::Error::UnrecognizedFileType(_)
+        | ignore::Error::InvalidDefinition => None,
     }
 }
 

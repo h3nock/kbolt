@@ -4349,6 +4349,50 @@ fn update_applies_collection_ignore_patterns() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn update_reports_pathful_walk_errors_and_counts_them_as_failures() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        write_text_file(&collection_path.join("src/lib.rs"), "fn alpha() {}\n");
+        let blocked_dir = collection_path.join("blocked");
+        std::fs::create_dir_all(&blocked_dir).expect("create blocked dir");
+        let mut permissions = std::fs::metadata(&blocked_dir)
+            .expect("stat blocked dir")
+            .permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&blocked_dir, permissions).expect("chmod blocked dir");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("run update");
+        let mut restored_permissions = std::fs::metadata(&blocked_dir)
+            .expect("restat blocked dir")
+            .permissions();
+        restored_permissions.set_mode(0o755);
+        std::fs::set_permissions(&blocked_dir, restored_permissions)
+            .expect("restore blocked dir permissions");
+        assert_eq!(report.failed_docs, 1);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.path.ends_with("blocked") && error.error.contains("walk error")),
+            "expected walk error for blocked directory, got {:?}",
+            report.errors
+        );
+    });
+}
+
 #[test]
 fn update_verbose_records_new_ignored_unsupported_and_extract_failed_decisions() {
     with_kbolt_space_env(None, || {
