@@ -76,7 +76,6 @@ impl Engine {
     }
 
     pub fn list_schedules(&self) -> Result<Vec<ScheduleDefinition>> {
-        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let mut schedules = ScheduleCatalog::load(&self.config.config_dir)?.schedules;
         schedules.sort_by_key(|schedule| schedule_id_sort_key(&schedule.id));
         Ok(schedules)
@@ -415,6 +414,8 @@ fn ensure_schedule_backend_supported() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
     use std::mem;
 
     use tempfile::tempdir;
@@ -508,6 +509,33 @@ mod tests {
             ScheduleRunStateStore::load(&engine.config.cache_dir, &added.schedule.id)
                 .expect("load preserved run state");
         assert_eq!(loaded_state, saved_state);
+    }
+
+    #[test]
+    fn list_schedules_succeeds_while_global_lock_is_held() {
+        let engine = test_engine();
+        let added = engine
+            .add_schedule(AddScheduleRequest {
+                trigger: ScheduleTrigger::Daily {
+                    time: "09:00".to_string(),
+                },
+                scope: ScheduleScope::All,
+            })
+            .expect("add schedule");
+
+        let lock_path = engine.config.cache_dir.join("kbolt.lock");
+        std::fs::create_dir_all(&engine.config.cache_dir).expect("create cache dir");
+        let holder = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .expect("open lock file");
+        FileExt::try_lock_exclusive(&holder).expect("acquire global lock");
+
+        let schedules = engine.list_schedules().expect("list schedules");
+        assert_eq!(schedules, vec![added.schedule]);
     }
 
     fn unsupported_schedule_backend() -> crate::Result<()> {

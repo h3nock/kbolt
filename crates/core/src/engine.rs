@@ -24,8 +24,6 @@ use kbolt_types::{
     SearchPipelineUnavailableReason, SearchRequest, SearchResponse, SearchResult, SearchSignals,
     SpaceInfo, SpaceStatus, StatusResponse, UpdateOptions, UpdateReport,
 };
-use walkdir::WalkDir;
-
 mod eval_ops;
 mod file_utils;
 mod ignore_helpers;
@@ -40,8 +38,8 @@ mod text_helpers;
 mod update_ops;
 use file_utils::{file_error, file_title, modified_token, sha256_hex};
 use ignore_helpers::{
-    collection_ignore_file_path, count_ignore_patterns, is_hard_ignored_dir_name,
-    is_hard_ignored_file, load_collection_ignore_matcher, validate_ignore_pattern,
+    collection_ignore_file_path, count_ignore_patterns, is_hard_ignored_file,
+    load_collection_ignore_matcher, validate_ignore_pattern,
 };
 use path_utils::{
     collection_relative_path, extension_allowed, normalize_docid, normalize_list_prefix,
@@ -213,7 +211,6 @@ impl Engine {
     }
 
     pub fn list_spaces(&self) -> Result<Vec<SpaceInfo>> {
-        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let spaces = self.storage.list_spaces()?;
         let mut infos = Vec::with_capacity(spaces.len());
         for space in spaces {
@@ -223,7 +220,6 @@ impl Engine {
     }
 
     pub fn space_info(&self, name: &str) -> Result<SpaceInfo> {
-        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let space = self.storage.get_space(name)?;
         self.build_space_info(&space)
     }
@@ -391,7 +387,6 @@ impl Engine {
     }
 
     pub fn list_collections(&self, space: Option<&str>) -> Result<Vec<CollectionInfo>> {
-        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let (space_id_filter, spaces_by_id) = if let Some(space_name) = space {
             let resolved = self.resolve_space_row(Some(space_name), None)?;
             let mut map = std::collections::HashMap::new();
@@ -424,7 +419,6 @@ impl Engine {
     }
 
     pub fn collection_info(&self, space: Option<&str>, name: &str) -> Result<CollectionInfo> {
-        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let resolved = self.resolve_space_row(space, Some(name))?;
         let collection = self.storage.get_collection(resolved.id, name)?;
         self.build_collection_info(&resolved.name, &collection)
@@ -436,7 +430,6 @@ impl Engine {
         collection: &str,
         prefix: Option<&str>,
     ) -> Result<Vec<FileEntry>> {
-        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let resolved_space = self.resolve_space_row(space, Some(collection))?;
         let collection_row = self.storage.get_collection(resolved_space.id, collection)?;
         let normalized_prefix = normalize_list_prefix(prefix)?;
@@ -467,7 +460,6 @@ impl Engine {
     }
 
     pub fn get_document(&self, req: GetRequest) -> Result<DocumentResponse> {
-        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         self.get_document_unlocked(req)
     }
 
@@ -571,7 +563,6 @@ impl Engine {
     }
 
     pub fn multi_get(&self, req: MultiGetRequest) -> Result<MultiGetResponse> {
-        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         if req.max_files == 0 {
             return Err(
                 KboltError::InvalidInput("max_files must be greater than 0".to_string()).into(),
@@ -862,7 +853,6 @@ impl Engine {
     }
 
     pub fn model_status(&self) -> Result<ModelStatus> {
-        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         self.model_status_unlocked()
     }
 
@@ -1013,3 +1003,150 @@ impl Engine {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lock_relief_tests {
+    use fs2::FileExt;
+    use std::collections::HashMap;
+    use std::fs::OpenOptions;
+    use std::mem;
+
+    use tempfile::tempdir;
+
+    use super::Engine;
+    use crate::config::{ChunkingConfig, Config, RankingConfig, ReapingConfig};
+    use crate::storage::Storage;
+    use kbolt_types::{AddCollectionRequest, GetRequest, Locator, MultiGetRequest, UpdateOptions};
+
+    #[test]
+    fn metadata_reads_succeed_while_global_lock_is_held() {
+        let engine = test_engine_with_indexed_collection();
+        let _holder = hold_global_lock(&engine);
+
+        let spaces = engine.list_spaces().expect("list spaces");
+        assert_eq!(
+            spaces
+                .iter()
+                .map(|space| space.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["default", "work"]
+        );
+
+        let space = engine.space_info("work").expect("load space info");
+        assert_eq!(space.name, "work");
+        assert_eq!(space.collection_count, 1);
+
+        let collections = engine
+            .list_collections(Some("work"))
+            .expect("list collections");
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].name, "api");
+
+        let collection = engine
+            .collection_info(Some("work"), "api")
+            .expect("load collection info");
+        assert_eq!(collection.name, "api");
+        assert_eq!(collection.document_count, 1);
+
+        let models = engine.model_status().expect("read model status");
+        assert!(!models.embedder.configured);
+        assert!(!models.reranker.configured);
+        assert!(!models.expander.configured);
+    }
+
+    #[test]
+    fn document_reads_succeed_while_global_lock_is_held() {
+        let engine = test_engine_with_indexed_collection();
+        let _holder = hold_global_lock(&engine);
+
+        let files = engine
+            .list_files(Some("work"), "api", None)
+            .expect("list files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "guide.md");
+
+        let document = engine
+            .get_document(GetRequest {
+                locator: Locator::Path("api/guide.md".to_string()),
+                space: Some("work".to_string()),
+                offset: None,
+                limit: None,
+            })
+            .expect("read document");
+        assert_eq!(document.path, "api/guide.md");
+        assert!(document.content.contains("hello from kbolt"));
+
+        let response = engine
+            .multi_get(MultiGetRequest {
+                locators: vec![Locator::Path("api/guide.md".to_string())],
+                space: Some("work".to_string()),
+                max_files: 4,
+                max_bytes: 4_096,
+            })
+            .expect("read multiple documents");
+        assert_eq!(response.resolved_count, 1);
+        assert_eq!(response.documents.len(), 1);
+        assert!(response.warnings.is_empty());
+    }
+
+    fn test_engine_with_indexed_collection() -> Engine {
+        let root = tempdir().expect("create temp root");
+        let root_path = root.path().to_path_buf();
+        mem::forget(root);
+
+        let config_dir = root_path.join("config");
+        let cache_dir = root_path.join("cache");
+        let docs_dir = root_path.join("docs");
+        std::fs::create_dir_all(&docs_dir).expect("create docs dir");
+        std::fs::write(docs_dir.join("guide.md"), "# Hello\n\nhello from kbolt\n")
+            .expect("write document");
+
+        let storage = Storage::new(&cache_dir).expect("create storage");
+        let config = Config {
+            config_dir,
+            cache_dir,
+            default_space: None,
+            providers: HashMap::new(),
+            roles: crate::config::RoleBindingsConfig::default(),
+            reaping: ReapingConfig { days: 7 },
+            chunking: ChunkingConfig::default(),
+            ranking: RankingConfig::default(),
+        };
+        let engine = Engine::from_parts(storage, config);
+
+        engine
+            .add_collection(AddCollectionRequest {
+                path: docs_dir,
+                space: Some("work".to_string()),
+                name: Some("api".to_string()),
+                description: None,
+                extensions: None,
+                no_index: true,
+            })
+            .expect("add collection");
+        engine
+            .update(UpdateOptions {
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                no_embed: true,
+                dry_run: false,
+                verbose: false,
+            })
+            .expect("index collection");
+
+        engine
+    }
+
+    fn hold_global_lock(engine: &Engine) -> std::fs::File {
+        std::fs::create_dir_all(&engine.config().cache_dir).expect("create cache dir");
+        let holder = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(engine.config().cache_dir.join("kbolt.lock"))
+            .expect("open lock file");
+        FileExt::try_lock_exclusive(&holder).expect("acquire global lock");
+        holder
+    }
+}

@@ -1,5 +1,4 @@
 use crate::error::CoreError;
-use crate::lock::LockMode;
 use crate::schedule_backend::{current_schedule_backend, inspect_schedule_backend};
 use crate::schedule_state_store::ScheduleRunStateStore;
 use crate::schedule_store::ScheduleCatalog;
@@ -14,7 +13,6 @@ use super::Engine;
 
 impl Engine {
     pub fn schedule_status(&self) -> Result<ScheduleStatusResponse> {
-        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
         let backend = current_schedule_backend()?;
         let mut schedules = ScheduleCatalog::load(&self.config.config_dir)?.schedules;
         schedules.sort_by_key(|schedule| schedule_id_sort_key(&schedule.id));
@@ -81,5 +79,67 @@ impl Engine {
                 Ok(false)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
+    use std::mem;
+
+    use tempfile::tempdir;
+
+    use super::Engine;
+    use crate::config::{ChunkingConfig, Config, RankingConfig, ReapingConfig};
+    use crate::storage::Storage;
+    use kbolt_types::{AddScheduleRequest, ScheduleScope, ScheduleTrigger};
+
+    #[test]
+    fn schedule_status_succeeds_while_global_lock_is_held() {
+        let engine = test_engine();
+        engine
+            .add_schedule(AddScheduleRequest {
+                trigger: ScheduleTrigger::Daily {
+                    time: "09:00".to_string(),
+                },
+                scope: ScheduleScope::All,
+            })
+            .expect("add schedule");
+
+        let lock_path = engine.config().cache_dir.join("kbolt.lock");
+        std::fs::create_dir_all(&engine.config().cache_dir).expect("create cache dir");
+        let holder = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .expect("open lock file");
+        FileExt::try_lock_exclusive(&holder).expect("acquire global lock");
+
+        let status = engine.schedule_status().expect("load schedule status");
+        assert_eq!(status.schedules.len(), 1);
+        assert!(status.orphans.is_empty());
+    }
+
+    fn test_engine() -> Engine {
+        let root = tempdir().expect("create temp root");
+        let root_path = root.path().to_path_buf();
+        mem::forget(root);
+        let config_dir = root_path.join("config");
+        let cache_dir = root_path.join("cache");
+        let storage = Storage::new(&cache_dir).expect("create storage");
+        let config = Config {
+            config_dir,
+            cache_dir,
+            default_space: None,
+            providers: std::collections::HashMap::new(),
+            roles: crate::config::RoleBindingsConfig::default(),
+            reaping: ReapingConfig { days: 7 },
+            chunking: ChunkingConfig::default(),
+            ranking: RankingConfig::default(),
+        };
+        Engine::from_parts(storage, config)
     }
 }
