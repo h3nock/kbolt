@@ -1102,20 +1102,19 @@ fn format_update_report(report: &UpdateReport, verbose: bool) -> String {
         for error in unreported_update_errors(report) {
             lines.push(format!("error: {}: {}", error.path, error.error));
         }
+
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
     }
 
-    lines.push(format!("scanned_docs: {}", report.scanned_docs));
-    lines.push(format!("skipped_mtime_docs: {}", report.skipped_mtime_docs));
-    lines.push(format!("skipped_hash_docs: {}", report.skipped_hash_docs));
-    lines.push(format!("added_docs: {}", report.added_docs));
-    lines.push(format!("updated_docs: {}", report.updated_docs));
-    lines.push(format!("failed_docs: {}", report.failed_docs));
-    lines.push(format!("deactivated_docs: {}", report.deactivated_docs));
-    lines.push(format!("reactivated_docs: {}", report.reactivated_docs));
-    lines.push(format!("reaped_docs: {}", report.reaped_docs));
-    lines.push(format!("embedded_chunks: {}", report.embedded_chunks));
-    lines.push(format!("errors: {}", report.errors.len()));
-    lines.push(format!("elapsed_ms: {}", report.elapsed_ms));
+    lines.push("update complete".to_string());
+    append_update_summary_lines(&mut lines, report);
+
+    if !report.errors.is_empty() && !verbose {
+        append_update_error_lines(&mut lines, report, 3);
+    }
+
     lines.join("\n")
 }
 
@@ -1124,9 +1123,17 @@ fn format_collection_add_result(result: &AddCollectionResult) -> String {
     let locator = format!("{}/{}", collection.space, collection.name);
 
     match &result.initial_indexing {
-        InitialIndexingOutcome::Skipped => {
-            format!("collection added without indexing: {locator}")
-        }
+        InitialIndexingOutcome::Skipped => [
+            format!("collection added: {locator}"),
+            "indexing skipped (--no-index)".to_string(),
+            String::new(),
+            "next:".to_string(),
+            format!(
+                "  kbolt --space {} update --collection {}",
+                collection.space, collection.name
+            ),
+        ]
+        .join("\n"),
         InitialIndexingOutcome::Indexed(report) => {
             format_collection_add_indexing_report(collection, &locator, report)
         }
@@ -1149,14 +1156,17 @@ fn format_collection_add_indexing_report(
         lines.push("initial indexing incomplete".to_string());
     }
 
-    lines.push(format!("scanned_docs: {}", report.scanned_docs));
-    lines.push(format!("added_docs: {}", report.added_docs));
-    lines.push(format!("updated_docs: {}", report.updated_docs));
-    lines.push(format!("failed_docs: {}", report.failed_docs));
+    append_update_summary_lines(&mut lines, report);
+
+    if !report.errors.is_empty() {
+        append_update_error_lines(&mut lines, report, 3);
+    }
 
     if report.failed_docs > 0 {
+        lines.push(String::new());
+        lines.push("next:".to_string());
         lines.push(format!(
-            "rerun: kbolt --space {} update --collection {}",
+            "  kbolt --space {} update --collection {}",
             collection.space, collection.name
         ));
     }
@@ -1175,25 +1185,84 @@ fn format_collection_add_block(
     match block {
         InitialIndexingBlock::SpaceDenseRepairRequired { space, reason } => {
             lines.push(format!(
-                "initial indexing blocked by space-level dense integrity issue in '{space}'"
+                "indexing blocked by a dense integrity issue in space '{space}'"
             ));
             lines.push(format!("reason: {reason}"));
-            lines.push(format!("run: kbolt --space {space} update"));
+            lines.push(String::new());
+            lines.push("next:".to_string());
+            lines.push(format!("  kbolt --space {space} update"));
         }
         InitialIndexingBlock::ModelNotAvailable { name } => {
+            lines.push(format!("indexing blocked: model '{name}' is not available"));
+            lines.push(String::new());
+            lines.push("next:".to_string());
+            lines.push("  kbolt setup local".to_string());
+            lines.push("  or configure [roles.embedder] in index.toml".to_string());
             lines.push(format!(
-                "initial indexing blocked: model '{name}' is not available"
-            ));
-            lines.push("run: kbolt setup local".to_string());
-            lines.push("or configure [roles.embedder] in index.toml".to_string());
-            lines.push(format!(
-                "then run: kbolt --space {} update --collection {}",
+                "  then run: kbolt --space {} update --collection {}",
                 collection.space, collection.name
             ));
         }
     }
 
     lines.join("\n")
+}
+
+fn append_update_error_lines(lines: &mut Vec<String>, report: &UpdateReport, limit: usize) {
+    lines.push(String::new());
+    lines.push("errors:".to_string());
+    for error in report.errors.iter().take(limit) {
+        lines.push(format!("- {}: {}", error.path, error.error));
+    }
+    if report.errors.len() > limit {
+        lines.push(format!("- {} more error(s)", report.errors.len() - limit));
+    }
+}
+
+fn append_update_summary_lines(lines: &mut Vec<String>, report: &UpdateReport) {
+    lines.push(format!("- {} document(s) scanned", report.scanned_docs));
+
+    let unchanged = report.skipped_mtime_docs + report.skipped_hash_docs;
+    if unchanged > 0 {
+        lines.push(format!("- {} unchanged", unchanged));
+    }
+    if report.added_docs > 0 {
+        lines.push(format!("- {} added", report.added_docs));
+    }
+    if report.updated_docs > 0 {
+        lines.push(format!("- {} updated", report.updated_docs));
+    }
+    if report.failed_docs > 0 {
+        lines.push(format!("- {} failed", report.failed_docs));
+    }
+    if report.deactivated_docs > 0 {
+        lines.push(format!("- {} deactivated", report.deactivated_docs));
+    }
+    if report.reactivated_docs > 0 {
+        lines.push(format!("- {} reactivated", report.reactivated_docs));
+    }
+    if report.reaped_docs > 0 {
+        lines.push(format!("- {} reaped", report.reaped_docs));
+    }
+    if report.embedded_chunks > 0 {
+        lines.push(format!("- {} chunk(s) embedded", report.embedded_chunks));
+    }
+
+    lines.push(format!(
+        "- completed in {}",
+        format_elapsed_ms(report.elapsed_ms)
+    ));
+}
+
+fn format_elapsed_ms(elapsed_ms: u64) -> String {
+    if elapsed_ms < 1_000 {
+        format!("{elapsed_ms}ms")
+    } else if elapsed_ms < 60_000 {
+        format!("{:.1}s", elapsed_ms as f64 / 1_000.0)
+    } else {
+        let total_seconds = elapsed_ms as f64 / 1_000.0;
+        format!("{:.1}m", total_seconds / 60.0)
+    }
 }
 
 fn format_update_decision(decision: &UpdateDecision) -> String {
@@ -1575,11 +1644,12 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        format_collection_add_result, format_doctor_report, format_eval_import_report,
-        format_eval_run_report, format_file_list, format_local_report, format_models_list,
-        format_schedule_add_response, format_schedule_status_response, format_search_result_path,
-        format_status_response, parse_editor_command, resolve_editor_command,
-        resolve_no_rerank_for_mode, truncate_snippet, CliAdapter, CliSearchOptions,
+        format_collection_add_result, format_doctor_report, format_elapsed_ms,
+        format_eval_import_report, format_eval_run_report, format_file_list, format_local_report,
+        format_models_list, format_schedule_add_response, format_schedule_status_response,
+        format_search_result_path, format_status_response, format_update_report,
+        parse_editor_command, resolve_editor_command, resolve_no_rerank_for_mode, truncate_snippet,
+        CliAdapter, CliSearchOptions,
     };
     use kbolt_core::engine::Engine;
     use kbolt_types::{
@@ -2453,7 +2523,7 @@ mod tests {
 
             let summary_index = output
                 .lines()
-                .position(|line| line.starts_with("scanned_docs: "))
+                .position(|line| line == "update complete")
                 .expect("expected summary output");
             assert!(summary_index > 0, "unexpected output: {output}");
             assert!(
@@ -2470,6 +2540,10 @@ mod tests {
             );
             assert!(
                 output.contains("work/api/src/bad.rs: extract_failed (extract failed:"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("- 2 document(s) scanned"),
                 "unexpected output: {output}"
             );
         });
@@ -2494,7 +2568,10 @@ mod tests {
             initial_indexing: InitialIndexingOutcome::Skipped,
         });
 
-        assert_eq!(output, "collection added without indexing: work/api");
+        assert!(output.contains("collection added: work/api"));
+        assert!(output.contains("indexing skipped (--no-index)"));
+        assert!(output.contains("next:"));
+        assert!(output.contains("  kbolt --space work update --collection api"));
     }
 
     #[test]
@@ -2525,17 +2602,25 @@ mod tests {
                 reaped_docs: 0,
                 embedded_chunks: 2,
                 decisions: Vec::new(),
-                errors: Vec::new(),
+                errors: vec![kbolt_types::FileError {
+                    path: "work/api/bad.md".to_string(),
+                    error: "extract failed".to_string(),
+                }],
                 elapsed_ms: 5,
             }),
         });
 
         assert!(output.contains("collection added: work/api"));
         assert!(output.contains("initial indexing incomplete"));
-        assert!(output.contains("scanned_docs: 3"));
-        assert!(output.contains("added_docs: 2"));
-        assert!(output.contains("failed_docs: 1"));
-        assert!(output.contains("rerun: kbolt --space work update --collection api"));
+        assert!(output.contains("- 3 document(s) scanned"));
+        assert!(output.contains("- 2 added"));
+        assert!(output.contains("- 1 failed"));
+        assert!(output.contains("- 2 chunk(s) embedded"));
+        assert!(output.contains("- completed in 5ms"));
+        assert!(output.contains("errors:"));
+        assert!(output.contains("- work/api/bad.md: extract failed"));
+        assert!(output.contains("next:"));
+        assert!(output.contains("  kbolt --space work update --collection api"));
     }
 
     #[test]
@@ -2562,10 +2647,59 @@ mod tests {
         });
 
         assert!(output.contains("collection added: work/api"));
-        assert!(output.contains("initial indexing blocked: model 'embed-model' is not available"));
-        assert!(output.contains("run: kbolt setup local"));
-        assert!(output.contains("configure [roles.embedder] in index.toml"));
-        assert!(output.contains("then run: kbolt --space work update --collection api"));
+        assert!(output.contains("indexing blocked: model 'embed-model' is not available"));
+        assert!(output.contains("next:"));
+        assert!(output.contains("  kbolt setup local"));
+        assert!(output.contains("  or configure [roles.embedder] in index.toml"));
+        assert!(output.contains("  then run: kbolt --space work update --collection api"));
+    }
+
+    #[test]
+    fn update_report_is_human_readable() {
+        let output = format_update_report(
+            &UpdateReport {
+                scanned_docs: 12,
+                skipped_mtime_docs: 5,
+                skipped_hash_docs: 1,
+                added_docs: 3,
+                updated_docs: 2,
+                failed_docs: 1,
+                deactivated_docs: 0,
+                reactivated_docs: 1,
+                reaped_docs: 0,
+                embedded_chunks: 8,
+                decisions: Vec::new(),
+                errors: vec![kbolt_types::FileError {
+                    path: "work/api/src/bad.rs".to_string(),
+                    error: "extract failed".to_string(),
+                }],
+                elapsed_ms: 1_250,
+            },
+            false,
+        );
+
+        assert!(output.starts_with("update complete"));
+        assert!(output.contains("- 12 document(s) scanned"));
+        assert!(output.contains("- 6 unchanged"));
+        assert!(output.contains("- 3 added"));
+        assert!(output.contains("- 2 updated"));
+        assert!(output.contains("- 1 failed"));
+        assert!(output.contains("- 1 reactivated"));
+        assert!(output.contains("- 8 chunk(s) embedded"));
+        assert!(output.contains("- completed in 1.2s"));
+        assert!(output.contains("errors:"));
+        assert!(output.contains("- work/api/src/bad.rs: extract failed"));
+        assert!(
+            !output.contains("scanned_docs:"),
+            "unexpected output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn format_elapsed_ms_uses_human_units() {
+        assert_eq!(format_elapsed_ms(8), "8ms");
+        assert_eq!(format_elapsed_ms(1_250), "1.2s");
+        assert_eq!(format_elapsed_ms(125_000), "2.1m");
     }
 
     #[test]
