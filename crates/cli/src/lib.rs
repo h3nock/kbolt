@@ -6,13 +6,13 @@ use kbolt_core::engine::Engine;
 use kbolt_core::Result;
 use kbolt_types::{
     ActiveSpaceSource, AddCollectionRequest, AddCollectionResult, AddScheduleRequest,
-    DoctorCheckStatus, DoctorReport, DoctorSetupStatus, EvalImportReport, EvalRunReport,
+    DoctorCheckStatus, DoctorReport, DoctorSetupStatus, EvalImportReport, EvalRunReport, FileEntry,
     GetRequest, InitialIndexingBlock, InitialIndexingOutcome, KboltError, LocalAction, LocalReport,
     Locator, ModelInfo, MultiGetRequest, OmitReason, RemoveScheduleRequest, ScheduleAddResponse,
     ScheduleBackend, ScheduleInterval, ScheduleIntervalUnit, ScheduleRunResult, ScheduleScope,
     ScheduleState, ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode,
     SearchPipeline, SearchPipelineNotice, SearchPipelineStep, SearchPipelineUnavailableReason,
-    SearchRequest, UpdateDecision, UpdateDecisionKind, UpdateOptions, UpdateReport,
+    SearchRequest, StatusResponse, UpdateDecision, UpdateDecisionKind, UpdateOptions, UpdateReport,
 };
 
 pub struct CliAdapter {
@@ -431,18 +431,7 @@ impl CliAdapter {
 
     pub fn models_list(&self) -> Result<String> {
         let status = self.engine.model_status()?;
-        let mut lines = Vec::new();
-        lines.push("models:".to_string());
-
-        for (label, info) in [
-            ("embedder", &status.embedder),
-            ("reranker", &status.reranker),
-            ("expander", &status.expander),
-        ] {
-            lines.push(format!("- {label}: {}", format_model_binding_summary(info)));
-        }
-
-        Ok(lines.join("\n"))
+        Ok(format_models_list(&status))
     }
 
     pub fn eval_run(&self, eval_file: Option<&Path>) -> Result<String> {
@@ -603,74 +592,7 @@ impl CliAdapter {
 
     pub fn status(&self, space: Option<&str>) -> Result<String> {
         let status = self.engine.status(space)?;
-        let mut lines = Vec::new();
-        lines.push("spaces:".to_string());
-        if status.spaces.is_empty() {
-            lines.push("- none".to_string());
-        } else {
-            for space in status.spaces {
-                let collection_count = space.collections.len();
-                let description = space.description.unwrap_or_default();
-                let description_suffix = if description.is_empty() {
-                    String::new()
-                } else {
-                    format!(" - {description}")
-                };
-                let last_updated = space
-                    .last_updated
-                    .as_deref()
-                    .map(|value| format!(", last_updated: {value}"))
-                    .unwrap_or_default();
-                lines.push(format!(
-                    "- {} (collections: {}{}){}",
-                    space.name, collection_count, last_updated, description_suffix
-                ));
-
-                for collection in space.collections {
-                    lines.push(format!(
-                        "  - {} ({}) documents: {}, active: {}, chunks: {}, embedded: {}, last_updated: {}",
-                        collection.name,
-                        collection.path.display(),
-                        collection.documents,
-                        collection.active_documents,
-                        collection.chunks,
-                        collection.embedded_chunks,
-                        collection.last_updated
-                    ));
-                }
-            }
-        }
-
-        lines.push(format!("total_documents: {}", status.total_documents));
-        lines.push(format!("total_chunks: {}", status.total_chunks));
-        lines.push(format!("total_embedded: {}", status.total_embedded));
-        lines.push(format!("sqlite_bytes: {}", status.disk_usage.sqlite_bytes));
-        lines.push(format!(
-            "tantivy_bytes: {}",
-            status.disk_usage.tantivy_bytes
-        ));
-        lines.push(format!(
-            "usearch_bytes: {}",
-            status.disk_usage.usearch_bytes
-        ));
-        lines.push(format!("models_bytes: {}", status.disk_usage.models_bytes));
-        lines.push(format!("total_bytes: {}", status.disk_usage.total_bytes));
-        lines.push(format!(
-            "model_embedder: {}",
-            format_model_binding_summary(&status.models.embedder)
-        ));
-        lines.push(format!(
-            "model_reranker: {}",
-            format_model_binding_summary(&status.models.reranker)
-        ));
-        lines.push(format!(
-            "model_expander: {}",
-            format_model_binding_summary(&status.models.expander)
-        ));
-        lines.push(format!("cache_dir: {}", status.cache_dir.display()));
-        lines.push(format!("config_dir: {}", status.config_dir.display()));
-
-        Ok(lines.join("\n"))
+        Ok(format_status_response(&status))
     }
 
     pub fn ls(
@@ -685,25 +607,7 @@ impl CliAdapter {
             files.retain(|file| file.active);
         }
 
-        let mut lines = Vec::new();
-        lines.push("files:".to_string());
-        if files.is_empty() {
-            lines.push("- none".to_string());
-            return Ok(lines.join("\n"));
-        }
-
-        for file in files {
-            if all {
-                lines.push(format!(
-                    "- {} | {} | {} | active: {}",
-                    file.path, file.title, file.docid, file.active
-                ));
-            } else {
-                lines.push(format!("- {} | {} | {}", file.path, file.title, file.docid));
-            }
-        }
-
-        Ok(lines.join("\n"))
+        Ok(format_file_list(&files, all))
     }
 
     pub fn get(
@@ -1001,35 +905,157 @@ fn format_search_result_path(space: &str, path: &str) -> String {
     format!("{space}/{path}")
 }
 
-fn format_model_binding_summary(info: &ModelInfo) -> String {
-    let mut parts = vec![if !info.configured {
-        "unconfigured".to_string()
-    } else if info.ready {
-        "ready".to_string()
+fn format_models_list(status: &kbolt_types::ModelStatus) -> String {
+    let mut lines = Vec::new();
+    lines.push("models:".to_string());
+    append_model_status_lines(&mut lines, "embedder", &status.embedder);
+    append_model_status_lines(&mut lines, "reranker", &status.reranker);
+    append_model_status_lines(&mut lines, "expander", &status.expander);
+    lines.join("\n")
+}
+
+fn format_status_response(status: &StatusResponse) -> String {
+    let mut lines = Vec::new();
+
+    lines.push("spaces:".to_string());
+    if status.spaces.is_empty() {
+        lines.push("- none".to_string());
     } else {
-        "not_ready".to_string()
-    }];
+        for space in &status.spaces {
+            lines.push(format!("- {}", space.name));
+            if let Some(description) = space.description.as_deref() {
+                if !description.is_empty() {
+                    lines.push(format!("  description: {description}"));
+                }
+            }
+            if let Some(last_updated) = space.last_updated.as_deref() {
+                lines.push(format!("  updated: {last_updated}"));
+            }
 
-    if let Some(profile) = info.profile.as_deref() {
-        parts.push(format!("profile={profile}"));
+            if space.collections.is_empty() {
+                lines.push("  collections: none".to_string());
+            } else {
+                lines.push("  collections:".to_string());
+                for collection in &space.collections {
+                    lines.push(format!("    - {}", collection.name));
+                    lines.push(format!("      path: {}", collection.path.display()));
+                    lines.push(format!(
+                        "      documents: {} active / {} total",
+                        collection.active_documents, collection.documents
+                    ));
+                    lines.push(format!("      chunks: {}", collection.chunks));
+                    lines.push(format!("      embedded: {}", collection.embedded_chunks));
+                    lines.push(format!("      updated: {}", collection.last_updated));
+                }
+            }
+        }
     }
-    if let Some(kind) = info.kind.as_deref() {
-        parts.push(format!("kind={kind}"));
+
+    lines.push(String::new());
+    lines.push("totals:".to_string());
+    lines.push(format!("- documents: {}", status.total_documents));
+    lines.push(format!("- chunks: {}", status.total_chunks));
+    lines.push(format!("- embedded: {}", status.total_embedded));
+
+    lines.push(String::new());
+    lines.push("storage:".to_string());
+    lines.push(format!(
+        "- sqlite: {}",
+        format_bytes_human(status.disk_usage.sqlite_bytes)
+    ));
+    lines.push(format!(
+        "- tantivy: {}",
+        format_bytes_human(status.disk_usage.tantivy_bytes)
+    ));
+    lines.push(format!(
+        "- vectors: {}",
+        format_bytes_human(status.disk_usage.usearch_bytes)
+    ));
+    lines.push(format!(
+        "- models: {}",
+        format_bytes_human(status.disk_usage.models_bytes)
+    ));
+    lines.push(format!(
+        "- total: {}",
+        format_bytes_human(status.disk_usage.total_bytes)
+    ));
+
+    lines.push(String::new());
+    lines.push("models:".to_string());
+    append_model_status_lines(&mut lines, "embedder", &status.models.embedder);
+    append_model_status_lines(&mut lines, "reranker", &status.models.reranker);
+    append_model_status_lines(&mut lines, "expander", &status.models.expander);
+
+    lines.push(String::new());
+    lines.push("paths:".to_string());
+    lines.push(format!("- cache: {}", status.cache_dir.display()));
+    lines.push(format!("- config: {}", status.config_dir.display()));
+
+    lines.join("\n")
+}
+
+fn format_file_list(files: &[FileEntry], all: bool) -> String {
+    let mut lines = Vec::new();
+    lines.push("files:".to_string());
+    if files.is_empty() {
+        lines.push("- none".to_string());
+        return lines.join("\n");
     }
-    if let Some(operation) = info.operation.as_deref() {
-        parts.push(format!("operation={operation}"));
+
+    for file in files {
+        if all && !file.active {
+            lines.push(format!("- {} (inactive)", file.path));
+        } else {
+            lines.push(format!("- {}", file.path));
+        }
     }
+
+    lines.join("\n")
+}
+
+fn append_model_status_lines(lines: &mut Vec<String>, label: &str, info: &ModelInfo) {
+    let mut summary = format!("- {label}: {}", model_state_label(info));
     if let Some(model) = info.model.as_deref() {
-        parts.push(format!("model={model}"));
+        summary.push_str(&format!(" ({model})"));
     }
-    if let Some(endpoint) = info.endpoint.as_deref() {
-        parts.push(format!("endpoint={endpoint}"));
+    lines.push(summary);
+
+    if info.configured && !info.ready {
+        if let Some(issue) = info.issue.as_deref() {
+            lines.push(format!("  issue: {issue}"));
+        }
     }
-    if let Some(issue) = info.issue.as_deref() {
-        parts.push(format!("issue={issue}"));
+}
+
+fn model_state_label(info: &ModelInfo) -> &'static str {
+    if !info.configured {
+        "not configured"
+    } else if info.ready {
+        "ready"
+    } else {
+        "not ready"
+    }
+}
+
+fn format_bytes_human(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+
+    if bytes < 1024 {
+        return format!("{bytes} B");
     }
 
-    parts.join(" | ")
+    let mut value = bytes as f64;
+    let mut unit_index = 0usize;
+    while value >= 1024.0 && unit_index < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit_index += 1;
+    }
+
+    if value >= 10.0 {
+        format!("{value:.0} {}", UNITS[unit_index])
+    } else {
+        format!("{value:.1} {}", UNITS[unit_index])
+    }
 }
 
 fn format_search_pipeline(pipeline: &SearchPipeline) -> String {
@@ -1550,20 +1576,21 @@ mod tests {
 
     use super::{
         format_collection_add_result, format_doctor_report, format_eval_import_report,
-        format_eval_run_report, format_local_report, format_schedule_add_response,
-        format_schedule_status_response, format_search_result_path, parse_editor_command,
-        resolve_editor_command, resolve_no_rerank_for_mode, truncate_snippet, CliAdapter,
-        CliSearchOptions,
+        format_eval_run_report, format_file_list, format_local_report, format_models_list,
+        format_schedule_add_response, format_schedule_status_response, format_search_result_path,
+        format_status_response, parse_editor_command, resolve_editor_command,
+        resolve_no_rerank_for_mode, truncate_snippet, CliAdapter, CliSearchOptions,
     };
     use kbolt_core::engine::Engine;
     use kbolt_types::{
-        AddCollectionRequest, AddCollectionResult, CollectionInfo, DoctorCheck, DoctorCheckStatus,
-        DoctorReport, DoctorSetupStatus, EvalImportReport, EvalJudgment, EvalModeReport,
-        EvalQueryReport, EvalRunReport, InitialIndexingBlock, InitialIndexingOutcome, LocalAction,
-        LocalReport, ScheduleAddResponse, ScheduleBackend, ScheduleDefinition, ScheduleInterval,
+        AddCollectionRequest, AddCollectionResult, CollectionInfo, CollectionStatus, DiskUsage,
+        DoctorCheck, DoctorCheckStatus, DoctorReport, DoctorSetupStatus, EvalImportReport,
+        EvalJudgment, EvalModeReport, EvalQueryReport, EvalRunReport, FileEntry,
+        InitialIndexingBlock, InitialIndexingOutcome, LocalAction, LocalReport, ModelInfo,
+        ScheduleAddResponse, ScheduleBackend, ScheduleDefinition, ScheduleInterval,
         ScheduleIntervalUnit, ScheduleOrphan, ScheduleRunResult, ScheduleRunState, ScheduleScope,
         ScheduleState, ScheduleStatusEntry, ScheduleStatusResponse, ScheduleTrigger,
-        ScheduleWeekday, SearchMode, UpdateReport,
+        ScheduleWeekday, SearchMode, SpaceStatus, StatusResponse, UpdateReport,
     };
 
     struct EnvRestore {
@@ -1756,18 +1783,64 @@ mod tests {
             let output = adapter.models_list().expect("list models");
             assert!(output.contains("models:"), "unexpected output: {output}");
             assert!(
-                output.contains("- embedder: unconfigured"),
+                output.contains("- embedder: not configured"),
                 "unexpected output: {output}"
             );
             assert!(
-                output.contains("- reranker: unconfigured"),
+                output.contains("- reranker: not configured"),
                 "unexpected output: {output}"
             );
             assert!(
-                output.contains("- expander: unconfigured"),
+                output.contains("- expander: not configured"),
                 "unexpected output: {output}"
             );
         });
+    }
+
+    #[test]
+    fn models_list_surfaces_not_ready_issue_without_provider_dump() {
+        let output = format_models_list(&kbolt_types::ModelStatus {
+            embedder: ModelInfo {
+                configured: true,
+                ready: false,
+                profile: Some("kbolt_local_embed".to_string()),
+                kind: Some("llama_cpp_server".to_string()),
+                operation: Some("embedding".to_string()),
+                model: Some("embeddinggemma".to_string()),
+                endpoint: Some("http://127.0.0.1:8101".to_string()),
+                issue: Some("endpoint is unreachable".to_string()),
+            },
+            reranker: ModelInfo {
+                configured: true,
+                ready: true,
+                profile: Some("kbolt_local_rerank".to_string()),
+                kind: Some("llama_cpp_server".to_string()),
+                operation: Some("reranking".to_string()),
+                model: Some("qwen3-reranker".to_string()),
+                endpoint: Some("http://127.0.0.1:8102".to_string()),
+                issue: None,
+            },
+            expander: ModelInfo {
+                configured: false,
+                ready: false,
+                profile: None,
+                kind: None,
+                operation: None,
+                model: None,
+                endpoint: None,
+                issue: None,
+            },
+        });
+
+        assert!(output.contains("- embedder: not ready (embeddinggemma)"));
+        assert!(output.contains("  issue: endpoint is unreachable"));
+        assert!(output.contains("- reranker: ready (qwen3-reranker)"));
+        assert!(output.contains("- expander: not configured"));
+        assert!(!output.contains("profile="), "unexpected output:\n{output}");
+        assert!(
+            !output.contains("endpoint=http"),
+            "unexpected output:\n{output}"
+        );
     }
 
     #[test]
@@ -2199,6 +2272,153 @@ mod tests {
             format_search_result_path("work", "api/guide.md"),
             "work/api/guide.md"
         );
+    }
+
+    #[test]
+    fn status_response_formats_human_storage_and_model_summary() {
+        let output = format_status_response(&StatusResponse {
+            spaces: vec![SpaceStatus {
+                name: "default".to_string(),
+                description: Some("main workspace".to_string()),
+                last_updated: Some("2026-04-11T16:49:07Z".to_string()),
+                collections: vec![CollectionStatus {
+                    name: "kbolt".to_string(),
+                    path: PathBuf::from("/Users/macbook/kbolt"),
+                    documents: 98,
+                    active_documents: 98,
+                    chunks: 1218,
+                    embedded_chunks: 1218,
+                    last_updated: "2026-04-11T16:49:07Z".to_string(),
+                }],
+            }],
+            models: kbolt_types::ModelStatus {
+                embedder: ModelInfo {
+                    configured: true,
+                    ready: false,
+                    profile: Some("kbolt_local_embed".to_string()),
+                    kind: Some("llama_cpp_server".to_string()),
+                    operation: Some("embedding".to_string()),
+                    model: Some("embeddinggemma".to_string()),
+                    endpoint: Some("http://127.0.0.1:8103".to_string()),
+                    issue: Some("endpoint is unreachable".to_string()),
+                },
+                reranker: ModelInfo {
+                    configured: true,
+                    ready: true,
+                    profile: Some("kbolt_local_rerank".to_string()),
+                    kind: Some("llama_cpp_server".to_string()),
+                    operation: Some("reranking".to_string()),
+                    model: Some("qwen3-reranker".to_string()),
+                    endpoint: Some("http://127.0.0.1:8104".to_string()),
+                    issue: None,
+                },
+                expander: ModelInfo {
+                    configured: false,
+                    ready: false,
+                    profile: None,
+                    kind: None,
+                    operation: None,
+                    model: None,
+                    endpoint: None,
+                    issue: None,
+                },
+            },
+            cache_dir: PathBuf::from("/Users/macbook/Library/Caches/kbolt"),
+            config_dir: PathBuf::from("/Users/macbook/Library/Application Support/kbolt"),
+            total_documents: 98,
+            total_chunks: 1218,
+            total_embedded: 1218,
+            disk_usage: DiskUsage {
+                sqlite_bytes: 348_160,
+                tantivy_bytes: 520_111,
+                usearch_bytes: 4_581_056,
+                models_bytes: 1_935_460_432,
+                total_bytes: 1_940_909_759,
+            },
+        });
+
+        assert!(output.contains("spaces:"));
+        assert!(output.contains("- default"));
+        assert!(output.contains("  description: main workspace"));
+        assert!(output.contains("  collections:"));
+        assert!(output.contains("    - kbolt"));
+        assert!(output.contains("storage:"));
+        assert!(
+            output.contains("- sqlite: 340 KB"),
+            "unexpected output:\n{output}"
+        );
+        assert!(
+            output.contains("- tantivy: 508 KB"),
+            "unexpected output:\n{output}"
+        );
+        assert!(
+            output.contains("- vectors: 4.4 MB"),
+            "unexpected output:\n{output}"
+        );
+        assert!(
+            output.contains("- models: 1.8 GB"),
+            "unexpected output:\n{output}"
+        );
+        assert!(
+            output.contains("- total: 1.8 GB"),
+            "unexpected output:\n{output}"
+        );
+        assert!(output.contains("- embedder: not ready (embeddinggemma)"));
+        assert!(output.contains("  issue: endpoint is unreachable"));
+        assert!(!output.contains("profile="), "unexpected output:\n{output}");
+    }
+
+    #[test]
+    fn file_list_hides_docids_by_default() {
+        let output = format_file_list(
+            &[
+                FileEntry {
+                    path: "docs/keep.md".to_string(),
+                    title: "keep.md".to_string(),
+                    docid: "#3c96dd".to_string(),
+                    active: true,
+                    chunk_count: 1,
+                    embedded: false,
+                },
+                FileEntry {
+                    path: "docs/old.md".to_string(),
+                    title: "old.md".to_string(),
+                    docid: "#deadbe".to_string(),
+                    active: false,
+                    chunk_count: 1,
+                    embedded: false,
+                },
+            ],
+            false,
+        );
+
+        assert!(
+            output.contains("- docs/keep.md"),
+            "unexpected output:\n{output}"
+        );
+        assert!(!output.contains("#3c96dd"), "unexpected output:\n{output}");
+        assert!(
+            !output.contains("keep.md |"),
+            "unexpected output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn file_list_marks_inactive_files_with_all() {
+        let output = format_file_list(
+            &[FileEntry {
+                path: "docs/old.md".to_string(),
+                title: "old.md".to_string(),
+                docid: "#deadbe".to_string(),
+                active: false,
+                chunk_count: 1,
+                embedded: false,
+            }],
+            true,
+        );
+
+        assert!(output.contains("- docs/old.md (inactive)"));
+        assert!(!output.contains("#deadbe"));
     }
 
     #[test]
