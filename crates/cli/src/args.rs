@@ -28,21 +28,37 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(about = "Check system configuration and model readiness")]
     Doctor,
+    #[command(about = "Configure kbolt with a local inference stack")]
     Setup(SetupArgs),
+    #[command(about = "Manage local llama-server processes")]
     Local(LocalArgs),
+    #[command(about = "Create, list, and manage spaces")]
     Space(SpaceArgs),
+    #[command(about = "Add, list, and manage document collections")]
     Collection(CollectionArgs),
+    #[command(about = "Manage file ignore patterns for collections")]
     Ignore(IgnoreArgs),
+    #[command(about = "Show configured model bindings")]
     Models(ModelsArgs),
+    #[command(about = "Run retrieval benchmarks")]
     Eval(EvalArgs),
+    #[command(about = "Manage automatic re-indexing schedules")]
     Schedule(ScheduleArgs),
+    #[command(about = "Start the MCP server for AI agent integration")]
     Mcp,
+    #[command(about = "Search indexed documents")]
     Search(SearchArgs),
+    #[command(about = "Re-scan and re-index collections")]
     Update(UpdateArgs),
+    #[command(about = "Show index status, disk usage, and model readiness")]
     Status,
+    #[command(about = "List files in a collection")]
     Ls(LsArgs),
+    #[command(about = "Retrieve a document by path or docid")]
     Get(GetArgs),
+    #[command(about = "Retrieve multiple documents at once")]
     MultiGet(MultiGetArgs),
 }
 
@@ -170,6 +186,7 @@ pub struct SearchArgs {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum SpaceCommand {
+    #[command(about = "Create a new space")]
     Add {
         name: String,
         #[arg(long)]
@@ -178,37 +195,37 @@ pub enum SpaceCommand {
         strict: bool,
         dirs: Vec<PathBuf>,
     },
-    Describe {
-        name: String,
-        text: String,
-    },
-    Rename {
-        old: String,
-        new: String,
-    },
-    Remove {
-        name: String,
-    },
+    #[command(about = "Set a space description")]
+    Describe { name: String, text: String },
+    #[command(about = "Rename a space")]
+    Rename { old: String, new: String },
+    #[command(about = "Remove a space and all its data")]
+    Remove { name: String },
+    #[command(about = "Show the active space")]
     Current,
-    Default {
-        name: Option<String>,
-    },
+    #[command(about = "Get or set the default space")]
+    Default { name: Option<String> },
+    #[command(about = "List all spaces")]
     List,
-    Info {
-        name: String,
-    },
+    #[command(about = "Show details about a space")]
+    Info { name: String },
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum SetupCommand {
+    #[command(about = "Set up local embedder and reranker using llama-server")]
     Local,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum LocalCommand {
+    #[command(about = "Show local server status")]
     Status,
+    #[command(about = "Start local inference servers")]
     Start,
+    #[command(about = "Stop local inference servers")]
     Stop,
+    #[command(about = "Enable a local feature (e.g. deep search)")]
     Enable { feature: LocalFeature },
 }
 
@@ -219,6 +236,7 @@ pub enum LocalFeature {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum CollectionCommand {
+    #[command(about = "Add a directory as a document collection")]
     Add {
         path: PathBuf,
         #[arg(long)]
@@ -230,40 +248,43 @@ pub enum CollectionCommand {
         #[arg(long)]
         no_index: bool,
     },
+    #[command(about = "List all collections")]
     List,
-    Info {
-        name: String,
-    },
-    Describe {
-        name: String,
-        text: String,
-    },
-    Rename {
-        old: String,
-        new: String,
-    },
-    Remove {
-        name: String,
-    },
+    #[command(about = "Show details about a collection")]
+    Info { name: String },
+    #[command(about = "Set a collection description")]
+    Describe { name: String, text: String },
+    #[command(about = "Rename a collection")]
+    Rename { old: String, new: String },
+    #[command(about = "Remove a collection and its indexed data")]
+    Remove { name: String },
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum IgnoreCommand {
+    #[command(about = "Show ignore patterns for a collection")]
     Show { collection: String },
+    #[command(about = "Add an ignore pattern to a collection")]
     Add { collection: String, pattern: String },
+    #[command(about = "Remove an ignore pattern from a collection")]
     Remove { collection: String, pattern: String },
+    #[command(about = "Open ignore patterns in an editor")]
     Edit { collection: String },
+    #[command(about = "List all collections with ignore patterns")]
     List,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum ModelsCommand {
+    #[command(about = "List configured models and their status")]
     List,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum EvalCommand {
+    #[command(about = "Run a retrieval evaluation")]
     Run(EvalRunArgs),
+    #[command(about = "Import a benchmark dataset")]
     Import(EvalImportArgs),
 }
 
@@ -290,8 +311,11 @@ pub struct EvalImportBeirArgs {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum ScheduleCommand {
+    #[command(about = "Create a new re-indexing schedule")]
     Add(ScheduleAddArgs),
+    #[command(about = "Show schedule status and last run info")]
     Status,
+    #[command(about = "Remove a schedule")]
     Remove(ScheduleRemoveArgs),
 }
 
