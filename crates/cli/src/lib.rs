@@ -495,51 +495,75 @@ impl CliAdapter {
         })?;
 
         let mut lines = Vec::new();
-        lines.push(format!("query: {}", response.query));
-        lines.push(format!(
-            "requested_mode: {}",
-            format_search_mode(&response.requested_mode)
-        ));
-        lines.push(format!(
-            "effective_mode: {}",
-            format_search_mode(&response.effective_mode)
-        ));
-        lines.push(format!(
-            "pipeline: {}",
-            format_search_pipeline(&response.pipeline)
-        ));
-        for notice in &response.pipeline.notices {
-            lines.push(format!("note: {}", format_search_pipeline_notice(notice)));
-        }
-        lines.push(format!("results: {}", response.results.len()));
-        for (index, item) in response.results.iter().enumerate() {
+
+        if debug {
+            lines.push(format!("query: {}", response.query));
             lines.push(format!(
-                "{}. {} {} score={:.3}",
-                index + 1,
-                item.docid,
-                item.path,
-                item.score
+                "mode: {} -> {}",
+                format_search_mode(&response.requested_mode),
+                format_search_mode(&response.effective_mode)
             ));
-            lines.push(format!("title: {}", item.title));
             lines.push(format!(
-                "space: {} | collection: {}",
-                item.space, item.collection
+                "pipeline: {}",
+                format_search_pipeline(&response.pipeline)
             ));
-            if let Some(heading) = &item.heading {
-                lines.push(format!("heading: {heading}"));
+            for notice in &response.pipeline.notices {
+                lines.push(format!("note: {}", format_search_pipeline_notice(notice)));
             }
-            lines.push(format!("text: {}", item.text));
-            if let Some(signals) = &item.signals {
+            lines.push(String::new());
+        }
+
+        lines.push(format!(
+            "{} result{}",
+            response.results.len(),
+            if response.results.len() == 1 { "" } else { "s" }
+        ));
+
+        for (index, item) in response.results.iter().enumerate() {
+            lines.push(String::new());
+            if debug {
                 lines.push(format!(
-                    "signals: bm25={:?} dense={:?} fusion={:.3} reranker={:?}",
+                    "{}. {} score={:.3}",
+                    index + 1,
+                    item.docid,
+                    item.score
+                ));
+            } else {
+                lines.push(format!("{}. {}", index + 1, item.title));
+            }
+            lines.push(format!(
+                "   {}",
+                format_search_result_path(&item.space, &item.path)
+            ));
+            if !debug {
+                lines.push(format!("   score: {:.2}", item.score));
+            }
+            if let Some(heading) = &item.heading {
+                lines.push(format!("   heading: {heading}"));
+            }
+            lines.push(String::new());
+            let snippet = truncate_snippet(&item.text, 4);
+            for snippet_line in snippet.lines() {
+                lines.push(format!("   {snippet_line}"));
+            }
+            if let Some(signals) = &item.signals {
+                lines.push(String::new());
+                lines.push(format!(
+                    "   signals: bm25={:?} dense={:?} fusion={:.3} reranker={:?}",
                     signals.bm25, signals.dense, signals.fusion, signals.reranker
                 ));
             }
         }
+
         if let Some(hint) = response.staleness_hint {
+            lines.push(String::new());
             lines.push(hint);
         }
-        lines.push(format!("elapsed_ms: {}", response.elapsed_ms));
+
+        if debug {
+            lines.push(format!("elapsed: {}ms", response.elapsed_ms));
+        }
+
         Ok(lines.join("\n"))
     }
 
@@ -769,107 +793,199 @@ impl CliAdapter {
 
 pub fn format_doctor_report(report: &DoctorReport) -> String {
     let mut lines = Vec::new();
-    lines.push(format!(
-        "setup: {}",
-        format_doctor_setup_status(report.setup_status)
-    ));
-    lines.push(format!("ready: {}", report.ready));
-    if let Some(path) = report.config_file.as_ref() {
-        lines.push(format!("config_file: {}", path.display()));
+
+    let failures: Vec<_> = report
+        .checks
+        .iter()
+        .filter(|c| c.status == DoctorCheckStatus::Fail)
+        .collect();
+    let warnings: Vec<_> = report
+        .checks
+        .iter()
+        .filter(|c| c.status == DoctorCheckStatus::Warn)
+        .collect();
+
+    match report.setup_status {
+        DoctorSetupStatus::ConfigMissing => {
+            lines.push("kbolt is not set up".to_string());
+            lines.push(String::new());
+            lines.push("get started:".to_string());
+            lines.push("  kbolt setup local".to_string());
+            return lines.join("\n");
+        }
+        DoctorSetupStatus::ConfigInvalid => {
+            lines.push("kbolt configuration is invalid".to_string());
+            for check in &failures {
+                lines.push(String::new());
+                lines.push(format!("  {}", check.message));
+                if let Some(fix) = check.fix.as_deref() {
+                    lines.push(format!("  fix: {fix}"));
+                }
+            }
+            if let Some(path) = report.config_file.as_ref() {
+                lines.push(String::new());
+                lines.push(format!("config: {}", path.display()));
+            }
+            return lines.join("\n");
+        }
+        DoctorSetupStatus::NotConfigured => {
+            lines.push("kbolt is installed but no inference roles are configured".to_string());
+            lines.push(String::new());
+            lines.push("get started:".to_string());
+            lines.push("  kbolt setup local".to_string());
+            return lines.join("\n");
+        }
+        DoctorSetupStatus::Configured => {}
     }
-    if let Some(path) = report.config_dir.as_ref() {
-        lines.push(format!("config_dir: {}", path.display()));
+
+    if report.ready && failures.is_empty() {
+        lines.push("kbolt is ready".to_string());
+    } else {
+        lines.push("kbolt has issues".to_string());
     }
-    if let Some(path) = report.cache_dir.as_ref() {
-        lines.push(format!("cache_dir: {}", path.display()));
-    }
-    lines.push("checks:".to_string());
-    for check in &report.checks {
-        lines.push(format!(
-            "- [{}] {} {} ({}ms): {}",
-            format_doctor_check_status(check.status),
-            check.scope,
-            check.id,
-            check.elapsed_ms,
-            check.message
-        ));
-        if let Some(fix) = check.fix.as_deref() {
-            lines.push(format!("  fix: {fix}"));
+
+    let configured_roles: Vec<_> = report
+        .checks
+        .iter()
+        .filter(|c| c.id.ends_with(".bound") && c.status == DoctorCheckStatus::Pass)
+        .collect();
+    if !configured_roles.is_empty() {
+        lines.push(String::new());
+        lines.push("configured:".to_string());
+        for check in &configured_roles {
+            let role = check.scope.strip_prefix("roles.").unwrap_or(&check.scope);
+            lines.push(format!("  {role}"));
         }
     }
+
+    let not_enabled: Vec<_> = report
+        .checks
+        .iter()
+        .filter(|c| c.id.ends_with(".bound") && c.status == DoctorCheckStatus::Warn)
+        .collect();
+    if !not_enabled.is_empty() {
+        lines.push(String::new());
+        lines.push("not enabled:".to_string());
+        for check in &not_enabled {
+            let role = check.scope.strip_prefix("roles.").unwrap_or(&check.scope);
+            lines.push(format!("  {role}"));
+        }
+    }
+
+    if !failures.is_empty() {
+        lines.push(String::new());
+        lines.push("failures:".to_string());
+        for check in &failures {
+            lines.push(format!("  {}: {}", check.id, check.message));
+            if let Some(fix) = check.fix.as_deref() {
+                lines.push(format!("  fix: {fix}"));
+            }
+        }
+    }
+
+    if !warnings.is_empty() && failures.is_empty() {
+        // Only show non-bound warnings if there are no failures
+        let other_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|c| !c.id.ends_with(".bound") && !c.id.ends_with(".reachable"))
+            .collect();
+        if !other_warnings.is_empty() {
+            lines.push(String::new());
+            lines.push("warnings:".to_string());
+            for check in &other_warnings {
+                lines.push(format!("  {}: {}", check.id, check.message));
+                if let Some(fix) = check.fix.as_deref() {
+                    lines.push(format!("  fix: {fix}"));
+                }
+            }
+        }
+    }
+
     lines.join("\n")
 }
 
 pub fn format_local_report(report: &LocalReport) -> String {
     let mut lines = Vec::new();
-    lines.push(format!("action: {}", format_local_action(report.action)));
-    lines.push(format!("ready: {}", report.ready));
-    lines.push(format!("config_file: {}", report.config_file.display()));
-    lines.push(format!("cache_dir: {}", report.cache_dir.display()));
-    if let Some(path) = report.llama_server_path.as_ref() {
-        lines.push(format!("llama_server: {}", path.display()));
+
+    let action_label = match report.action {
+        LocalAction::Setup => "local setup complete",
+        LocalAction::Start => "local servers started",
+        LocalAction::Stop => "local servers stopped",
+        LocalAction::Status => "local server status",
+        LocalAction::EnableDeep => "deep search enabled",
+    };
+
+    if report.action == LocalAction::Stop || report.ready {
+        lines.push(action_label.to_string());
     } else {
-        lines.push("llama_server: missing".to_string());
+        lines.push(format!("{action_label} (not ready)"));
     }
+
     if !report.notes.is_empty() {
+        lines.push(String::new());
         lines.push("notes:".to_string());
         for note in &report.notes {
-            lines.push(format!("- {note}"));
+            lines.push(format!("  {note}"));
         }
     }
-    lines.push("services:".to_string());
-    for service in &report.services {
-        lines.push(format!(
-            "- {}: {} | configured={} | enabled={} | managed={} | running={} | ready={} | model={} | endpoint={} | model_path={} | pid={} | pid_file={} | log_file={}",
-            service.name,
-            service.provider,
-            service.configured,
-            service.enabled,
-            service.managed,
-            service.running,
-            service.ready,
-            service.model,
-            service.endpoint,
-            service.model_path.display(),
-            service
-                .pid
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "none".to_string()),
-            service.pid_file.display(),
-            service.log_file.display()
-        ));
-        if let Some(issue) = service.issue.as_deref() {
-            lines.push(format!("  issue: {issue}"));
+
+    let ready_services: Vec<_> = if report.action == LocalAction::Stop {
+        Vec::new()
+    } else {
+        report.services.iter().filter(|s| s.ready).collect()
+    };
+    let issue_services: Vec<_> = if report.action == LocalAction::Stop {
+        report
+            .services
+            .iter()
+            .filter(|s| s.configured && (s.running || s.ready))
+            .collect()
+    } else {
+        report
+            .services
+            .iter()
+            .filter(|s| s.configured && !s.ready)
+            .collect()
+    };
+    let unconfigured_services: Vec<_> = report.services.iter().filter(|s| !s.configured).collect();
+
+    if !ready_services.is_empty() {
+        lines.push(String::new());
+        lines.push("ready:".to_string());
+        for service in &ready_services {
+            lines.push(format!("  {} ({})", service.name, service.model));
         }
     }
+
+    if !issue_services.is_empty() {
+        lines.push(String::new());
+        lines.push("issues:".to_string());
+        for service in &issue_services {
+            let issue = service.issue.as_deref().unwrap_or("not ready");
+            lines.push(format!("  {}: {issue}", service.name));
+        }
+    }
+
+    if !unconfigured_services.is_empty() && report.action != LocalAction::Stop {
+        lines.push(String::new());
+        lines.push("not configured:".to_string());
+        for service in &unconfigured_services {
+            lines.push(format!("  {}", service.name));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("config:".to_string());
+    lines.push(format!("  {}", report.config_file.display()));
+
+    if report.action == LocalAction::Setup && report.ready {
+        lines.push(String::new());
+        lines.push("next:".to_string());
+        lines.push("  kbolt collection add /path/to/docs".to_string());
+        lines.push("  kbolt doctor".to_string());
+    }
+
     lines.join("\n")
-}
-
-fn format_doctor_setup_status(status: DoctorSetupStatus) -> &'static str {
-    match status {
-        DoctorSetupStatus::ConfigMissing => "config_missing",
-        DoctorSetupStatus::ConfigInvalid => "config_invalid",
-        DoctorSetupStatus::NotConfigured => "not_configured",
-        DoctorSetupStatus::Configured => "configured",
-    }
-}
-
-fn format_local_action(action: LocalAction) -> &'static str {
-    match action {
-        LocalAction::Setup => "setup",
-        LocalAction::Start => "start",
-        LocalAction::Stop => "stop",
-        LocalAction::Status => "status",
-        LocalAction::EnableDeep => "enable_deep",
-    }
-}
-
-fn format_doctor_check_status(status: DoctorCheckStatus) -> &'static str {
-    match status {
-        DoctorCheckStatus::Pass => "PASS",
-        DoctorCheckStatus::Warn => "WARN",
-        DoctorCheckStatus::Fail => "FAIL",
-    }
 }
 
 fn format_search_mode(mode: &SearchMode) -> &'static str {
@@ -879,6 +995,10 @@ fn format_search_mode(mode: &SearchMode) -> &'static str {
         SearchMode::Keyword => "keyword",
         SearchMode::Semantic => "semantic",
     }
+}
+
+fn format_search_result_path(space: &str, path: &str) -> String {
+    format!("{space}/{path}")
 }
 
 fn format_model_binding_summary(info: &ModelInfo) -> String {
@@ -1101,6 +1221,20 @@ pub fn resolve_no_rerank_for_mode(mode: SearchMode, rerank: bool, no_rerank: boo
         SearchMode::Deep => no_rerank,
         SearchMode::Keyword | SearchMode::Semantic => true,
     }
+}
+
+fn truncate_snippet(text: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= max_lines {
+        return text.to_string();
+    }
+    let truncated: Vec<&str> = lines[..max_lines].to_vec();
+    let remaining = lines.len() - max_lines;
+    format!(
+        "{}\n(+{remaining} more line{})",
+        truncated.join("\n"),
+        if remaining == 1 { "" } else { "s" }
+    )
 }
 
 fn resolve_editor_command() -> Result<Vec<String>> {
@@ -1417,8 +1551,9 @@ mod tests {
     use super::{
         format_collection_add_result, format_doctor_report, format_eval_import_report,
         format_eval_run_report, format_local_report, format_schedule_add_response,
-        format_schedule_status_response, parse_editor_command, resolve_editor_command,
-        resolve_no_rerank_for_mode, CliAdapter, CliSearchOptions,
+        format_schedule_status_response, format_search_result_path, parse_editor_command,
+        resolve_editor_command, resolve_no_rerank_for_mode, truncate_snippet, CliAdapter,
+        CliSearchOptions,
     };
     use kbolt_core::engine::Engine;
     use kbolt_types::{
@@ -1636,58 +1771,197 @@ mod tests {
     }
 
     #[test]
-    fn doctor_report_formats_status_checks_and_fixes() {
+    fn doctor_report_success_is_concise() {
+        let output = format_doctor_report(&DoctorReport {
+            setup_status: DoctorSetupStatus::Configured,
+            config_file: Some(PathBuf::from("/tmp/kbolt/index.toml")),
+            config_dir: Some(PathBuf::from("/tmp/kbolt")),
+            cache_dir: Some(PathBuf::from("/tmp/cache/kbolt")),
+            ready: true,
+            checks: vec![
+                DoctorCheck {
+                    id: "roles.embedder.bound".to_string(),
+                    scope: "roles.embedder".to_string(),
+                    status: DoctorCheckStatus::Pass,
+                    elapsed_ms: 0,
+                    message: "bound".to_string(),
+                    fix: None,
+                },
+                DoctorCheck {
+                    id: "roles.expander.bound".to_string(),
+                    scope: "roles.expander".to_string(),
+                    status: DoctorCheckStatus::Warn,
+                    elapsed_ms: 0,
+                    message: "role is not configured".to_string(),
+                    fix: Some("configure expander".to_string()),
+                },
+            ],
+        });
+
+        assert!(
+            output.contains("kbolt is ready"),
+            "unexpected output:\n{output}"
+        );
+        assert!(output.contains("configured:"));
+        assert!(output.contains("  embedder"));
+        assert!(output.contains("not enabled:"));
+        assert!(output.contains("  expander"));
+        assert!(
+            !output.contains("PASS"),
+            "should not show raw check status in success case"
+        );
+    }
+
+    #[test]
+    fn doctor_report_shows_failures_with_fixes() {
         let output = format_doctor_report(&DoctorReport {
             setup_status: DoctorSetupStatus::Configured,
             config_file: Some(PathBuf::from("/tmp/kbolt/index.toml")),
             config_dir: Some(PathBuf::from("/tmp/kbolt")),
             cache_dir: Some(PathBuf::from("/tmp/cache/kbolt")),
             ready: false,
-            checks: vec![
-                DoctorCheck {
-                    id: "config.file_parses".to_string(),
-                    scope: "config".to_string(),
-                    status: DoctorCheckStatus::Pass,
-                    elapsed_ms: 2,
-                    message: "ok".to_string(),
-                    fix: None,
+            checks: vec![DoctorCheck {
+                id: "roles.embedder.reachable".to_string(),
+                scope: "roles.embedder".to_string(),
+                status: DoctorCheckStatus::Fail,
+                elapsed_ms: 17,
+                message: "endpoint is unreachable".to_string(),
+                fix: Some("Start the embedding server.".to_string()),
+            }],
+        });
+
+        assert!(
+            output.contains("kbolt has issues"),
+            "unexpected output:\n{output}"
+        );
+        assert!(output.contains("failures:"));
+        assert!(output.contains("endpoint is unreachable"));
+        assert!(output.contains("fix: Start the embedding server."));
+    }
+
+    #[test]
+    fn doctor_report_missing_config_guides_to_setup() {
+        let output = format_doctor_report(&DoctorReport {
+            setup_status: DoctorSetupStatus::ConfigMissing,
+            config_file: None,
+            config_dir: None,
+            cache_dir: None,
+            ready: false,
+            checks: vec![],
+        });
+
+        assert!(
+            output.contains("kbolt is not set up"),
+            "unexpected output:\n{output}"
+        );
+        assert!(output.contains("kbolt setup local"));
+    }
+
+    #[test]
+    fn local_report_shows_ready_services_and_hides_internals() {
+        let output = format_local_report(&LocalReport {
+            action: LocalAction::Setup,
+            config_file: PathBuf::from("/tmp/kbolt/index.toml"),
+            cache_dir: PathBuf::from("/tmp/cache/kbolt"),
+            llama_server_path: Some(PathBuf::from("/opt/homebrew/bin/llama-server")),
+            ready: true,
+            notes: vec![],
+            services: vec![
+                kbolt_types::LocalServiceReport {
+                    name: "embedder".to_string(),
+                    provider: "kbolt_local_embed".to_string(),
+                    enabled: true,
+                    configured: true,
+                    managed: true,
+                    running: true,
+                    ready: true,
+                    model: "embeddinggemma".to_string(),
+                    model_path: PathBuf::from("/tmp/cache/kbolt/models/embedder/model.gguf"),
+                    endpoint: "http://127.0.0.1:8101".to_string(),
+                    port: 8101,
+                    pid: Some(42),
+                    pid_file: PathBuf::from("/tmp/cache/kbolt/run/embedder.pid"),
+                    log_file: PathBuf::from("/tmp/cache/kbolt/logs/embedder.log"),
+                    issue: None,
                 },
-                DoctorCheck {
-                    id: "roles.embedder.reachable".to_string(),
-                    scope: "roles.embedder".to_string(),
-                    status: DoctorCheckStatus::Fail,
-                    elapsed_ms: 17,
-                    message: "llama_cpp_server endpoint is unreachable".to_string(),
-                    fix: Some("Start the embedding server.".to_string()),
+                kbolt_types::LocalServiceReport {
+                    name: "expander".to_string(),
+                    provider: "kbolt_local_expand".to_string(),
+                    enabled: false,
+                    configured: false,
+                    managed: false,
+                    running: false,
+                    ready: false,
+                    model: "qmd".to_string(),
+                    model_path: PathBuf::from("/tmp/cache/kbolt/models/expander/model.gguf"),
+                    endpoint: "http://127.0.0.1:8103".to_string(),
+                    port: 8103,
+                    pid: None,
+                    pid_file: PathBuf::from("/tmp/cache/kbolt/run/expander.pid"),
+                    log_file: PathBuf::from("/tmp/cache/kbolt/logs/expander.log"),
+                    issue: Some("not configured".to_string()),
                 },
             ],
         });
 
-        assert!(output.contains("setup: configured"));
-        assert!(output.contains("ready: false"));
-        assert!(output.contains("config_file: /tmp/kbolt/index.toml"));
         assert!(
-            output.contains("- [PASS] config config.file_parses (2ms): ok"),
-            "unexpected output: {output}"
+            output.contains("local setup complete"),
+            "unexpected output:\n{output}"
+        );
+        assert!(output.contains("  embedder (embeddinggemma)"));
+        assert!(output.contains("not configured:"));
+        assert!(output.contains("  expander"));
+        assert!(output.contains("/tmp/kbolt/index.toml"));
+        assert!(output.contains("kbolt collection add"));
+        assert!(
+            !output.contains("pid"),
+            "should not expose pid in default output"
         );
         assert!(
-            output.contains(
-                "- [FAIL] roles.embedder roles.embedder.reachable (17ms): llama_cpp_server endpoint is unreachable"
-            ),
-            "unexpected output: {output}"
+            !output.contains("log_file"),
+            "should not expose log_file in default output"
         );
-        assert!(output.contains("  fix: Start the embedding server."));
+        assert!(
+            !output.contains("model_path"),
+            "should not expose model_path in default output"
+        );
     }
 
     #[test]
-    fn local_report_formats_service_state_and_notes() {
+    fn local_report_surfaces_notes() {
+        let output = format_local_report(&LocalReport {
+            action: LocalAction::Setup,
+            config_file: PathBuf::from("/tmp/kbolt/index.toml"),
+            cache_dir: PathBuf::from("/tmp/cache/kbolt"),
+            llama_server_path: Some(PathBuf::from("/opt/homebrew/bin/llama-server")),
+            ready: true,
+            notes: vec![
+                "moved incompatible old config to /tmp/index.toml.invalid.bak".to_string(),
+                "started embedder on http://127.0.0.1:8101".to_string(),
+            ],
+            services: vec![],
+        });
+
+        assert!(output.contains("notes:"), "unexpected output:\n{output}");
+        assert!(
+            output.contains("moved incompatible old config"),
+            "unexpected output:\n{output}"
+        );
+        assert!(
+            output.contains("started embedder on http://127.0.0.1:8101"),
+            "unexpected output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn local_report_shows_issues_when_not_ready() {
         let output = format_local_report(&LocalReport {
             action: LocalAction::Setup,
             config_file: PathBuf::from("/tmp/kbolt/index.toml"),
             cache_dir: PathBuf::from("/tmp/cache/kbolt"),
             llama_server_path: Some(PathBuf::from("/opt/homebrew/bin/llama-server")),
             ready: false,
-            notes: vec!["started embedder on http://127.0.0.1:8101".to_string()],
+            notes: vec![],
             services: vec![kbolt_types::LocalServiceReport {
                 name: "embedder".to_string(),
                 provider: "kbolt_local_embed".to_string(),
@@ -1707,11 +1981,118 @@ mod tests {
             }],
         });
 
-        assert!(output.contains("action: setup"));
-        assert!(output.contains("llama_server: /opt/homebrew/bin/llama-server"));
-        assert!(output.contains("- started embedder on http://127.0.0.1:8101"));
-        assert!(output.contains("configured=true"));
-        assert!(output.contains("issue: service is not ready"));
+        assert!(
+            output.contains("(not ready)"),
+            "unexpected output:\n{output}"
+        );
+        assert!(output.contains("issues:"));
+        assert!(output.contains("embedder: service is not ready"));
+    }
+
+    #[test]
+    fn local_stop_report_treats_stopped_services_as_expected() {
+        let output = format_local_report(&LocalReport {
+            action: LocalAction::Stop,
+            config_file: PathBuf::from("/tmp/kbolt/index.toml"),
+            cache_dir: PathBuf::from("/tmp/cache/kbolt"),
+            llama_server_path: Some(PathBuf::from("/opt/homebrew/bin/llama-server")),
+            ready: false,
+            notes: vec![
+                "stopped embedder".to_string(),
+                "stopped reranker".to_string(),
+            ],
+            services: vec![
+                kbolt_types::LocalServiceReport {
+                    name: "embedder".to_string(),
+                    provider: "kbolt_local_embed".to_string(),
+                    enabled: true,
+                    configured: true,
+                    managed: false,
+                    running: false,
+                    ready: false,
+                    model: "embeddinggemma".to_string(),
+                    model_path: PathBuf::from("/tmp/cache/kbolt/models/embedder/model.gguf"),
+                    endpoint: "http://127.0.0.1:8101".to_string(),
+                    port: 8101,
+                    pid: None,
+                    pid_file: PathBuf::from("/tmp/cache/kbolt/run/embedder.pid"),
+                    log_file: PathBuf::from("/tmp/cache/kbolt/logs/embedder.log"),
+                    issue: Some("service is not ready".to_string()),
+                },
+                kbolt_types::LocalServiceReport {
+                    name: "reranker".to_string(),
+                    provider: "kbolt_local_rerank".to_string(),
+                    enabled: true,
+                    configured: true,
+                    managed: false,
+                    running: false,
+                    ready: false,
+                    model: "qwen3-reranker".to_string(),
+                    model_path: PathBuf::from("/tmp/cache/kbolt/models/reranker/model.gguf"),
+                    endpoint: "http://127.0.0.1:8102".to_string(),
+                    port: 8102,
+                    pid: None,
+                    pid_file: PathBuf::from("/tmp/cache/kbolt/run/reranker.pid"),
+                    log_file: PathBuf::from("/tmp/cache/kbolt/logs/reranker.log"),
+                    issue: Some("service is not ready".to_string()),
+                },
+                kbolt_types::LocalServiceReport {
+                    name: "expander".to_string(),
+                    provider: "kbolt_local_expand".to_string(),
+                    enabled: false,
+                    configured: false,
+                    managed: false,
+                    running: false,
+                    ready: false,
+                    model: "qmd".to_string(),
+                    model_path: PathBuf::from("/tmp/cache/kbolt/models/expander/model.gguf"),
+                    endpoint: "http://127.0.0.1:8103".to_string(),
+                    port: 8103,
+                    pid: None,
+                    pid_file: PathBuf::from("/tmp/cache/kbolt/run/expander.pid"),
+                    log_file: PathBuf::from("/tmp/cache/kbolt/logs/expander.log"),
+                    issue: Some("service is not configured".to_string()),
+                },
+            ],
+        });
+
+        assert!(
+            output.starts_with("local servers stopped\n"),
+            "unexpected output:\n{output}"
+        );
+        assert!(
+            !output.contains("(not ready)"),
+            "unexpected output:\n{output}"
+        );
+        assert!(!output.contains("issues:"), "unexpected output:\n{output}");
+        assert!(
+            !output.contains("not configured:"),
+            "unexpected output:\n{output}"
+        );
+        assert!(
+            output.contains("stopped embedder"),
+            "unexpected output:\n{output}"
+        );
+        assert!(
+            output.contains("stopped reranker"),
+            "unexpected output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn truncate_snippet_preserves_short_text() {
+        assert_eq!(
+            truncate_snippet("line one\nline two", 4),
+            "line one\nline two"
+        );
+    }
+
+    #[test]
+    fn truncate_snippet_truncates_long_text() {
+        let text = "one\ntwo\nthree\nfour\nfive\nsix";
+        let result = truncate_snippet(text, 3);
+        assert!(result.contains("one\ntwo\nthree\n"), "unexpected: {result}");
+        assert!(result.contains("(+3 more lines)"), "unexpected: {result}");
     }
 
     #[test]
@@ -1793,16 +2174,12 @@ mod tests {
                     semantic: false,
                     rerank: false,
                     no_rerank: false,
-                    debug: false,
+                    debug: true,
                 })
                 .expect("run auto search");
 
             assert!(
-                output.contains("requested_mode: auto"),
-                "unexpected output: {output}"
-            );
-            assert!(
-                output.contains("effective_mode: keyword"),
+                output.contains("mode: auto -> keyword"),
                 "unexpected output: {output}"
             );
             assert!(
@@ -1814,6 +2191,14 @@ mod tests {
                 "unexpected output: {output}"
             );
         });
+    }
+
+    #[test]
+    fn search_result_paths_include_space_context() {
+        assert_eq!(
+            format_search_result_path("work", "api/guide.md"),
+            "work/api/guide.md"
+        );
     }
 
     #[test]
