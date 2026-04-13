@@ -5,7 +5,7 @@ use std::path::Path;
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
 use kbolt_types::{
-    ActiveSpaceSource, AddCollectionRequest, AddCollectionResult, AddScheduleRequest,
+    ActiveSpaceSource, AddCollectionRequest, AddCollectionResult, AddScheduleRequest, DoctorCheck,
     DoctorCheckStatus, DoctorReport, DoctorSetupStatus, EvalImportReport, EvalRunReport, FileEntry,
     GetRequest, InitialIndexingBlock, InitialIndexingOutcome, KboltError, LocalAction, LocalReport,
     Locator, ModelInfo, MultiGetRequest, OmitReason, RemoveScheduleRequest, ScheduleAddResponse,
@@ -712,6 +712,10 @@ pub fn format_doctor_report(report: &DoctorReport) -> String {
         .iter()
         .filter(|c| c.status == DoctorCheckStatus::Warn)
         .collect();
+    let expected_unindexed_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|check| is_expected_unindexed_storage_warning(check))
+        .collect();
 
     match report.setup_status {
         DoctorSetupStatus::ConfigMissing => {
@@ -795,7 +799,11 @@ pub fn format_doctor_report(report: &DoctorReport) -> String {
         // Only show non-bound warnings if there are no failures
         let other_warnings: Vec<_> = warnings
             .iter()
-            .filter(|c| !c.id.ends_with(".bound") && !c.id.ends_with(".reachable"))
+            .filter(|c| {
+                !c.id.ends_with(".bound")
+                    && !c.id.ends_with(".reachable")
+                    && !is_expected_unindexed_storage_warning(c)
+            })
             .collect();
         if !other_warnings.is_empty() {
             lines.push(String::new());
@@ -809,7 +817,25 @@ pub fn format_doctor_report(report: &DoctorReport) -> String {
         }
     }
 
+    if !expected_unindexed_warnings.is_empty() && failures.is_empty() {
+        lines.push(String::new());
+        lines.push("indexing:".to_string());
+        lines.push("  no collections have been indexed yet".to_string());
+        lines.push(String::new());
+        lines.push("next:".to_string());
+        lines.push("  kbolt collection add /path/to/docs".to_string());
+        lines.push("  or, if collections are already registered: kbolt update".to_string());
+    }
+
     lines.join("\n")
+}
+
+fn is_expected_unindexed_storage_warning(check: &DoctorCheck) -> bool {
+    check.status == DoctorCheckStatus::Warn
+        && matches!(
+            check.id.as_str(),
+            "storage.sqlite_readable" | "storage.search_indexes_readable"
+        )
 }
 
 pub fn format_local_report(report: &LocalReport) -> String {
@@ -1682,8 +1708,9 @@ mod tests {
         format_elapsed_ms, format_eval_import_report, format_eval_run_report, format_file_list,
         format_local_report, format_models_list, format_optional_search_signal,
         format_schedule_add_response, format_schedule_status_response, format_search_result_path,
-        format_status_response, format_update_report, parse_editor_command, resolve_editor_command,
-        resolve_no_rerank_for_mode, truncate_snippet, CliAdapter, CliSearchOptions,
+        format_status_response, format_update_report, is_expected_unindexed_storage_warning,
+        parse_editor_command, resolve_editor_command, resolve_no_rerank_for_mode, truncate_snippet,
+        CliAdapter, CliSearchOptions,
     };
     use kbolt_core::engine::Engine;
     use kbolt_types::{
@@ -2032,6 +2059,99 @@ mod tests {
             "unexpected output:\n{output}"
         );
         assert!(output.contains("kbolt setup local"));
+    }
+
+    #[test]
+    fn doctor_report_treats_unindexed_storage_as_expected_next_step() {
+        let output = format_doctor_report(&DoctorReport {
+            setup_status: DoctorSetupStatus::Configured,
+            config_file: Some(PathBuf::from("/tmp/kbolt/index.toml")),
+            config_dir: Some(PathBuf::from("/tmp/kbolt")),
+            cache_dir: Some(PathBuf::from("/tmp/cache/kbolt")),
+            ready: true,
+            checks: vec![
+                DoctorCheck {
+                    id: "roles.embedder.bound".to_string(),
+                    scope: "roles.embedder".to_string(),
+                    status: DoctorCheckStatus::Pass,
+                    elapsed_ms: 0,
+                    message: "bound".to_string(),
+                    fix: None,
+                },
+                DoctorCheck {
+                    id: "storage.sqlite_readable".to_string(),
+                    scope: "storage".to_string(),
+                    status: DoctorCheckStatus::Warn,
+                    elapsed_ms: 0,
+                    message: "index database does not exist yet: /tmp/cache/kbolt/meta.sqlite"
+                        .to_string(),
+                    fix: Some(
+                        "Run `kbolt update` after adding a collection to build the index."
+                            .to_string(),
+                    ),
+                },
+                DoctorCheck {
+                    id: "storage.search_indexes_readable".to_string(),
+                    scope: "storage".to_string(),
+                    status: DoctorCheckStatus::Warn,
+                    elapsed_ms: 0,
+                    message: "search index directory does not exist yet: /tmp/cache/kbolt/spaces"
+                        .to_string(),
+                    fix: Some(
+                        "Run `kbolt update` after adding a collection to build search indexes."
+                            .to_string(),
+                    ),
+                },
+            ],
+        });
+
+        assert!(
+            output.contains("kbolt is ready"),
+            "unexpected output:\n{output}"
+        );
+        assert!(output.contains("indexing:"), "unexpected output:\n{output}");
+        assert!(
+            output.contains("no collections have been indexed yet"),
+            "unexpected output:\n{output}"
+        );
+        assert!(output.contains("next:"), "unexpected output:\n{output}");
+        assert!(
+            output.contains("kbolt collection add /path/to/docs"),
+            "unexpected output:\n{output}"
+        );
+        assert!(
+            output.contains("or, if collections are already registered: kbolt update"),
+            "unexpected output:\n{output}"
+        );
+        assert!(
+            !output.contains("warnings:"),
+            "unexpected output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn expected_unindexed_storage_warning_matches_only_storage_warns() {
+        let warn = DoctorCheck {
+            id: "storage.sqlite_readable".to_string(),
+            scope: "storage".to_string(),
+            status: DoctorCheckStatus::Warn,
+            elapsed_ms: 0,
+            message: "missing".to_string(),
+            fix: None,
+        };
+        assert!(is_expected_unindexed_storage_warning(&warn));
+
+        let fail = DoctorCheck {
+            status: DoctorCheckStatus::Fail,
+            ..warn.clone()
+        };
+        assert!(!is_expected_unindexed_storage_warning(&fail));
+
+        let other = DoctorCheck {
+            id: "roles.expander.bound".to_string(),
+            ..warn
+        };
+        assert!(!is_expected_unindexed_storage_warning(&other));
     }
 
     #[test]

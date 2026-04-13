@@ -353,18 +353,13 @@ fn prepare_service(
     notes: &mut Vec<String>,
     started: &mut Vec<u32>,
 ) -> Result<PreparedService> {
-    let model_path = ensure_model_file(&config.cache_dir, spec)?;
+    ensure_model_file(&config.cache_dir, spec)?;
     let port = select_port(config, spec, reserved_ports)?;
     reserved_ports.insert(port);
     let service = start_or_reuse_service(config, llama_server_path, spec, port)?;
     if let Some(pid) = service.started_pid {
         started.push(pid);
-        notes.push(format!(
-            "started {} on {} using {}",
-            spec.name,
-            service.endpoint,
-            model_path.display()
-        ));
+        notes.push(started_service_note(spec.name, &service.endpoint));
     } else if port != spec.preferred_port {
         notes.push(format!(
             "{} default port {} was unavailable; using {}",
@@ -372,6 +367,10 @@ fn prepare_service(
         ));
     }
     Ok(PreparedService { port })
+}
+
+fn started_service_note(name: &str, endpoint: &str) -> String {
+    format!("started {name} on {endpoint}")
 }
 
 fn start_or_reuse_service(
@@ -1043,7 +1042,8 @@ mod tests {
 
     use super::{
         apply_managed_service_config, endpoint_for_port, load_setup_config, managed_model_path,
-        missing_service_report, select_port, EMBEDDER_SPEC, EXPANDER_SPEC, RERANKER_SPEC,
+        missing_service_report, select_port, started_service_note, EMBEDDER_SPEC, EXPANDER_SPEC,
+        RERANKER_SPEC,
     };
     use crate::config::{self, Config};
 
@@ -1200,5 +1200,12 @@ operation = "embedding"
                 .join("reranker")
                 .join("qwen3-reranker-0.6b-q8_0.gguf")
         );
+    }
+
+    #[test]
+    fn started_service_note_omits_model_path() {
+        let note = started_service_note("embedder", "http://127.0.0.1:8101");
+        assert_eq!(note, "started embedder on http://127.0.0.1:8101");
+        assert!(!note.contains(".gguf"));
     }
 }
