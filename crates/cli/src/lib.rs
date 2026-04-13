@@ -538,8 +538,11 @@ impl CliAdapter {
             if let Some(signals) = &item.signals {
                 lines.push(String::new());
                 lines.push(format!(
-                    "   signals: bm25={:?} dense={:?} fusion={:.3} reranker={:?}",
-                    signals.bm25, signals.dense, signals.fusion, signals.reranker
+                    "   signals: bm25={} dense={} fusion={} reranker={}",
+                    format_optional_search_signal(signals.bm25),
+                    format_optional_search_signal(signals.dense),
+                    format_search_signal(signals.fusion),
+                    format_optional_search_signal(signals.reranker)
                 ));
             }
         }
@@ -592,7 +595,8 @@ impl CliAdapter {
 
     pub fn status(&self, space: Option<&str>) -> Result<String> {
         let status = self.engine.status(space)?;
-        Ok(format_status_response(&status))
+        let active_space = active_space_name_for_status(&self.engine, space);
+        Ok(format_status_response(&status, active_space.as_deref()))
     }
 
     pub fn ls(
@@ -914,7 +918,7 @@ fn format_models_list(status: &kbolt_types::ModelStatus) -> String {
     lines.join("\n")
 }
 
-fn format_status_response(status: &StatusResponse) -> String {
+fn format_status_response(status: &StatusResponse, active_space: Option<&str>) -> String {
     let mut lines = Vec::new();
 
     lines.push("spaces:".to_string());
@@ -922,7 +926,12 @@ fn format_status_response(status: &StatusResponse) -> String {
         lines.push("- none".to_string());
     } else {
         for space in &status.spaces {
-            lines.push(format!("- {}", space.name));
+            let active_suffix = if Some(space.name.as_str()) == active_space {
+                " (active)"
+            } else {
+                ""
+            };
+            lines.push(format!("- {}{}", space.name, active_suffix));
             if let Some(description) = space.description.as_deref() {
                 if !description.is_empty() {
                     lines.push(format!("  description: {description}"));
@@ -1056,6 +1065,31 @@ fn format_bytes_human(bytes: u64) -> String {
     } else {
         format!("{value:.1} {}", UNITS[unit_index])
     }
+}
+
+fn active_space_name_for_status(engine: &Engine, explicit: Option<&str>) -> Option<String> {
+    if let Some(space_name) = explicit {
+        return Some(space_name.to_string());
+    }
+
+    if let Ok(space_name) = std::env::var("KBOLT_SPACE") {
+        let trimmed = space_name.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    engine.config().default_space.clone()
+}
+
+fn format_optional_search_signal(value: Option<f32>) -> String {
+    value
+        .map(format_search_signal)
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_search_signal(value: f32) -> String {
+    format!("{value:.2}")
 }
 
 fn format_search_pipeline(pipeline: &SearchPipeline) -> String {
@@ -1644,12 +1678,12 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        format_collection_add_result, format_doctor_report, format_elapsed_ms,
-        format_eval_import_report, format_eval_run_report, format_file_list, format_local_report,
-        format_models_list, format_schedule_add_response, format_schedule_status_response,
-        format_search_result_path, format_status_response, format_update_report,
-        parse_editor_command, resolve_editor_command, resolve_no_rerank_for_mode, truncate_snippet,
-        CliAdapter, CliSearchOptions,
+        active_space_name_for_status, format_collection_add_result, format_doctor_report,
+        format_elapsed_ms, format_eval_import_report, format_eval_run_report, format_file_list,
+        format_local_report, format_models_list, format_optional_search_signal,
+        format_schedule_add_response, format_schedule_status_response, format_search_result_path,
+        format_status_response, format_update_report, parse_editor_command, resolve_editor_command,
+        resolve_no_rerank_for_mode, truncate_snippet, CliAdapter, CliSearchOptions,
     };
     use kbolt_core::engine::Engine;
     use kbolt_types::{
@@ -2346,69 +2380,72 @@ mod tests {
 
     #[test]
     fn status_response_formats_human_storage_and_model_summary() {
-        let output = format_status_response(&StatusResponse {
-            spaces: vec![SpaceStatus {
-                name: "default".to_string(),
-                description: Some("main workspace".to_string()),
-                last_updated: Some("2026-04-11T16:49:07Z".to_string()),
-                collections: vec![CollectionStatus {
-                    name: "kbolt".to_string(),
-                    path: PathBuf::from("/Users/macbook/kbolt"),
-                    documents: 98,
-                    active_documents: 98,
-                    chunks: 1218,
-                    embedded_chunks: 1218,
-                    last_updated: "2026-04-11T16:49:07Z".to_string(),
+        let output = format_status_response(
+            &StatusResponse {
+                spaces: vec![SpaceStatus {
+                    name: "default".to_string(),
+                    description: Some("main workspace".to_string()),
+                    last_updated: Some("2026-04-11T16:49:07Z".to_string()),
+                    collections: vec![CollectionStatus {
+                        name: "kbolt".to_string(),
+                        path: PathBuf::from("/Users/macbook/kbolt"),
+                        documents: 98,
+                        active_documents: 98,
+                        chunks: 1218,
+                        embedded_chunks: 1218,
+                        last_updated: "2026-04-11T16:49:07Z".to_string(),
+                    }],
                 }],
-            }],
-            models: kbolt_types::ModelStatus {
-                embedder: ModelInfo {
-                    configured: true,
-                    ready: false,
-                    profile: Some("kbolt_local_embed".to_string()),
-                    kind: Some("llama_cpp_server".to_string()),
-                    operation: Some("embedding".to_string()),
-                    model: Some("embeddinggemma".to_string()),
-                    endpoint: Some("http://127.0.0.1:8103".to_string()),
-                    issue: Some("endpoint is unreachable".to_string()),
+                models: kbolt_types::ModelStatus {
+                    embedder: ModelInfo {
+                        configured: true,
+                        ready: false,
+                        profile: Some("kbolt_local_embed".to_string()),
+                        kind: Some("llama_cpp_server".to_string()),
+                        operation: Some("embedding".to_string()),
+                        model: Some("embeddinggemma".to_string()),
+                        endpoint: Some("http://127.0.0.1:8103".to_string()),
+                        issue: Some("endpoint is unreachable".to_string()),
+                    },
+                    reranker: ModelInfo {
+                        configured: true,
+                        ready: true,
+                        profile: Some("kbolt_local_rerank".to_string()),
+                        kind: Some("llama_cpp_server".to_string()),
+                        operation: Some("reranking".to_string()),
+                        model: Some("qwen3-reranker".to_string()),
+                        endpoint: Some("http://127.0.0.1:8104".to_string()),
+                        issue: None,
+                    },
+                    expander: ModelInfo {
+                        configured: false,
+                        ready: false,
+                        profile: None,
+                        kind: None,
+                        operation: None,
+                        model: None,
+                        endpoint: None,
+                        issue: None,
+                    },
                 },
-                reranker: ModelInfo {
-                    configured: true,
-                    ready: true,
-                    profile: Some("kbolt_local_rerank".to_string()),
-                    kind: Some("llama_cpp_server".to_string()),
-                    operation: Some("reranking".to_string()),
-                    model: Some("qwen3-reranker".to_string()),
-                    endpoint: Some("http://127.0.0.1:8104".to_string()),
-                    issue: None,
-                },
-                expander: ModelInfo {
-                    configured: false,
-                    ready: false,
-                    profile: None,
-                    kind: None,
-                    operation: None,
-                    model: None,
-                    endpoint: None,
-                    issue: None,
+                cache_dir: PathBuf::from("/Users/macbook/Library/Caches/kbolt"),
+                config_dir: PathBuf::from("/Users/macbook/Library/Application Support/kbolt"),
+                total_documents: 98,
+                total_chunks: 1218,
+                total_embedded: 1218,
+                disk_usage: DiskUsage {
+                    sqlite_bytes: 348_160,
+                    tantivy_bytes: 520_111,
+                    usearch_bytes: 4_581_056,
+                    models_bytes: 1_935_460_432,
+                    total_bytes: 1_940_909_759,
                 },
             },
-            cache_dir: PathBuf::from("/Users/macbook/Library/Caches/kbolt"),
-            config_dir: PathBuf::from("/Users/macbook/Library/Application Support/kbolt"),
-            total_documents: 98,
-            total_chunks: 1218,
-            total_embedded: 1218,
-            disk_usage: DiskUsage {
-                sqlite_bytes: 348_160,
-                tantivy_bytes: 520_111,
-                usearch_bytes: 4_581_056,
-                models_bytes: 1_935_460_432,
-                total_bytes: 1_940_909_759,
-            },
-        });
+            Some("default"),
+        );
 
         assert!(output.contains("spaces:"));
-        assert!(output.contains("- default"));
+        assert!(output.contains("- default (active)"));
         assert!(output.contains("  description: main workspace"));
         assert!(output.contains("  collections:"));
         assert!(output.contains("    - kbolt"));
@@ -2436,6 +2473,43 @@ mod tests {
         assert!(output.contains("- embedder: not ready (embeddinggemma)"));
         assert!(output.contains("  issue: endpoint is unreachable"));
         assert!(!output.contains("profile="), "unexpected output:\n{output}");
+    }
+
+    #[test]
+    fn active_space_name_for_status_follows_cli_precedence_without_validation() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create config root");
+            std::fs::write(
+                root.path().join("index.toml"),
+                "default_space = \"default\"\n",
+            )
+            .expect("write config");
+            let engine = Engine::new(Some(root.path())).expect("create engine");
+
+            std::env::remove_var("KBOLT_SPACE");
+            assert_eq!(
+                active_space_name_for_status(&engine, Some("work")).as_deref(),
+                Some("work")
+            );
+
+            std::env::set_var("KBOLT_SPACE", "ops");
+            assert_eq!(
+                active_space_name_for_status(&engine, None).as_deref(),
+                Some("ops")
+            );
+            std::env::remove_var("KBOLT_SPACE");
+
+            assert_eq!(
+                active_space_name_for_status(&engine, None).as_deref(),
+                Some("default")
+            );
+        });
+    }
+
+    #[test]
+    fn optional_search_signal_uses_human_values() {
+        assert_eq!(format_optional_search_signal(None), "-");
+        assert_eq!(format_optional_search_signal(Some(0.824)), "0.82");
     }
 
     #[test]

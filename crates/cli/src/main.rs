@@ -36,7 +36,8 @@ fn main() {
     let argv = std::env::args_os().collect::<Vec<_>>();
     let output_format = requested_output_format_from_args(&argv);
 
-    if let Err(err) = run(argv) {
+    if let Err(err) = run(argv.clone()) {
+        maybe_print_no_subcommand_first_run_hint(&argv, output_format, &err);
         emit_error(output_format, &err);
         std::process::exit(err.exit_code());
     }
@@ -1035,6 +1036,74 @@ fn maybe_print_first_run_inference_hint(command: &Command, format: OutputFormat)
     }
 }
 
+fn maybe_print_no_subcommand_first_run_hint(
+    args: &[OsString],
+    format: OutputFormat,
+    err: &RunError,
+) {
+    let config_file = match config::default_config_file_path() {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+
+    if should_show_no_subcommand_first_run_hint(
+        args,
+        format,
+        err,
+        stdin_stdout_are_tty(),
+        config_file.exists(),
+    ) {
+        println!("kbolt is not configured yet. Run `kbolt setup local` to get started.");
+        println!();
+    }
+}
+
+fn should_show_no_subcommand_first_run_hint(
+    args: &[OsString],
+    format: OutputFormat,
+    err: &RunError,
+    is_tty: bool,
+    config_exists: bool,
+) -> bool {
+    matches!(
+        err,
+        RunError::Clap(clap_err)
+            if matches!(
+                clap_err.kind(),
+                clap::error::ErrorKind::DisplayHelp
+                    | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            )
+    ) && format == OutputFormat::Cli
+        && is_tty
+        && !config_exists
+        && invocation_has_no_subcommand(args)
+}
+
+fn invocation_has_no_subcommand(args: &[OsString]) -> bool {
+    let mut args_iter = args.iter().skip(1);
+    while let Some(arg) = args_iter.next() {
+        let Some(raw) = arg.to_str() else {
+            return false;
+        };
+
+        match raw {
+            "-s" | "--space" | "-f" | "--format" => {
+                let Some(next) = args_iter.next() else {
+                    return false;
+                };
+                if next.to_str().is_none() {
+                    return false;
+                }
+            }
+            value if value.starts_with("--space=") || value.starts_with("--format=") => {}
+            "-h" | "--help" | "-V" | "--version" => return false,
+            _ => return false,
+        }
+    }
+
+    true
+}
+
 fn should_show_first_run_inference_hint(
     command: &Command,
     format: OutputFormat,
@@ -1083,11 +1152,12 @@ mod tests {
     use super::{
         collection_add_activity_label, ensure_eval_uses_local_scope,
         ensure_schedule_uses_local_scope, ensure_supported_output_format,
-        is_model_not_available_error, local_command_succeeds, parse_internal_schedule_run,
-        parse_schedule_interval, render_activity_status_line, render_error_output,
-        render_message_output, render_structured_output, requested_output_format_from_args,
-        schedule_add_request, schedule_remove_request, should_show_activity_indicator,
-        should_show_first_run_inference_hint, stdout_stderr_are_tty, update_activity_label,
+        invocation_has_no_subcommand, is_model_not_available_error, local_command_succeeds,
+        parse_internal_schedule_run, parse_schedule_interval, render_activity_status_line,
+        render_error_output, render_message_output, render_structured_output,
+        requested_output_format_from_args, schedule_add_request, schedule_remove_request,
+        should_show_activity_indicator, should_show_first_run_inference_hint,
+        should_show_no_subcommand_first_run_hint, stdout_stderr_are_tty, update_activity_label,
         with_collection_add_model_missing_guidance, with_update_model_missing_guidance,
         DefaultSpaceJsonResponse, IgnoreShowJsonResponse, RunError, INTERNAL_SCHEDULE_RUN_COMMAND,
     };
@@ -1524,6 +1594,72 @@ mod tests {
             true,
             false
         ));
+    }
+
+    #[test]
+    fn no_subcommand_hint_visibility_respects_context() {
+        let help = RunError::Clap(Cli::command().error(
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
+            "",
+        ));
+
+        assert!(should_show_no_subcommand_first_run_hint(
+            &[OsString::from("kbolt")],
+            OutputFormat::Cli,
+            &help,
+            true,
+            false
+        ));
+        assert!(!should_show_no_subcommand_first_run_hint(
+            &[OsString::from("kbolt"), OsString::from("--help")],
+            OutputFormat::Cli,
+            &help,
+            true,
+            false
+        ));
+        assert!(!should_show_no_subcommand_first_run_hint(
+            &[OsString::from("kbolt"), OsString::from("status")],
+            OutputFormat::Cli,
+            &help,
+            true,
+            false
+        ));
+        assert!(!should_show_no_subcommand_first_run_hint(
+            &[OsString::from("kbolt")],
+            OutputFormat::Json,
+            &help,
+            true,
+            false
+        ));
+        assert!(!should_show_no_subcommand_first_run_hint(
+            &[OsString::from("kbolt")],
+            OutputFormat::Cli,
+            &help,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn invocation_has_no_subcommand_only_for_global_flags() {
+        assert!(invocation_has_no_subcommand(&[OsString::from("kbolt")]));
+        assert!(invocation_has_no_subcommand(&[
+            OsString::from("kbolt"),
+            OsString::from("--format"),
+            OsString::from("cli"),
+        ]));
+        assert!(invocation_has_no_subcommand(&[
+            OsString::from("kbolt"),
+            OsString::from("--space=work"),
+        ]));
+        assert!(!invocation_has_no_subcommand(&[
+            OsString::from("kbolt"),
+            OsString::from("--help"),
+        ]));
+        assert!(!invocation_has_no_subcommand(&[
+            OsString::from("kbolt"),
+            OsString::from("status"),
+        ]));
     }
 
     #[test]
