@@ -5,10 +5,11 @@ use std::path::Path;
 use kbolt_core::engine::Engine;
 use kbolt_core::Result;
 use kbolt_types::{
-    ActiveSpaceSource, AddCollectionRequest, AddCollectionResult, AddScheduleRequest, DoctorCheck,
-    DoctorCheckStatus, DoctorReport, DoctorSetupStatus, EvalImportReport, EvalRunReport, FileEntry,
-    GetRequest, InitialIndexingBlock, InitialIndexingOutcome, KboltError, LocalAction, LocalReport,
-    Locator, ModelInfo, MultiGetRequest, OmitReason, RemoveScheduleRequest, ScheduleAddResponse,
+    ActiveSpaceSource, AddCollectionRequest, AddCollectionResult, AddScheduleRequest,
+    CollectionInfo, DoctorCheck, DoctorCheckStatus, DoctorReport, DoctorSetupStatus,
+    DocumentResponse, EvalImportReport, EvalRunReport, FileEntry, GetRequest, InitialIndexingBlock,
+    InitialIndexingOutcome, KboltError, LocalAction, LocalReport, Locator, ModelInfo,
+    MultiGetRequest, MultiGetResponse, OmitReason, RemoveScheduleRequest, ScheduleAddResponse,
     ScheduleBackend, ScheduleInterval, ScheduleIntervalUnit, ScheduleRunResult, ScheduleScope,
     ScheduleState, ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode,
     SearchPipeline, SearchPipelineNotice, SearchPipelineStep, SearchPipelineUnavailableReason,
@@ -279,34 +280,8 @@ impl CliAdapter {
 
     pub fn collection_info(&self, space: Option<&str>, name: &str) -> Result<String> {
         let collection = self.engine.collection_info(space, name)?;
-        let description = collection.description.unwrap_or_default();
-        let extensions = collection
-            .extensions
-            .map(|items| items.join(","))
-            .unwrap_or_default();
-        let description_line = if description.is_empty() {
-            "description:".to_string()
-        } else {
-            format!("description: {description}")
-        };
-        let extensions_line = if extensions.is_empty() {
-            "extensions:".to_string()
-        } else {
-            format!("extensions: {extensions}")
-        };
 
-        Ok(format!(
-            "name: {}\nspace: {}\npath: {}\n{description_line}\n{extensions_line}\ndocuments: {}\nactive_documents: {}\nchunks: {}\nembedded_chunks: {}\ncreated: {}\nupdated: {}",
-            collection.name,
-            collection.space,
-            collection.path.display(),
-            collection.document_count,
-            collection.active_document_count,
-            collection.chunk_count,
-            collection.embedded_chunk_count,
-            collection.created,
-            collection.updated
-        ))
+        Ok(format_collection_info(&collection))
     }
 
     pub fn collection_describe(
@@ -630,18 +605,7 @@ impl CliAdapter {
             limit,
         })?;
 
-        Ok(format!(
-            "docid: {}\npath: {}\ntitle: {}\nspace: {}\ncollection: {}\nstale: {}\ntotal_lines: {}\nreturned_lines: {}\ncontent:\n{}",
-            document.docid,
-            document.path,
-            document.title,
-            document.space,
-            document.collection,
-            document.stale,
-            document.total_lines,
-            document.returned_lines,
-            document.content
-        ))
+        Ok(format_document_response(&document))
     }
 
     pub fn multi_get(
@@ -663,39 +627,7 @@ impl CliAdapter {
             max_bytes,
         })?;
 
-        let mut lines = Vec::new();
-        lines.push(format!("documents: {}", response.documents.len()));
-        for document in response.documents {
-            lines.push(format!(
-                "--- {} {} (stale: {}, lines: {}/{}) ---",
-                document.docid,
-                document.path,
-                document.stale,
-                document.returned_lines,
-                document.total_lines
-            ));
-            lines.push(document.content);
-        }
-
-        lines.push(format!("omitted: {}", response.omitted.len()));
-        for omitted in response.omitted {
-            let reason = match omitted.reason {
-                OmitReason::MaxFiles => "max_files",
-                OmitReason::MaxBytes => "max_bytes",
-            };
-            lines.push(format!(
-                "- {} {} ({} bytes, reason: {reason})",
-                omitted.docid, omitted.path, omitted.size_bytes
-            ));
-        }
-        lines.push(format!("resolved_count: {}", response.resolved_count));
-        if !response.warnings.is_empty() {
-            lines.push(format!("warnings: {}", response.warnings.len()));
-            for warning in response.warnings {
-                lines.push(format!("- {warning}"));
-            }
-        }
-        Ok(lines.join("\n"))
+        Ok(format_multi_get_response(&response))
     }
 }
 
@@ -935,6 +867,126 @@ fn format_search_result_path(space: &str, path: &str) -> String {
     format!("{space}/{path}")
 }
 
+fn format_collection_info(collection: &CollectionInfo) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "collection: {}/{}",
+        collection.space, collection.name
+    ));
+    lines.push(format!("path: {}", collection.path.display()));
+
+    if let Some(description) = collection.description.as_deref() {
+        if !description.is_empty() {
+            lines.push(format!("description: {description}"));
+        }
+    }
+
+    if let Some(extensions) = collection.extensions.as_ref() {
+        if !extensions.is_empty() {
+            lines.push(format!("extensions: {}", extensions.join(", ")));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("documents:".to_string());
+    lines.push(format!(
+        "  {} active / {} total",
+        collection.active_document_count, collection.document_count
+    ));
+    lines.push(format!("  {} chunks", collection.chunk_count));
+    lines.push(format!("  {} embedded", collection.embedded_chunk_count));
+
+    lines.push(String::new());
+    lines.push("updated:".to_string());
+    lines.push(format!("  created {}", collection.created));
+    lines.push(format!("  updated {}", collection.updated));
+
+    lines.join("\n")
+}
+
+fn format_document_response(document: &DocumentResponse) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "document: {}",
+        format_search_result_path(&document.space, &document.path)
+    ));
+    lines.push(format!("title: {}", document.title));
+    lines.push(format!("docid: {}", document.docid));
+    lines.push(format!(
+        "lines: {}",
+        format_returned_lines(document.returned_lines, document.total_lines)
+    ));
+    if document.stale {
+        lines.push("status: stale".to_string());
+    }
+
+    lines.push(String::new());
+    lines.push("content:".to_string());
+    lines.push(document.content.clone());
+
+    lines.join("\n")
+}
+
+fn format_multi_get_response(response: &MultiGetResponse) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("documents: {} returned", response.documents.len()));
+    if response.resolved_count > response.documents.len() {
+        lines.push(format!("resolved: {}", response.resolved_count));
+    }
+
+    if response.documents.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for (index, document) in response.documents.iter().enumerate() {
+            lines.push(String::new());
+            lines.push(format!(
+                "{}. {}",
+                index + 1,
+                format_search_result_path(&document.space, &document.path)
+            ));
+            lines.push(format!("   title: {}", document.title));
+            lines.push(format!("   docid: {}", document.docid));
+            lines.push(format!(
+                "   lines: {}",
+                format_returned_lines(document.returned_lines, document.total_lines)
+            ));
+            if document.stale {
+                lines.push("   status: stale".to_string());
+            }
+            lines.push(String::new());
+            for content_line in document.content.lines() {
+                lines.push(content_line.to_string());
+            }
+            if document.content.is_empty() {
+                lines.push(String::new());
+            }
+        }
+    }
+
+    if !response.omitted.is_empty() {
+        lines.push(String::new());
+        lines.push("omitted:".to_string());
+        for omitted in &response.omitted {
+            lines.push(format!(
+                "- {} ({}, {})",
+                omitted.path,
+                format_bytes_human(omitted.size_bytes as u64),
+                format_omit_reason(&omitted.reason)
+            ));
+        }
+    }
+
+    if !response.warnings.is_empty() {
+        lines.push(String::new());
+        lines.push("warnings:".to_string());
+        for warning in &response.warnings {
+            lines.push(format!("- {warning}"));
+        }
+    }
+
+    lines.join("\n")
+}
+
 fn format_models_list(status: &kbolt_types::ModelStatus) -> String {
     let mut lines = Vec::new();
     lines.push("models:".to_string());
@@ -1090,6 +1142,21 @@ fn format_bytes_human(bytes: u64) -> String {
         format!("{value:.0} {}", UNITS[unit_index])
     } else {
         format!("{value:.1} {}", UNITS[unit_index])
+    }
+}
+
+fn format_returned_lines(returned_lines: usize, total_lines: usize) -> String {
+    if returned_lines == total_lines {
+        format!("{total_lines}")
+    } else {
+        format!("{returned_lines} of {total_lines}")
+    }
+}
+
+fn format_omit_reason(reason: &OmitReason) -> &'static str {
+    match reason {
+        OmitReason::MaxFiles => "max files",
+        OmitReason::MaxBytes => "size limit",
     }
 }
 
@@ -1704,9 +1771,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        active_space_name_for_status, format_collection_add_result, format_doctor_report,
-        format_elapsed_ms, format_eval_import_report, format_eval_run_report, format_file_list,
-        format_local_report, format_models_list, format_optional_search_signal,
+        active_space_name_for_status, format_collection_add_result, format_collection_info,
+        format_doctor_report, format_document_response, format_elapsed_ms,
+        format_eval_import_report, format_eval_run_report, format_file_list, format_local_report,
+        format_models_list, format_multi_get_response, format_optional_search_signal,
         format_schedule_add_response, format_schedule_status_response, format_search_result_path,
         format_status_response, format_update_report, is_expected_unindexed_storage_warning,
         parse_editor_command, resolve_editor_command, resolve_no_rerank_for_mode, truncate_snippet,
@@ -1715,13 +1783,14 @@ mod tests {
     use kbolt_core::engine::Engine;
     use kbolt_types::{
         AddCollectionRequest, AddCollectionResult, CollectionInfo, CollectionStatus, DiskUsage,
-        DoctorCheck, DoctorCheckStatus, DoctorReport, DoctorSetupStatus, EvalImportReport,
-        EvalJudgment, EvalModeReport, EvalQueryReport, EvalRunReport, FileEntry,
+        DoctorCheck, DoctorCheckStatus, DoctorReport, DoctorSetupStatus, DocumentResponse,
+        EvalImportReport, EvalJudgment, EvalModeReport, EvalQueryReport, EvalRunReport, FileEntry,
         InitialIndexingBlock, InitialIndexingOutcome, LocalAction, LocalReport, ModelInfo,
-        ScheduleAddResponse, ScheduleBackend, ScheduleDefinition, ScheduleInterval,
-        ScheduleIntervalUnit, ScheduleOrphan, ScheduleRunResult, ScheduleRunState, ScheduleScope,
-        ScheduleState, ScheduleStatusEntry, ScheduleStatusResponse, ScheduleTrigger,
-        ScheduleWeekday, SearchMode, SpaceStatus, StatusResponse, UpdateReport,
+        MultiGetResponse, OmitReason, OmittedFile, ScheduleAddResponse, ScheduleBackend,
+        ScheduleDefinition, ScheduleInterval, ScheduleIntervalUnit, ScheduleOrphan,
+        ScheduleRunResult, ScheduleRunState, ScheduleScope, ScheduleState, ScheduleStatusEntry,
+        ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode, SpaceStatus,
+        StatusResponse, UpdateReport,
     };
 
     struct EnvRestore {
@@ -2683,6 +2752,128 @@ mod tests {
 
         assert!(output.contains("- docs/old.md (inactive)"));
         assert!(!output.contains("#deadbe"));
+    }
+
+    #[test]
+    fn collection_info_is_human_readable() {
+        let output = format_collection_info(&CollectionInfo {
+            name: "api".to_string(),
+            space: "work".to_string(),
+            path: PathBuf::from("/tmp/work-api"),
+            description: Some("API reference".to_string()),
+            extensions: Some(vec!["md".to_string(), "txt".to_string()]),
+            document_count: 97,
+            active_document_count: 96,
+            chunk_count: 1183,
+            embedded_chunk_count: 1180,
+            created: "2026-04-13T12:00:00Z".to_string(),
+            updated: "2026-04-14T09:30:00Z".to_string(),
+        });
+
+        assert!(output.contains("collection: work/api"));
+        assert!(output.contains("path: /tmp/work-api"));
+        assert!(output.contains("description: API reference"));
+        assert!(output.contains("extensions: md, txt"));
+        assert!(output.contains("documents:"));
+        assert!(output.contains("  96 active / 97 total"));
+        assert!(output.contains("  1183 chunks"));
+        assert!(output.contains("  1180 embedded"));
+        assert!(output.contains("updated:"));
+        assert!(output.contains("  created 2026-04-13T12:00:00Z"));
+        assert!(output.contains("  updated 2026-04-14T09:30:00Z"));
+        assert!(
+            !output.contains("active_documents:"),
+            "unexpected output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn document_response_is_human_readable() {
+        let output = format_document_response(&DocumentResponse {
+            docid: "#409380".to_string(),
+            path: "kbolt/README.md".to_string(),
+            title: "README".to_string(),
+            space: "default".to_string(),
+            collection: "kbolt".to_string(),
+            content: "line one\nline two".to_string(),
+            stale: false,
+            total_lines: 68,
+            returned_lines: 5,
+        });
+
+        assert!(output.contains("document: default/kbolt/README.md"));
+        assert!(output.contains("title: README"));
+        assert!(output.contains("docid: #409380"));
+        assert!(output.contains("lines: 5 of 68"));
+        assert!(output.contains("content:\nline one\nline two"));
+        assert!(
+            !output.contains("stale: false"),
+            "unexpected output:\n{output}"
+        );
+        assert!(
+            !output.contains("collection: kbolt"),
+            "unexpected output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn multi_get_response_is_human_readable() {
+        let output = format_multi_get_response(&MultiGetResponse {
+            documents: vec![
+                DocumentResponse {
+                    docid: "#409380".to_string(),
+                    path: "kbolt/README.md".to_string(),
+                    title: "README".to_string(),
+                    space: "default".to_string(),
+                    collection: "kbolt".to_string(),
+                    content: "line one\nline two".to_string(),
+                    stale: false,
+                    total_lines: 68,
+                    returned_lines: 68,
+                },
+                DocumentResponse {
+                    docid: "#abcd12".to_string(),
+                    path: "api/guide.md".to_string(),
+                    title: "Guide".to_string(),
+                    space: "work".to_string(),
+                    collection: "api".to_string(),
+                    content: "guide body".to_string(),
+                    stale: true,
+                    total_lines: 12,
+                    returned_lines: 4,
+                },
+            ],
+            omitted: vec![OmittedFile {
+                path: "api/large.md".to_string(),
+                docid: "#large1".to_string(),
+                size_bytes: 8192,
+                reason: OmitReason::MaxBytes,
+            }],
+            resolved_count: 3,
+            warnings: vec!["document not found: api/missing.md".to_string()],
+        });
+
+        assert!(output.contains("documents: 2 returned"));
+        assert!(output.contains("resolved: 3"));
+        assert!(output.contains("1. default/kbolt/README.md"));
+        assert!(output.contains("   title: README"));
+        assert!(output.contains("   docid: #409380"));
+        assert!(output.contains("   lines: 68"));
+        assert!(output.contains("2. work/api/guide.md"));
+        assert!(output.contains("   status: stale"));
+        assert!(output.contains("   lines: 4 of 12"));
+        assert!(output.contains("omitted:"));
+        assert!(output.contains("- api/large.md (8.0 KB, size limit)"));
+        assert!(output.contains("warnings:"));
+        assert!(output.contains("- document not found: api/missing.md"));
+        assert!(
+            !output.contains("resolved_count:"),
+            "unexpected output:\n{output}"
+        );
+        assert!(
+            !output.contains("--- #409380"),
+            "unexpected output:\n{output}"
+        );
     }
 
     #[test]
