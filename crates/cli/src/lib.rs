@@ -1,5 +1,6 @@
 pub mod args;
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use kbolt_core::engine::Engine;
@@ -32,6 +33,11 @@ pub struct CliSearchOptions<'a> {
     pub rerank: bool,
     pub no_rerank: bool,
     pub debug: bool,
+}
+
+struct GroupedSearchResult<'a> {
+    primary: &'a kbolt_types::SearchResult,
+    additional_matches: usize,
 }
 
 impl CliAdapter {
@@ -446,13 +452,18 @@ impl CliAdapter {
             SearchMode::Auto
         };
         let effective_no_rerank = resolve_no_rerank_for_mode(mode.clone(), rerank, no_rerank);
+        let engine_limit = if debug {
+            limit
+        } else {
+            limit.saturating_mul(2)
+        };
 
         let response = self.engine.search(SearchRequest {
             query: query.to_string(),
             mode,
             space: space.map(ToString::to_string),
             collections: collections.to_vec(),
-            limit,
+            limit: engine_limit,
             min_score,
             no_rerank: effective_no_rerank,
             debug,
@@ -477,48 +488,79 @@ impl CliAdapter {
             lines.push(String::new());
         }
 
-        lines.push(format!(
-            "{} result{}",
-            response.results.len(),
-            if response.results.len() == 1 { "" } else { "s" }
-        ));
+        if debug {
+            lines.push(format!(
+                "{} result{}",
+                response.results.len(),
+                if response.results.len() == 1 { "" } else { "s" }
+            ));
 
-        for (index, item) in response.results.iter().enumerate() {
-            lines.push(String::new());
-            if debug {
+            for (index, item) in response.results.iter().enumerate() {
+                lines.push(String::new());
                 lines.push(format!(
                     "{}. {} score={:.3}",
                     index + 1,
                     item.docid,
                     item.score
                 ));
-            } else {
-                lines.push(format!("{}. {}", index + 1, item.title));
-            }
-            lines.push(format!(
-                "   {}",
-                format_search_result_path(&item.space, &item.path)
-            ));
-            if !debug {
-                lines.push(format!("   score: {:.2}", item.score));
-            }
-            if let Some(heading) = &item.heading {
-                lines.push(format!("   heading: {heading}"));
-            }
-            lines.push(String::new());
-            let snippet = truncate_snippet(&item.text, 4);
-            for snippet_line in snippet.lines() {
-                lines.push(format!("   {snippet_line}"));
-            }
-            if let Some(signals) = &item.signals {
-                lines.push(String::new());
                 lines.push(format!(
-                    "   signals: bm25={} dense={} fusion={} reranker={}",
-                    format_optional_search_signal(signals.bm25),
-                    format_optional_search_signal(signals.dense),
-                    format_search_signal(signals.fusion),
-                    format_optional_search_signal(signals.reranker)
+                    "   {}",
+                    format_search_result_path(&item.space, &item.path)
                 ));
+                if let Some(heading) = &item.heading {
+                    lines.push(format!("   heading: {heading}"));
+                }
+                lines.push(String::new());
+                let snippet = truncate_snippet(&item.text, 4);
+                for snippet_line in snippet.lines() {
+                    lines.push(format!("   {snippet_line}"));
+                }
+                if let Some(signals) = &item.signals {
+                    lines.push(String::new());
+                    lines.push(format!(
+                        "   signals: bm25={} dense={} fusion={} reranker={}",
+                        format_optional_search_signal(signals.bm25),
+                        format_optional_search_signal(signals.dense),
+                        format_search_signal(signals.fusion),
+                        format_optional_search_signal(signals.reranker)
+                    ));
+                }
+            }
+        } else {
+            let grouped_results = group_search_results(&response.results, limit);
+            lines.push(format!(
+                "{} result{}",
+                grouped_results.len(),
+                if grouped_results.len() == 1 { "" } else { "s" }
+            ));
+
+            for (index, item) in grouped_results.iter().enumerate() {
+                lines.push(String::new());
+                lines.push(format!("{}. {}", index + 1, item.primary.title));
+                lines.push(format!(
+                    "   {}",
+                    format_search_result_path(&item.primary.space, &item.primary.path)
+                ));
+                lines.push(format!("   score: {:.2}", item.primary.score));
+                if let Some(heading) = &item.primary.heading {
+                    lines.push(format!("   heading: {heading}"));
+                }
+                lines.push(String::new());
+                let snippet = truncate_snippet(&item.primary.text, 4);
+                for snippet_line in snippet.lines() {
+                    lines.push(format!("   {snippet_line}"));
+                }
+                if item.additional_matches > 0 {
+                    lines.push(format!(
+                        "   +{} more matching section{}",
+                        item.additional_matches,
+                        if item.additional_matches == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    ));
+                }
             }
         }
 
@@ -865,6 +907,35 @@ fn format_search_mode(mode: &SearchMode) -> &'static str {
 
 fn format_search_result_path(space: &str, path: &str) -> String {
     format!("{space}/{path}")
+}
+
+fn group_search_results<'a>(
+    results: &'a [kbolt_types::SearchResult],
+    limit: usize,
+) -> Vec<GroupedSearchResult<'a>> {
+    let mut grouped: Vec<GroupedSearchResult<'a>> = Vec::new();
+    let mut index_by_document: HashMap<(&str, &str), usize> = HashMap::new();
+
+    for result in results {
+        let document_key = (result.space.as_str(), result.path.as_str());
+        if let Some(index) = index_by_document.get(&document_key).copied() {
+            grouped[index].additional_matches += 1;
+            continue;
+        }
+
+        if grouped.len() >= limit {
+            continue;
+        }
+
+        let next_index = grouped.len();
+        index_by_document.insert(document_key, next_index);
+        grouped.push(GroupedSearchResult {
+            primary: result,
+            additional_matches: 0,
+        });
+    }
+
+    grouped
 }
 
 fn format_collection_info(collection: &CollectionInfo) -> String {
@@ -1776,9 +1847,9 @@ mod tests {
         format_eval_import_report, format_eval_run_report, format_file_list, format_local_report,
         format_models_list, format_multi_get_response, format_optional_search_signal,
         format_schedule_add_response, format_schedule_status_response, format_search_result_path,
-        format_status_response, format_update_report, is_expected_unindexed_storage_warning,
-        parse_editor_command, resolve_editor_command, resolve_no_rerank_for_mode, truncate_snippet,
-        CliAdapter, CliSearchOptions,
+        format_status_response, format_update_report, group_search_results,
+        is_expected_unindexed_storage_warning, parse_editor_command, resolve_editor_command,
+        resolve_no_rerank_for_mode, truncate_snippet, CliAdapter, CliSearchOptions,
     };
     use kbolt_core::engine::Engine;
     use kbolt_types::{
@@ -1789,8 +1860,8 @@ mod tests {
         MultiGetResponse, OmitReason, OmittedFile, ScheduleAddResponse, ScheduleBackend,
         ScheduleDefinition, ScheduleInterval, ScheduleIntervalUnit, ScheduleOrphan,
         ScheduleRunResult, ScheduleRunState, ScheduleScope, ScheduleState, ScheduleStatusEntry,
-        ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode, SpaceStatus,
-        StatusResponse, UpdateReport,
+        ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode, SearchResult,
+        SpaceStatus, StatusResponse, UpdateReport,
     };
 
     struct EnvRestore {
@@ -2565,6 +2636,238 @@ mod tests {
             format_search_result_path("work", "api/guide.md"),
             "work/api/guide.md"
         );
+    }
+
+    fn make_search_result(docid: &str, path: &str, score: f32, text: &str) -> SearchResult {
+        SearchResult {
+            docid: docid.to_string(),
+            path: path.to_string(),
+            title: format!("title for {path}"),
+            space: "work".to_string(),
+            collection: "docs".to_string(),
+            heading: None,
+            text: text.to_string(),
+            score,
+            signals: None,
+        }
+    }
+
+    fn make_search_result_in_space(
+        docid: &str,
+        space: &str,
+        path: &str,
+        score: f32,
+        text: &str,
+    ) -> SearchResult {
+        SearchResult {
+            docid: docid.to_string(),
+            path: path.to_string(),
+            title: format!("title for {path}"),
+            space: space.to_string(),
+            collection: "docs".to_string(),
+            heading: None,
+            text: text.to_string(),
+            score,
+            signals: None,
+        }
+    }
+
+    #[test]
+    fn group_search_results_uses_first_chunk_per_document_and_counts_duplicates() {
+        let results = vec![
+            make_search_result("doc-a", "docs/a.md", 0.95, "alpha first"),
+            make_search_result("doc-a", "docs/a.md", 0.91, "alpha second"),
+            make_search_result("doc-b", "docs/b.md", 0.88, "beta first"),
+            make_search_result("doc-c", "docs/c.md", 0.83, "gamma first"),
+            make_search_result("doc-b", "docs/b.md", 0.81, "beta second"),
+        ];
+
+        let grouped = group_search_results(&results, 10);
+
+        assert_eq!(grouped.len(), 3);
+        assert_eq!(grouped[0].primary.docid, "doc-a");
+        assert_eq!(grouped[0].primary.text, "alpha first");
+        assert_eq!(grouped[0].additional_matches, 1);
+        assert_eq!(grouped[1].primary.docid, "doc-b");
+        assert_eq!(grouped[1].primary.text, "beta first");
+        assert_eq!(grouped[1].additional_matches, 1);
+        assert_eq!(grouped[2].primary.docid, "doc-c");
+        assert_eq!(grouped[2].additional_matches, 0);
+    }
+
+    #[test]
+    fn group_search_results_respects_group_limit_but_counts_visible_duplicates() {
+        let results = vec![
+            make_search_result("doc-a", "docs/a.md", 0.95, "alpha first"),
+            make_search_result("doc-b", "docs/b.md", 0.90, "beta first"),
+            make_search_result("doc-c", "docs/c.md", 0.85, "gamma first"),
+            make_search_result("doc-b", "docs/b.md", 0.82, "beta second"),
+            make_search_result("doc-a", "docs/a.md", 0.80, "alpha second"),
+        ];
+
+        let grouped = group_search_results(&results, 2);
+
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0].primary.docid, "doc-a");
+        assert_eq!(grouped[0].additional_matches, 1);
+        assert_eq!(grouped[1].primary.docid, "doc-b");
+        assert_eq!(grouped[1].additional_matches, 1);
+        assert!(
+            grouped.iter().all(|item| item.primary.docid != "doc-c"),
+            "unexpected grouped results: {:?}",
+            grouped
+                .iter()
+                .map(|item| item.primary.docid.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn group_search_results_does_not_merge_short_docid_collisions_across_spaces() {
+        let results = vec![
+            make_search_result_in_space(
+                "#abc123",
+                "default",
+                "docs/guide.md",
+                0.95,
+                "default guide",
+            ),
+            make_search_result_in_space("#abc123", "work", "docs/guide.md", 0.90, "work guide"),
+        ];
+
+        let grouped = group_search_results(&results, 10);
+
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0].primary.space, "default");
+        assert_eq!(grouped[0].primary.path, "docs/guide.md");
+        assert_eq!(grouped[0].additional_matches, 0);
+        assert_eq!(grouped[1].primary.space, "work");
+        assert_eq!(grouped[1].primary.path, "docs/guide.md");
+        assert_eq!(grouped[1].additional_matches, 0);
+    }
+
+    #[test]
+    fn search_groups_chunk_results_in_default_output() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+
+            let docs_path = new_collection_dir(root.path(), "work-docs");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: docs_path.clone(),
+                    space: Some("work".to_string()),
+                    name: Some("docs".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add collection");
+
+            fs::write(
+                docs_path.join("big.md"),
+                "# Big Guide\n\n## Part 1\nGuide systems depend on guide ranking.\n\
+\n## Part 2\nGuide tuning changes guide retrieval quality.\n\
+\n## Part 3\nGuide evaluation catches guide regressions.\n",
+            )
+            .expect("write big doc");
+            fs::write(
+                docs_path.join("small.md"),
+                "# Small Guide\n\nguide guide guide guide\n",
+            )
+            .expect("write small doc");
+
+            let adapter = CliAdapter::new(engine);
+            adapter
+                .update(Some("work"), &["docs".to_string()], true, false, false)
+                .expect("run update");
+
+            let output = adapter
+                .search(CliSearchOptions {
+                    space: Some("work"),
+                    query: "guide",
+                    collections: &["docs".to_string()],
+                    limit: 2,
+                    min_score: 0.0,
+                    deep: false,
+                    keyword: true,
+                    semantic: false,
+                    rerank: false,
+                    no_rerank: false,
+                    debug: false,
+                })
+                .expect("run grouped search");
+
+            assert!(output.contains("2 results"), "unexpected output:\n{output}");
+            assert!(
+                output.matches("work/docs/big.md").count() == 1,
+                "unexpected output:\n{output}"
+            );
+            assert!(
+                output.contains("more matching section"),
+                "unexpected output:\n{output}"
+            );
+        });
+    }
+
+    #[test]
+    fn search_debug_keeps_chunk_level_results() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+
+            let docs_path = new_collection_dir(root.path(), "work-docs");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: docs_path.clone(),
+                    space: Some("work".to_string()),
+                    name: Some("docs".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add collection");
+
+            fs::write(
+                docs_path.join("big.md"),
+                "# Big Guide\n\n## Part 1\nGuide systems depend on guide ranking.\n\
+\n## Part 2\nGuide tuning changes guide retrieval quality.\n\
+\n## Part 3\nGuide evaluation catches guide regressions.\n",
+            )
+            .expect("write big doc");
+
+            let adapter = CliAdapter::new(engine);
+            adapter
+                .update(Some("work"), &["docs".to_string()], true, false, false)
+                .expect("run update");
+
+            let output = adapter
+                .search(CliSearchOptions {
+                    space: Some("work"),
+                    query: "guide",
+                    collections: &["docs".to_string()],
+                    limit: 3,
+                    min_score: 0.0,
+                    deep: false,
+                    keyword: true,
+                    semantic: false,
+                    rerank: false,
+                    no_rerank: false,
+                    debug: true,
+                })
+                .expect("run debug search");
+
+            assert!(
+                output.matches("work/docs/big.md").count() > 1,
+                "unexpected output:\n{output}"
+            );
+            assert!(
+                !output.contains("more matching section"),
+                "unexpected output:\n{output}"
+            );
+        });
     }
 
     #[test]
