@@ -40,15 +40,13 @@ kbolt search "rust error handling"
 
 ## Search modes
 
-Default:
-- `kbolt search "query"`
-- hybrid retrieval with keyword + semantic + reranking
+`kbolt search "query"` runs hybrid keyword + semantic retrieval. Reranking is opt-in for this default mode.
 
-Other supported modes:
-
-- `kbolt search "query" --keyword` for keyword-only retrieval
-- `kbolt search "query" --semantic --no-rerank` for semantic-only retrieval
-- `kbolt search "query" --deep` for query expansion plus reranked retrieval
+- `kbolt search "query"`: hybrid keyword + semantic
+- `kbolt search "query" --rerank`: hybrid + reranking (best quality)
+- `kbolt search "query" --keyword`: keyword only
+- `kbolt search "query" --semantic`: dense only
+- `kbolt search "query" --deep`: query expansion + reranked retrieval
 
 `kbolt setup local` configures the default local embedder and reranker. To enable deep search later:
 
@@ -58,11 +56,15 @@ kbolt local enable deep
 
 ## What kbolt supports
 
-- Index Markdown and plaintext files from one or more local directories
+- Index Markdown, plaintext, and source code (Rust, Python, JS/TS, Go, Java, Kotlin, C/C++, C#, Ruby, PHP, Swift) from one or more local directories
 - Group collections into spaces and scope search with `--space` or `--collection`
 - Search with keyword, semantic, hybrid reranked, and deep retrieval modes
 - Read underlying source files with `kbolt get`, `kbolt multi-get`, and `kbolt ls`
+- Check indexed content and disk usage with `kbolt status`
+- Re-scan and re-index changed files with `kbolt update`
+- Exclude files with gitignore-style patterns via `kbolt ignore`
 - Check readiness with `kbolt doctor` and `kbolt models list`
+- Run local models via `llama-server` or bind remote OpenAI-compatible endpoints through provider profiles
 - Serve the index to agents over MCP with `kbolt mcp`
 - Run retrieval benchmarks with `kbolt eval ...`
 - Schedule recurring re-indexing with `kbolt schedule ...`
