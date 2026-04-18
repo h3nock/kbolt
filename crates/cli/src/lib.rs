@@ -1363,7 +1363,10 @@ fn format_update_report(report: &UpdateReport, verbose: bool) -> String {
     append_update_summary_lines(&mut lines, report);
 
     if !report.errors.is_empty() && !verbose {
-        append_update_error_lines(&mut lines, report, 3);
+        let truncated = append_update_error_lines(&mut lines, report, 3);
+        if truncated {
+            lines.push("  run with --verbose for the full list".to_string());
+        }
     }
 
     lines.join("\n")
@@ -1409,16 +1412,20 @@ fn format_collection_add_indexing_report(
 
     append_update_summary_lines(&mut lines, report);
 
-    if !report.errors.is_empty() {
-        append_update_error_lines(&mut lines, report, 3);
-    }
+    let truncated = if !report.errors.is_empty() {
+        append_update_error_lines(&mut lines, report, 3)
+    } else {
+        false
+    };
 
-    if report.failed_docs > 0 {
+    if report.failed_docs > 0 || truncated {
         lines.push(String::new());
         lines.push("next:".to_string());
+        let verbose_flag = if truncated { " --verbose" } else { "" };
         lines.push(format!(
-            "  kbolt --space {} update --collection {}",
-            collection.space, collection.name
+            "  kbolt --space {} update{verbose_flag} --collection {}",
+            shell_quote_arg(&collection.space),
+            shell_quote_arg(&collection.name),
         ));
     }
 
@@ -1459,15 +1466,17 @@ fn format_collection_add_block(
     lines.join("\n")
 }
 
-fn append_update_error_lines(lines: &mut Vec<String>, report: &UpdateReport, limit: usize) {
+fn append_update_error_lines(lines: &mut Vec<String>, report: &UpdateReport, limit: usize) -> bool {
     lines.push(String::new());
     lines.push("errors:".to_string());
     for error in report.errors.iter().take(limit) {
         lines.push(format!("- {}: {}", error.path, error.error));
     }
-    if report.errors.len() > limit {
+    let truncated = report.errors.len() > limit;
+    if truncated {
         lines.push(format!("- {} more error(s)", report.errors.len() - limit));
     }
+    truncated
 }
 
 fn append_update_summary_lines(lines: &mut Vec<String>, report: &UpdateReport) {
@@ -1911,8 +1920,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        active_space_name_for_status, format_collection_add_result, format_collection_info,
-        format_doctor_report, format_document_response, format_elapsed_ms,
+        active_space_name_for_status, append_update_error_lines, format_collection_add_result,
+        format_collection_info, format_doctor_report, format_document_response, format_elapsed_ms,
         format_eval_import_report, format_eval_run_report, format_file_list, format_local_report,
         format_models_list, format_multi_get_response, format_optional_search_signal,
         format_schedule_add_response, format_schedule_status_response, format_search_result_path,
@@ -1926,8 +1935,8 @@ mod tests {
         AddCollectionRequest, AddCollectionResult, CollectionInfo, CollectionStatus, DiskUsage,
         DoctorCheck, DoctorCheckStatus, DoctorReport, DoctorSetupStatus, DocumentResponse,
         EvalImportReport, EvalJudgment, EvalModeReport, EvalQueryReport, EvalRunReport, FileEntry,
-        InitialIndexingBlock, InitialIndexingOutcome, LocalAction, LocalReport, ModelInfo,
-        MultiGetResponse, OmitReason, OmittedFile, ScheduleAddResponse, ScheduleBackend,
+        FileError, InitialIndexingBlock, InitialIndexingOutcome, LocalAction, LocalReport,
+        ModelInfo, MultiGetResponse, OmitReason, OmittedFile, ScheduleAddResponse, ScheduleBackend,
         ScheduleDefinition, ScheduleInterval, ScheduleIntervalUnit, ScheduleOrphan,
         ScheduleRunResult, ScheduleRunState, ScheduleScope, ScheduleState, ScheduleStatusEntry,
         ScheduleStatusResponse, ScheduleTrigger, ScheduleWeekday, SearchMode, SearchResult,
@@ -3726,5 +3735,200 @@ mod tests {
         ));
         assert!(output.contains("last_result: skipped_lock"));
         assert!(output.contains("orphans:\n- s9 (launchd)"));
+    }
+
+    fn make_update_report(errors: Vec<FileError>, failed_docs: usize) -> UpdateReport {
+        UpdateReport {
+            scanned_docs: 0,
+            skipped_mtime_docs: 0,
+            skipped_hash_docs: 0,
+            added_docs: 0,
+            updated_docs: 0,
+            failed_docs,
+            deactivated_docs: 0,
+            reactivated_docs: 0,
+            reaped_docs: 0,
+            embedded_chunks: 0,
+            decisions: Vec::new(),
+            errors,
+            elapsed_ms: 0,
+        }
+    }
+
+    fn make_file_error(path: &str) -> FileError {
+        FileError {
+            path: path.to_string(),
+            error: "test failure".to_string(),
+        }
+    }
+
+    fn make_collection_info(space: &str, name: &str) -> CollectionInfo {
+        CollectionInfo {
+            name: name.to_string(),
+            space: space.to_string(),
+            path: PathBuf::from("/tmp/x"),
+            description: None,
+            extensions: None,
+            document_count: 0,
+            active_document_count: 0,
+            chunk_count: 0,
+            embedded_chunk_count: 0,
+            created: "2026-04-18T00:00:00Z".to_string(),
+            updated: "2026-04-18T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn append_update_error_lines_returns_true_when_truncated() {
+        let report = make_update_report(
+            vec![
+                make_file_error("a.md"),
+                make_file_error("b.md"),
+                make_file_error("c.md"),
+                make_file_error("d.md"),
+            ],
+            4,
+        );
+        let mut lines = Vec::new();
+        let truncated = append_update_error_lines(&mut lines, &report, 3);
+        assert!(truncated);
+        assert!(lines.iter().any(|l| l == "- 1 more error(s)"));
+    }
+
+    #[test]
+    fn append_update_error_lines_returns_false_within_limit() {
+        let report = make_update_report(vec![make_file_error("a.md"), make_file_error("b.md")], 2);
+        let mut lines = Vec::new();
+        let truncated = append_update_error_lines(&mut lines, &report, 3);
+        assert!(!truncated);
+        assert!(!lines.iter().any(|l| l.contains("more error(s)")));
+    }
+
+    #[test]
+    fn format_update_report_emits_verbose_hint_on_truncation() {
+        let report = make_update_report(
+            vec![
+                make_file_error("a.md"),
+                make_file_error("b.md"),
+                make_file_error("c.md"),
+                make_file_error("d.md"),
+            ],
+            4,
+        );
+        let output = format_update_report(&report, false);
+        assert!(
+            output.contains("- 1 more error(s)"),
+            "expected truncation summary: {output}"
+        );
+        assert!(
+            output.contains("  run with --verbose for the full list"),
+            "expected verbose hint: {output}"
+        );
+    }
+
+    #[test]
+    fn format_update_report_omits_verbose_hint_without_truncation() {
+        let report = make_update_report(vec![make_file_error("a.md"), make_file_error("b.md")], 2);
+        let output = format_update_report(&report, false);
+        assert!(
+            !output.contains("more error(s)"),
+            "expected no truncation: {output}"
+        );
+        assert!(
+            !output.contains("--verbose"),
+            "expected no verbose hint: {output}"
+        );
+    }
+
+    #[test]
+    fn format_collection_add_indexing_upgrades_next_to_verbose_when_truncated() {
+        let collection = make_collection_info("default", "notes");
+        let report = make_update_report(
+            vec![
+                make_file_error("a.md"),
+                make_file_error("b.md"),
+                make_file_error("c.md"),
+                make_file_error("d.md"),
+            ],
+            4,
+        );
+        let result = AddCollectionResult {
+            collection,
+            initial_indexing: InitialIndexingOutcome::Indexed(report),
+        };
+        let output = format_collection_add_result(&result);
+        assert!(
+            output.contains("kbolt --space default update --verbose --collection notes"),
+            "expected --verbose in next command: {output}"
+        );
+    }
+
+    #[test]
+    fn format_collection_add_indexing_omits_verbose_when_not_truncated() {
+        let collection = make_collection_info("default", "notes");
+        let report = make_update_report(vec![make_file_error("a.md"), make_file_error("b.md")], 2);
+        let result = AddCollectionResult {
+            collection,
+            initial_indexing: InitialIndexingOutcome::Indexed(report),
+        };
+        let output = format_collection_add_result(&result);
+        assert!(
+            output.contains("kbolt --space default update --collection notes"),
+            "expected plain update command: {output}"
+        );
+        assert!(
+            !output.contains("--verbose"),
+            "expected no verbose flag: {output}"
+        );
+    }
+
+    #[test]
+    fn format_collection_add_indexing_emits_next_block_when_truncated_without_failed_docs() {
+        let collection = make_collection_info("default", "notes");
+        let report = make_update_report(
+            vec![
+                make_file_error("a.md"),
+                make_file_error("b.md"),
+                make_file_error("c.md"),
+                make_file_error("d.md"),
+            ],
+            0, // no failed_docs, but still >3 errors — the edge case
+        );
+        let result = AddCollectionResult {
+            collection,
+            initial_indexing: InitialIndexingOutcome::Indexed(report),
+        };
+        let output = format_collection_add_result(&result);
+        assert!(
+            output.contains("next:"),
+            "expected a next block despite failed_docs=0: {output}"
+        );
+        assert!(
+            output.contains("kbolt --space default update --verbose --collection notes"),
+            "expected --verbose update in next: {output}"
+        );
+    }
+
+    #[test]
+    fn format_collection_add_indexing_shell_quotes_space_and_name_in_next() {
+        let collection = make_collection_info("team notes", "cold docs");
+        let report = make_update_report(
+            vec![
+                make_file_error("a.md"),
+                make_file_error("b.md"),
+                make_file_error("c.md"),
+                make_file_error("d.md"),
+            ],
+            4,
+        );
+        let result = AddCollectionResult {
+            collection,
+            initial_indexing: InitialIndexingOutcome::Indexed(report),
+        };
+        let output = format_collection_add_result(&result);
+        assert!(
+            output.contains("kbolt --space 'team notes' update --verbose --collection 'cold docs'"),
+            "expected space and name single-quoted: {output}"
+        );
     }
 }
