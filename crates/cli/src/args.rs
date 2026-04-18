@@ -11,14 +11,20 @@ pub enum OutputFormat {
 #[derive(Debug, Parser)]
 #[command(name = "kbolt", version, about = "local-first retrieval engine")]
 pub struct Cli {
-    #[arg(short = 's', long = "space", value_name = "name")]
+    #[arg(
+        short = 's',
+        long = "space",
+        value_name = "name",
+        help = "Active space (overrides KBOLT_SPACE and the default space)"
+    )]
     pub space: Option<String>,
 
     #[arg(
         short = 'f',
         long = "format",
         value_enum,
-        default_value_t = OutputFormat::Cli
+        default_value_t = OutputFormat::Cli,
+        help = "Output format"
     )]
     pub format: OutputFormat,
 
@@ -112,7 +118,11 @@ pub struct EvalImportArgs {
 
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct EvalRunArgs {
-    #[arg(long, value_name = "path")]
+    #[arg(
+        long,
+        value_name = "path",
+        help = "Path to an eval.toml manifest (defaults to the configured eval set)"
+    )]
     pub file: Option<PathBuf>,
 }
 
@@ -124,63 +134,111 @@ pub struct ScheduleArgs {
 
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct UpdateArgs {
-    #[arg(long = "collection", value_delimiter = ',')]
+    #[arg(
+        long = "collection",
+        value_delimiter = ',',
+        help = "Restrict update to specific collections (comma-separated)"
+    )]
     pub collections: Vec<String>,
-    #[arg(long)]
+    #[arg(long, help = "Skip embedding; only refresh keyword index and metadata")]
     pub no_embed: bool,
-    #[arg(long)]
+    #[arg(long, help = "Show what would change without writing to the index")]
     pub dry_run: bool,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Include per-file decisions and the full error list in the final report"
+    )]
     pub verbose: bool,
 }
 
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct LsArgs {
+    #[arg(help = "Collection to list files from")]
     pub collection: String,
+    #[arg(help = "Only show files whose path starts with this prefix")]
     pub prefix: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Include deactivated files")]
     pub all: bool,
 }
 
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct GetArgs {
+    #[arg(help = "Document path (collection/relative/path) or docid (#abc123)")]
     pub identifier: String,
-    #[arg(long)]
+    #[arg(long, help = "Start reading at this line number")]
     pub offset: Option<usize>,
-    #[arg(long)]
+    #[arg(long, help = "Maximum number of lines to return")]
     pub limit: Option<usize>,
 }
 
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct MultiGetArgs {
-    #[arg(value_delimiter = ',')]
+    #[arg(
+        value_delimiter = ',',
+        help = "Comma-separated list of document paths or docids (#abc123)"
+    )]
     pub locators: Vec<String>,
-    #[arg(long, default_value_t = 20)]
+    #[arg(
+        long,
+        default_value_t = 20,
+        help = "Maximum number of documents to return"
+    )]
     pub max_files: usize,
-    #[arg(long, default_value_t = 51_200)]
+    #[arg(
+        long,
+        default_value_t = 51_200,
+        help = "Maximum total bytes to return across all documents"
+    )]
     pub max_bytes: usize,
 }
 
 #[derive(Debug, Args, PartialEq)]
 pub struct SearchArgs {
+    #[arg(help = "The search query")]
     pub query: String,
-    #[arg(long = "collection", value_delimiter = ',')]
+    #[arg(
+        long = "collection",
+        value_delimiter = ',',
+        help = "Restrict search to specific collections (comma-separated)"
+    )]
     pub collections: Vec<String>,
-    #[arg(long, default_value_t = 10)]
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Maximum number of results to return"
+    )]
     pub limit: usize,
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Filter out results below this score (0.0-1.0)"
+    )]
     pub min_score: f32,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Query expansion plus multi-variant retrieval (highest recall, slower)"
+    )]
     pub deep: bool,
-    #[arg(long)]
+    #[arg(long, help = "Keyword-only (BM25) search; skips dense retrieval")]
     pub keyword: bool,
-    #[arg(long)]
+    #[arg(long, help = "Dense-vector-only search; skips keyword retrieval")]
     pub semantic: bool,
-    #[arg(long, conflicts_with = "rerank")]
+    #[arg(
+        long,
+        conflicts_with = "rerank",
+        help = "Skip cross-encoder reranking (faster, lower quality)"
+    )]
     pub no_rerank: bool,
-    #[arg(long, conflicts_with = "no_rerank")]
+    #[arg(
+        long,
+        conflicts_with = "no_rerank",
+        help = "Enable cross-encoder reranking on auto mode (slower, higher quality)"
+    )]
     pub rerank: bool,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Show pipeline stages and per-signal scores for each result"
+    )]
     pub debug: bool,
 }
 
@@ -188,27 +246,51 @@ pub struct SearchArgs {
 pub enum SpaceCommand {
     #[command(about = "Create a new space")]
     Add {
+        #[arg(help = "Name of the new space")]
         name: String,
-        #[arg(long)]
+        #[arg(long, help = "Human-readable space description")]
         description: Option<String>,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Validate all directories up-front and roll back the space if any collection registration fails"
+        )]
         strict: bool,
+        #[arg(help = "Directories to register as collections in this space")]
         dirs: Vec<PathBuf>,
     },
     #[command(about = "Set a space description")]
-    Describe { name: String, text: String },
+    Describe {
+        #[arg(help = "Space name")]
+        name: String,
+        #[arg(help = "New description text")]
+        text: String,
+    },
     #[command(about = "Rename a space")]
-    Rename { old: String, new: String },
+    Rename {
+        #[arg(help = "Current space name")]
+        old: String,
+        #[arg(help = "New space name")]
+        new: String,
+    },
     #[command(about = "Remove a space and all its data")]
-    Remove { name: String },
+    Remove {
+        #[arg(help = "Space to delete (all collections and indexes are removed)")]
+        name: String,
+    },
     #[command(about = "Show the active space")]
     Current,
     #[command(about = "Get or set the default space")]
-    Default { name: Option<String> },
+    Default {
+        #[arg(help = "Space to set as default (omit to show the current default)")]
+        name: Option<String>,
+    },
     #[command(about = "List all spaces")]
     List,
     #[command(about = "Show details about a space")]
-    Info { name: String },
+    Info {
+        #[arg(help = "Space name")]
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -225,8 +307,13 @@ pub enum LocalCommand {
     Start,
     #[command(about = "Stop local inference servers")]
     Stop,
-    #[command(about = "Enable a local feature (e.g. deep search)")]
-    Enable { feature: LocalFeature },
+    #[command(about = "Enable an optional local feature")]
+    Enable {
+        #[arg(
+            help = "Feature to enable (`deep` downloads the expander model for query expansion)"
+        )]
+        feature: LocalFeature,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -238,38 +325,78 @@ pub enum LocalFeature {
 pub enum CollectionCommand {
     #[command(about = "Add a directory as a document collection")]
     Add {
+        #[arg(help = "Directory to index")]
         path: PathBuf,
-        #[arg(long)]
+        #[arg(long, help = "Collection name (defaults to the directory basename)")]
         name: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Human-readable collection description")]
         description: Option<String>,
-        #[arg(long, value_delimiter = ',')]
+        #[arg(
+            long,
+            value_delimiter = ',',
+            help = "Only index files with these extensions (comma-separated)"
+        )]
         extensions: Option<Vec<String>>,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Register the collection without running an initial indexing pass"
+        )]
         no_index: bool,
     },
     #[command(about = "List all collections")]
     List,
     #[command(about = "Show details about a collection")]
-    Info { name: String },
+    Info {
+        #[arg(help = "Collection name")]
+        name: String,
+    },
     #[command(about = "Set a collection description")]
-    Describe { name: String, text: String },
+    Describe {
+        #[arg(help = "Collection name")]
+        name: String,
+        #[arg(help = "New description text")]
+        text: String,
+    },
     #[command(about = "Rename a collection")]
-    Rename { old: String, new: String },
+    Rename {
+        #[arg(help = "Current collection name")]
+        old: String,
+        #[arg(help = "New collection name")]
+        new: String,
+    },
     #[command(about = "Remove a collection and its indexed data")]
-    Remove { name: String },
+    Remove {
+        #[arg(help = "Collection to delete (chunks and embeddings are removed)")]
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum IgnoreCommand {
     #[command(about = "Show ignore patterns for a collection")]
-    Show { collection: String },
+    Show {
+        #[arg(help = "Collection name")]
+        collection: String,
+    },
     #[command(about = "Add an ignore pattern to a collection")]
-    Add { collection: String, pattern: String },
+    Add {
+        #[arg(help = "Collection name")]
+        collection: String,
+        #[arg(help = "Gitignore-style pattern to add")]
+        pattern: String,
+    },
     #[command(about = "Remove an ignore pattern from a collection")]
-    Remove { collection: String, pattern: String },
+    Remove {
+        #[arg(help = "Collection name")]
+        collection: String,
+        #[arg(help = "Exact pattern text to remove")]
+        pattern: String,
+    },
     #[command(about = "Open ignore patterns in an editor")]
-    Edit { collection: String },
+    Edit {
+        #[arg(help = "Collection name")]
+        collection: String,
+    },
     #[command(about = "List all collections with ignore patterns")]
     List,
 }
@@ -299,13 +426,29 @@ pub enum EvalImportCommand {
 
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct EvalImportBeirArgs {
-    #[arg(long, value_name = "name")]
+    #[arg(
+        long,
+        value_name = "name",
+        help = "Dataset identifier used in eval reports (e.g. fiqa, scifact)"
+    )]
     pub dataset: String,
-    #[arg(long, value_name = "dir")]
+    #[arg(
+        long,
+        value_name = "dir",
+        help = "Extracted BEIR dataset directory (corpus.jsonl, queries.jsonl, qrels/)"
+    )]
     pub source: PathBuf,
-    #[arg(long, value_name = "dir")]
+    #[arg(
+        long,
+        value_name = "dir",
+        help = "Directory where the imported corpus and eval.toml will be written"
+    )]
     pub output: PathBuf,
-    #[arg(long, value_name = "name")]
+    #[arg(
+        long,
+        value_name = "name",
+        help = "Override the collection name (defaults to the dataset name)"
+    )]
     pub collection: Option<String>,
 }
 
@@ -337,15 +480,33 @@ pub enum ScheduleDayArg {
         .args(["every", "at"])
 ))]
 pub struct ScheduleAddArgs {
-    #[arg(long, conflicts_with = "at")]
+    #[arg(
+        long,
+        conflicts_with = "at",
+        help = "Interval trigger (e.g. 30m, 2h); minimum 5 minutes"
+    )]
     pub every: Option<String>,
-    #[arg(long, conflicts_with = "every")]
+    #[arg(
+        long,
+        conflicts_with = "every",
+        help = "Daily trigger time in HH:MM (24-hour)"
+    )]
     pub at: Option<String>,
-    #[arg(long = "on", value_delimiter = ',', requires = "at", value_enum)]
+    #[arg(
+        long = "on",
+        value_delimiter = ',',
+        requires = "at",
+        value_enum,
+        help = "Days for the weekly trigger (comma-separated: Mon,Tue,...); requires --at"
+    )]
     pub on: Vec<ScheduleDayArg>,
-    #[arg(long)]
+    #[arg(long, help = "Restrict the schedule to a specific space")]
     pub space: Option<String>,
-    #[arg(long = "collection", requires = "space")]
+    #[arg(
+        long = "collection",
+        requires = "space",
+        help = "Restrict the schedule to specific collections; requires --space"
+    )]
     pub collections: Vec<String>,
 }
 
@@ -356,12 +517,26 @@ pub struct ScheduleAddArgs {
         .args(["id", "all", "space"])
 ))]
 pub struct ScheduleRemoveArgs {
+    #[arg(help = "Schedule ID to remove (from `kbolt schedule status`)")]
     pub id: Option<String>,
-    #[arg(long, conflicts_with_all = ["id", "space", "collections"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["id", "space", "collections"],
+        help = "Remove every configured schedule"
+    )]
     pub all: bool,
-    #[arg(long, conflicts_with = "id")]
+    #[arg(
+        long,
+        conflicts_with = "id",
+        help = "Remove all schedules for a specific space"
+    )]
     pub space: Option<String>,
-    #[arg(long = "collection", requires = "space", conflicts_with = "id")]
+    #[arg(
+        long = "collection",
+        requires = "space",
+        conflicts_with = "id",
+        help = "Remove schedules for specific collections; requires --space"
+    )]
     pub collections: Vec<String>,
 }
 
