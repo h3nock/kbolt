@@ -564,6 +564,13 @@ impl CliAdapter {
             }
         }
 
+        if response.results.is_empty() {
+            if let Some(hint) = self.empty_index_hint(space, collections) {
+                lines.push(String::new());
+                lines.push(hint);
+            }
+        }
+
         if let Some(hint) = response.staleness_hint {
             lines.push(String::new());
             lines.push(hint);
@@ -574,6 +581,52 @@ impl CliAdapter {
         }
 
         Ok(lines.join("\n"))
+    }
+
+    fn empty_index_hint(&self, space: Option<&str>, requested: &[String]) -> Option<String> {
+        let all = self.engine.list_collections(space).ok()?;
+        let scoped: Vec<_> = if requested.is_empty() {
+            all
+        } else {
+            all.into_iter()
+                .filter(|c| requested.iter().any(|r| r == &c.name))
+                .collect()
+        };
+
+        // Case 1: no collections in scope — fresh install, or a scoped filter
+        // that matched nothing. Suggest adding a collection.
+        if scoped.is_empty() {
+            let space_arg = shell_quote_arg(space.unwrap_or("default"));
+            return Some(format!(
+                "no collections registered yet\nnext:\n  kbolt --space {space_arg} collection add /path/to/docs"
+            ));
+        }
+
+        // Case 2: scoped search over collections that all have zero chunks.
+        // chunk_count == 0 is ambiguous (--no-index, empty dir, no indexable
+        // files), so we point at a read-only diagnostic instead of suggesting
+        // `update`, which may be a no-op. Unscoped searches stay silent here.
+        if !requested.is_empty() && scoped.iter().all(|c| c.chunk_count == 0) {
+            let names = scoped
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut lines = vec![
+                format!("no indexed content in selected collection(s): {names}"),
+                "check:".to_string(),
+            ];
+            for collection in &scoped {
+                lines.push(format!(
+                    "  kbolt --space {} collection info {}",
+                    shell_quote_arg(&collection.space),
+                    shell_quote_arg(&collection.name),
+                ));
+            }
+            return Some(lines.join("\n"));
+        }
+
+        None
     }
 
     pub fn update(
@@ -1830,6 +1883,22 @@ fn format_eval_mode_label(mode: &SearchMode, no_rerank: bool) -> &'static str {
     }
 }
 
+// Quote a shell argument so a user-facing suggested command remains executable
+// when it contains whitespace or other shell metacharacters. Uses POSIX
+// single-quote wrapping; safe tokens are returned as-is.
+fn shell_quote_arg(arg: &str) -> String {
+    let is_safe = !arg.is_empty()
+        && arg.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '-' | '_' | '.' | '/' | ',' | ':' | '+' | '@' | '=')
+        });
+    if is_safe {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
@@ -1849,7 +1918,8 @@ mod tests {
         format_schedule_add_response, format_schedule_status_response, format_search_result_path,
         format_status_response, format_update_report, group_search_results,
         is_expected_unindexed_storage_warning, parse_editor_command, resolve_editor_command,
-        resolve_no_rerank_for_mode, truncate_snippet, CliAdapter, CliSearchOptions,
+        resolve_no_rerank_for_mode, shell_quote_arg, truncate_snippet, CliAdapter,
+        CliSearchOptions,
     };
     use kbolt_core::engine::Engine;
     use kbolt_types::{
@@ -2558,6 +2628,195 @@ mod tests {
                 "unexpected error: {err}"
             );
         });
+    }
+
+    #[test]
+    fn empty_index_hint_fresh_install_suggests_scoped_add_collection() {
+        with_isolated_xdg_dirs(|| {
+            let adapter = CliAdapter::new(Engine::new(None).expect("create engine"));
+            let hint = adapter
+                .empty_index_hint(None, &[])
+                .expect("hint should fire on a fresh home");
+            assert!(
+                hint.contains("no collections registered yet"),
+                "unexpected hint: {hint}"
+            );
+            assert!(
+                hint.contains("kbolt --space default collection add /path/to/docs"),
+                "should suggest --space default on fresh install: {hint}"
+            );
+        });
+    }
+
+    #[test]
+    fn empty_index_hint_is_silent_when_any_collection_has_content() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create temp root");
+            let engine = Engine::new(None).expect("create engine");
+            let coll_path = new_collection_dir(root.path(), "notes");
+            fs::write(coll_path.join("a.md"), "hello world\n").expect("write file");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: coll_path,
+                    space: Some("default".to_string()),
+                    name: Some("notes".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add collection");
+
+            let adapter = CliAdapter::new(engine);
+            adapter
+                .update(Some("default"), &[], true, false, false)
+                .expect("run update");
+
+            let hint = adapter.empty_index_hint(None, &[]);
+            assert!(
+                hint.is_none(),
+                "expected silent when content exists, got: {hint:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn empty_index_hint_is_silent_on_mixed_unscoped_search() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create temp root");
+            let engine = Engine::new(None).expect("create engine");
+
+            let hot = new_collection_dir(root.path(), "hot");
+            fs::write(hot.join("a.md"), "content\n").expect("write file");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: hot,
+                    space: Some("default".to_string()),
+                    name: Some("hot".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add hot");
+
+            let cold = new_collection_dir(root.path(), "cold");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: cold,
+                    space: Some("default".to_string()),
+                    name: Some("cold".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add cold");
+
+            let adapter = CliAdapter::new(engine);
+            adapter
+                .update(Some("default"), &[], true, false, false)
+                .expect("run update");
+
+            let hint = adapter.empty_index_hint(None, &[]);
+            assert!(
+                hint.is_none(),
+                "expected silent on mixed unscoped, got: {hint:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn empty_index_hint_scoped_to_empty_collection_points_at_collection_info() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create temp root");
+            let engine = Engine::new(None).expect("create engine");
+
+            let hot = new_collection_dir(root.path(), "hot");
+            fs::write(hot.join("a.md"), "content\n").expect("write file");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: hot,
+                    space: Some("default".to_string()),
+                    name: Some("hot".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add hot");
+
+            let cold = new_collection_dir(root.path(), "cold");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: cold,
+                    space: Some("default".to_string()),
+                    name: Some("cold".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add cold");
+
+            let adapter = CliAdapter::new(engine);
+            adapter
+                .update(Some("default"), &[], true, false, false)
+                .expect("run update");
+
+            let hint = adapter
+                .empty_index_hint(None, &["cold".to_string()])
+                .expect("hint should fire when scoped to an empty collection");
+
+            assert!(
+                hint.contains("no indexed content in selected collection(s): cold"),
+                "unexpected hint: {hint}"
+            );
+            assert!(
+                hint.contains("kbolt --space default collection info cold"),
+                "should point at collection info with the actual space: {hint}"
+            );
+            assert!(
+                !hint.to_lowercase().contains("update"),
+                "should not recommend update, got: {hint}"
+            );
+        });
+    }
+
+    #[test]
+    fn empty_index_hint_shell_quotes_names_with_whitespace() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create temp root");
+            let engine = Engine::new(None).expect("create engine");
+
+            let cold = new_collection_dir(root.path(), "cold");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: cold,
+                    space: Some("default".to_string()),
+                    name: Some("cold docs".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add cold docs");
+
+            let adapter = CliAdapter::new(engine);
+
+            let hint = adapter
+                .empty_index_hint(None, &["cold docs".to_string()])
+                .expect("hint should fire");
+
+            assert!(
+                hint.contains("kbolt --space default collection info 'cold docs'"),
+                "collection name with whitespace must be single-quoted in the hint: {hint}"
+            );
+        });
+    }
+
+    #[test]
+    fn shell_quote_arg_leaves_safe_tokens_alone_and_escapes_risky_ones() {
+        assert_eq!(shell_quote_arg("default"), "default");
+        assert_eq!(shell_quote_arg("work-notes"), "work-notes");
+        assert_eq!(shell_quote_arg("./path/to/docs"), "./path/to/docs");
+        assert_eq!(shell_quote_arg("cold docs"), "'cold docs'");
+        assert_eq!(shell_quote_arg(""), "''");
+        assert_eq!(shell_quote_arg("it's fine"), "'it'\\''s fine'");
     }
 
     #[test]
