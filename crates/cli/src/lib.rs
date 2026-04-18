@@ -150,7 +150,7 @@ impl CliAdapter {
         }
         lines.push(format!(
             "note: collections were registered without indexing; run `kbolt --space {} update` to index them",
-            added.name
+            shell_quote_arg(&added.name)
         ));
 
         Ok(lines.join("\n"))
@@ -1384,7 +1384,8 @@ fn format_collection_add_result(result: &AddCollectionResult) -> String {
             "next:".to_string(),
             format!(
                 "  kbolt --space {} update --collection {}",
-                collection.space, collection.name
+                shell_quote_arg(&collection.space),
+                shell_quote_arg(&collection.name),
             ),
         ]
         .join("\n"),
@@ -1448,7 +1449,7 @@ fn format_collection_add_block(
             lines.push(format!("reason: {reason}"));
             lines.push(String::new());
             lines.push("next:".to_string());
-            lines.push(format!("  kbolt --space {space} update"));
+            lines.push(format!("  kbolt --space {} update", shell_quote_arg(space)));
         }
         InitialIndexingBlock::ModelNotAvailable { name } => {
             lines.push(format!("indexing blocked: model '{name}' is not available"));
@@ -1458,7 +1459,8 @@ fn format_collection_add_block(
             lines.push("  or configure [roles.embedder] in index.toml".to_string());
             lines.push(format!(
                 "  then run: kbolt --space {} update --collection {}",
-                collection.space, collection.name
+                shell_quote_arg(&collection.space),
+                shell_quote_arg(&collection.name),
             ));
         }
     }
@@ -1850,17 +1852,23 @@ pub fn format_eval_import_report(report: &EvalImportReport) -> String {
         "next:".to_string(),
         format!(
             "- create the benchmark space if needed: kbolt space add {}",
-            report.default_space
+            shell_quote_arg(&report.default_space)
         ),
         format!(
             "- register the corpus: kbolt --space {} collection add {} --name {} --no-index",
-            report.default_space, report.corpus_dir, report.collection
+            shell_quote_arg(&report.default_space),
+            shell_quote_arg(&report.corpus_dir),
+            shell_quote_arg(&report.collection),
         ),
         format!(
             "- index it: kbolt --space {} update --collection {}",
-            report.default_space, report.collection
+            shell_quote_arg(&report.default_space),
+            shell_quote_arg(&report.collection),
         ),
-        format!("- run eval: kbolt eval run --file {}", report.manifest_path),
+        format!(
+            "- run eval: kbolt eval run --file {}",
+            shell_quote_arg(&report.manifest_path)
+        ),
     ]
     .join("\n")
 }
@@ -3929,6 +3937,109 @@ mod tests {
         assert!(
             output.contains("kbolt --space 'team notes' update --verbose --collection 'cold docs'"),
             "expected space and name single-quoted: {output}"
+        );
+    }
+
+    #[test]
+    fn space_add_note_shell_quotes_space_name_with_whitespace() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            let mut adapter = CliAdapter::new(engine);
+
+            let dir = new_collection_dir(root.path(), "some-collection");
+            let output = adapter
+                .space_add("team notes", None, false, &[dir])
+                .expect("add space with directories");
+
+            assert!(
+                output.contains("run `kbolt --space 'team notes' update` to index them"),
+                "expected quoted space in registration note: {output}"
+            );
+        });
+    }
+
+    #[test]
+    fn format_collection_add_result_skipped_shell_quotes_space_and_name() {
+        let collection = make_collection_info("team notes", "cold docs");
+        let result = AddCollectionResult {
+            collection,
+            initial_indexing: InitialIndexingOutcome::Skipped,
+        };
+        let output = format_collection_add_result(&result);
+        assert!(
+            output.contains("kbolt --space 'team notes' update --collection 'cold docs'"),
+            "expected quoted space and name in next block: {output}"
+        );
+    }
+
+    #[test]
+    fn format_collection_add_block_space_dense_repair_quotes_space_name() {
+        let collection = make_collection_info("default", "notes");
+        let result = AddCollectionResult {
+            collection,
+            initial_indexing: InitialIndexingOutcome::Blocked(
+                InitialIndexingBlock::SpaceDenseRepairRequired {
+                    space: "team notes".to_string(),
+                    reason: "dimension mismatch".to_string(),
+                },
+            ),
+        };
+        let output = format_collection_add_result(&result);
+        assert!(
+            output.contains("kbolt --space 'team notes' update"),
+            "expected quoted space in repair-required command: {output}"
+        );
+    }
+
+    #[test]
+    fn format_collection_add_block_model_not_available_quotes_space_and_name() {
+        let collection = make_collection_info("team notes", "cold docs");
+        let result = AddCollectionResult {
+            collection,
+            initial_indexing: InitialIndexingOutcome::Blocked(
+                InitialIndexingBlock::ModelNotAvailable {
+                    name: "embedder".to_string(),
+                },
+            ),
+        };
+        let output = format_collection_add_result(&result);
+        assert!(
+            output.contains("then run: kbolt --space 'team notes' update --collection 'cold docs'"),
+            "expected quoted space and name in model-unavailable command: {output}"
+        );
+    }
+
+    #[test]
+    fn format_eval_import_report_shell_quotes_space_collection_and_paths() {
+        let report = EvalImportReport {
+            dataset: "fiqa".to_string(),
+            source: "/tmp/fiqa".to_string(),
+            output_dir: "/tmp/out".to_string(),
+            corpus_dir: "/Users/me/My Data/corpus".to_string(),
+            manifest_path: "/Users/me/My Data/eval.toml".to_string(),
+            default_space: "bench space".to_string(),
+            collection: "fiqa docs".to_string(),
+            document_count: 0,
+            query_count: 0,
+            judgment_count: 0,
+        };
+        let output = format_eval_import_report(&report);
+        assert!(
+            output.contains("kbolt space add 'bench space'"),
+            "expected quoted space in create command: {output}"
+        );
+        assert!(
+            output.contains("kbolt --space 'bench space' collection add '/Users/me/My Data/corpus' --name 'fiqa docs' --no-index"),
+            "expected quoted args in register command: {output}"
+        );
+        assert!(
+            output.contains("kbolt --space 'bench space' update --collection 'fiqa docs'"),
+            "expected quoted args in index command: {output}"
+        );
+        assert!(
+            output.contains("kbolt eval run --file '/Users/me/My Data/eval.toml'"),
+            "expected quoted manifest path in eval run command: {output}"
         );
     }
 }
