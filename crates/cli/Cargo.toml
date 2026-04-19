@@ -16,9 +16,9 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
-kbolt-core = { path = "../core", version = "0.1.1" }
-kbolt-mcp = { path = "../mcp", version = "0.1.1" }
-kbolt-types = { path = "../types", version = "0.1.1" }
+kbolt-core = { path = "../core", version = "0.1.2" }
+kbolt-mcp = { path = "../mcp", version = "0.1.2" }
+kbolt-types = { path = "../types", version = "0.1.2" }
 serde.workspace = true
 serde_json.workspace = true
 shell-words.workspace = true

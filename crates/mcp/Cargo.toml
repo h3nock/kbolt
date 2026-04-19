@@ -8,8 +8,8 @@ repository.workspace = true
 readme = "README.md"
 
 [dependencies]
-kbolt-core = { path = "../core", version = "0.1.1" }
-kbolt-types = { path = "../types", version = "0.1.1" }
+kbolt-core = { path = "../core", version = "0.1.2" }
+kbolt-types = { path = "../types", version = "0.1.2" }
 serde.workspace = true
 serde_json.workspace = true
 
