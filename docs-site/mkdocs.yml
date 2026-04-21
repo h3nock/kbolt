@@ -81,6 +81,7 @@ nav:
           - Overview: reference/cli-overview.md
           - Search: reference/cli/search.md
           - Schedule: reference/cli/schedule.md
+          - Eval: reference/cli/eval.md
           - Content Management: reference/cli/content-management.md
           - Local and Health: reference/cli/local-and-health.md
           - Read and Integration: reference/cli/read-and-integration.md

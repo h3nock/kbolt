@@ -60,6 +60,14 @@ Reference:
 - [Read and integration](cli/read-and-integration.md)
 - [MCP tools](mcp-tools.md)
 
+### Benchmarking
+
+- `eval` for retrieval benchmarks and dataset import
+
+Reference:
+
+- [Eval](cli/eval.md)
+
 ## Output formats
 
 Most commands support:
