@@ -1,0 +1,91 @@
+site_name: kbolt
+site_description: Public documentation for kbolt, a local-first retrieval engine
+site_url: https://h3nock.github.io/kbolt/
+repo_url: https://github.com/h3nock/kbolt
+repo_name: h3nock/kbolt
+edit_uri: edit/main/docs-site/docs/
+docs_dir: docs
+strict: true
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.action.edit
+    - content.code.copy
+    - content.code.annotate
+    - search.highlight
+    - search.suggest
+    - toc.follow
+  icon:
+    logo: material/lightning-bolt
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue grey
+      accent: blue
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue grey
+      accent: blue
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+validation:
+  links:
+    absolute_links: relative_to_docs
+    anchors: warn
+    unrecognized_links: warn
+
+nav:
+  - Home: index.md
+  - Install: install.md
+  - Quickstart: quickstart.md
+  - Guides:
+      - Use with Claude Desktop: guides/use-with-claude-desktop.md
+      - Exclude Files: guides/exclude-files.md
+  - Concepts:
+      - Search Modes: concepts/search-modes.md
+      - Spaces and Collections: concepts/spaces-and-collections.md
+      - Local Setup: concepts/local-setup.md
+  - Reference:
+      - CLI:
+          - Overview: reference/cli-overview.md
+          - Search: reference/cli/search.md
+          - Content Management: reference/cli/content-management.md
+          - Local and Health: reference/cli/local-and-health.md
+          - Read and Integration: reference/cli/read-and-integration.md
+      - Configuration:
+          - index.toml: reference/config/index-toml.md
+      - MCP Tools: reference/mcp-tools.md
+  - Operations:
+      - Troubleshooting: operations/troubleshooting.md
+      - Data Locations: operations/data-locations.md
