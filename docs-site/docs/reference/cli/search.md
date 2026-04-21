@@ -29,7 +29,9 @@ kbolt search [OPTIONS] <QUERY>
 - `--deep` reranks by default; use `--no-rerank` if you want the broader retrieval path without the reranking pass.
 - `--keyword` and `--semantic` bypass the default hybrid path.
 - `--keyword` and `--semantic` always skip reranking.
-- `--debug` changes the presentation layer so you can inspect the pipeline.
+- normal CLI output groups chunk matches by document and may show `+N more matching sections` when multiple hits came from the same file
+- `--format json` returns the raw chunk-level `SearchResponse` from the engine without CLI grouping
+- `--debug` changes the text presentation layer so you can inspect raw chunk hits, pipeline stages, and per-signal scores
 
 ## Examples
 
