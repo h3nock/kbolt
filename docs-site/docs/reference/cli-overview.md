@@ -32,10 +32,12 @@ Reference:
 - `collection` for registered directories
 - `update` for re-indexing
 - `ignore` for gitignore-style exclusions
+- `schedule` for automatic re-indexing
 
 Reference:
 
 - [Content management](cli/content-management.md)
+- [Schedule](cli/schedule.md)
 
 ### Local setup and health
 
