@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::config::{Config, ProviderOperation};
+use crate::local;
 use crate::models::chat::{
     ChatCompletionOutputMode, ChatCompletionRequestOptions, HttpChatClient,
     LlamaCppChatRequestOptions,
@@ -14,10 +15,10 @@ use crate::models::gateway::{
     resolve_inference_gateway_bindings, EmbedderBinding, ExpanderBinding, GatewayProviderKind,
     InferenceGatewayBindings, ProviderDeployment, RerankerBinding,
 };
-use crate::models::http::{HttpJsonClient, HttpOperation};
+use crate::models::http::{HttpJsonClient, HttpOperation, HttpTransportRecovery};
 use crate::models::variants_expander::{ChatVariantsExpander, VARIANTS_GRAMMAR};
 use crate::models::{Embedder, EmbeddingDocumentSizer, EmbeddingInputKind, Expander, Reranker};
-use crate::Result;
+use crate::{RecoveryNoticeSink, Result};
 
 #[cfg(test)]
 use crate::models::chat::build_chat_payload;
@@ -64,6 +65,37 @@ pub(crate) struct BuiltInferenceClients {
     pub expander: Option<Arc<dyn Expander>>,
 }
 
+#[derive(Clone)]
+struct InferenceClientBuildOptions {
+    enable_managed_recovery: bool,
+    recovery_notice: Option<RecoveryNoticeSink>,
+}
+
+impl InferenceClientBuildOptions {
+    fn with_managed_recovery(recovery_notice: Option<RecoveryNoticeSink>) -> Self {
+        Self {
+            enable_managed_recovery: true,
+            recovery_notice,
+        }
+    }
+
+    fn without_managed_recovery() -> Self {
+        Self {
+            enable_managed_recovery: false,
+            recovery_notice: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for InferenceClientBuildOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InferenceClientBuildOptions")
+            .field("enable_managed_recovery", &self.enable_managed_recovery)
+            .field("recovery_notice", &self.recovery_notice.is_some())
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for BuiltInferenceClients {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BuiltInferenceClients")
@@ -79,39 +111,74 @@ impl std::fmt::Debug for BuiltInferenceClients {
 }
 
 pub(crate) fn build_inference_clients(config: &Config) -> Result<BuiltInferenceClients> {
+    build_inference_clients_with_recovery_notice(config, None)
+}
+
+pub(crate) fn build_inference_clients_with_recovery_notice(
+    config: &Config,
+    recovery_notice: Option<RecoveryNoticeSink>,
+) -> Result<BuiltInferenceClients> {
+    build_inference_clients_with_options(
+        config,
+        InferenceClientBuildOptions::with_managed_recovery(recovery_notice),
+    )
+}
+
+pub(crate) fn build_inference_clients_without_managed_recovery(
+    config: &Config,
+) -> Result<BuiltInferenceClients> {
+    build_inference_clients_with_options(
+        config,
+        InferenceClientBuildOptions::without_managed_recovery(),
+    )
+}
+
+fn build_inference_clients_with_options(
+    config: &Config,
+    options: InferenceClientBuildOptions,
+) -> Result<BuiltInferenceClients> {
     let bindings = resolve_inference_gateway_bindings(config)?;
-    build_provider_bound_clients(&bindings)
+    let config = Arc::new(config.clone());
+    build_provider_bound_clients(&bindings, &config, options)
 }
 
 fn build_provider_bound_clients(
     bindings: &InferenceGatewayBindings,
+    config: &Arc<Config>,
+    options: InferenceClientBuildOptions,
 ) -> Result<BuiltInferenceClients> {
     Ok(BuiltInferenceClients {
         embedder: bindings
             .embedder
             .as_ref()
-            .map(build_embedder_from_binding)
+            .map(|binding| build_embedder_from_binding(config, binding, options.clone()))
             .transpose()?,
         embedding_document_sizer: bindings
             .embedder
             .as_ref()
-            .map(build_embedding_document_sizer_from_binding)
+            .map(|binding| {
+                build_embedding_document_sizer_from_binding(config, binding, options.clone())
+            })
             .transpose()?
             .flatten(),
         reranker: bindings
             .reranker
             .as_ref()
-            .map(build_reranker_from_binding)
+            .map(|binding| build_reranker_from_binding(config, binding, options.clone()))
             .transpose()?,
         expander: bindings
             .expander
             .as_ref()
-            .map(build_expander_from_binding)
+            .map(|binding| build_expander_from_binding(config, binding, options.clone()))
             .transpose()?,
     })
 }
 
-fn build_embedder_from_binding(binding: &EmbedderBinding) -> Result<Arc<dyn Embedder>> {
+fn build_embedder_from_binding(
+    config: &Arc<Config>,
+    binding: &EmbedderBinding,
+    options: InferenceClientBuildOptions,
+) -> Result<Arc<dyn Embedder>> {
     if binding.deployment.operation != ProviderOperation::Embedding {
         return Err(KboltError::Inference(format!(
             "provider profile '{}' uses incompatible operation '{}' for embedder bindings",
@@ -122,13 +189,12 @@ fn build_embedder_from_binding(binding: &EmbedderBinding) -> Result<Arc<dyn Embe
     }
 
     Ok(Arc::new(HttpApiEmbedder {
-        client: HttpJsonClient::new(
-            &binding.deployment.base_url,
-            binding.deployment.api_key_env.as_deref(),
-            binding.deployment.timeout_ms,
-            binding.deployment.max_retries,
+        client: build_http_client(
+            config,
+            &binding.provider_name,
+            &binding.deployment,
             "embedding",
-            binding.deployment.kind.as_str(),
+            options,
         ),
         model: binding.deployment.model.clone(),
         batch_size: binding.batch_size,
@@ -137,7 +203,9 @@ fn build_embedder_from_binding(binding: &EmbedderBinding) -> Result<Arc<dyn Embe
 }
 
 fn build_embedding_document_sizer_from_binding(
+    config: &Arc<Config>,
     binding: &EmbedderBinding,
+    options: InferenceClientBuildOptions,
 ) -> Result<Option<Arc<dyn EmbeddingDocumentSizer>>> {
     if binding.deployment.operation != ProviderOperation::Embedding {
         return Err(KboltError::Inference(format!(
@@ -150,13 +218,12 @@ fn build_embedding_document_sizer_from_binding(
 
     match binding.deployment.kind {
         GatewayProviderKind::LlamaCppServer => Ok(Some(Arc::new(LlamaCppServerDocumentSizer {
-            client: HttpJsonClient::new(
-                &binding.deployment.base_url,
-                binding.deployment.api_key_env.as_deref(),
-                binding.deployment.timeout_ms,
-                binding.deployment.max_retries,
+            client: build_http_client(
+                config,
+                &binding.provider_name,
+                &binding.deployment,
                 "embedding",
-                binding.deployment.kind.as_str(),
+                options,
             ),
             endpoint_suffix: llama_cpp_tokenize_endpoint_suffix(),
         }))),
@@ -164,30 +231,32 @@ fn build_embedding_document_sizer_from_binding(
     }
 }
 
-fn build_reranker_from_binding(binding: &RerankerBinding) -> Result<Arc<dyn Reranker>> {
+fn build_reranker_from_binding(
+    config: &Arc<Config>,
+    binding: &RerankerBinding,
+    options: InferenceClientBuildOptions,
+) -> Result<Arc<dyn Reranker>> {
     match binding.deployment.operation {
         ProviderOperation::Reranking => match binding.deployment.kind {
             GatewayProviderKind::LlamaCppServer => Ok(Arc::new(LlamaCppEndpointReranker {
-                client: HttpJsonClient::new(
-                    &binding.deployment.base_url,
-                    binding.deployment.api_key_env.as_deref(),
-                    binding.deployment.timeout_ms,
-                    binding.deployment.max_retries,
+                client: build_http_client(
+                    config,
+                    &binding.provider_name,
+                    &binding.deployment,
                     "reranking",
-                    binding.deployment.kind.as_str(),
+                    options,
                 ),
                 model: binding.deployment.model.clone(),
                 endpoint_suffix: llama_cpp_reranking_endpoint_suffix(),
             })),
             GatewayProviderKind::OpenAiCompatible => {
                 Ok(Arc::new(OpenAiCompatibleEndpointReranker {
-                    client: HttpJsonClient::new(
-                        &binding.deployment.base_url,
-                        binding.deployment.api_key_env.as_deref(),
-                        binding.deployment.timeout_ms,
-                        binding.deployment.max_retries,
+                    client: build_http_client(
+                        config,
+                        &binding.provider_name,
+                        &binding.deployment,
                         "reranking",
-                        binding.deployment.kind.as_str(),
+                        options,
                     ),
                     model: binding.deployment.model.clone(),
                     endpoint_suffix: openai_compatible_reranking_endpoint_suffix(),
@@ -196,6 +265,8 @@ fn build_reranker_from_binding(binding: &RerankerBinding) -> Result<Arc<dyn Rera
         },
         ProviderOperation::ChatCompletion => Ok(Arc::new(ChatBackedReranker {
             chat: Arc::new(build_chat_client(
+                config,
+                &binding.provider_name,
                 &binding.deployment,
                 match binding.deployment.kind {
                     GatewayProviderKind::LlamaCppServer => {
@@ -205,6 +276,7 @@ fn build_reranker_from_binding(binding: &RerankerBinding) -> Result<Arc<dyn Rera
                         ChatCompletionRequestOptions::json_object()
                     }
                 },
+                options,
             )),
         })),
         ProviderOperation::Embedding => Err(KboltError::Inference(format!(
@@ -215,7 +287,11 @@ fn build_reranker_from_binding(binding: &RerankerBinding) -> Result<Arc<dyn Rera
     }
 }
 
-fn build_expander_from_binding(binding: &ExpanderBinding) -> Result<Arc<dyn Expander>> {
+fn build_expander_from_binding(
+    config: &Arc<Config>,
+    binding: &ExpanderBinding,
+    options: InferenceClientBuildOptions,
+) -> Result<Arc<dyn Expander>> {
     if binding.deployment.operation != ProviderOperation::ChatCompletion {
         return Err(KboltError::Inference(format!(
             "provider profile '{}' uses incompatible operation '{}' for expander bindings",
@@ -225,7 +301,7 @@ fn build_expander_from_binding(binding: &ExpanderBinding) -> Result<Arc<dyn Expa
         .into());
     }
 
-    let options = match binding.deployment.kind {
+    let chat_options = match binding.deployment.kind {
         GatewayProviderKind::OpenAiCompatible => {
             validate_openai_expander_sampling(binding)?;
             openai_expander_options(binding)
@@ -234,13 +310,22 @@ fn build_expander_from_binding(binding: &ExpanderBinding) -> Result<Arc<dyn Expa
     };
 
     Ok(Arc::new(ChatVariantsExpander::new(Arc::new(
-        build_chat_client(&binding.deployment, options),
+        build_chat_client(
+            config,
+            &binding.provider_name,
+            &binding.deployment,
+            chat_options,
+            options,
+        ),
     ))))
 }
 
 fn build_chat_client(
+    config: &Arc<Config>,
+    provider_name: &str,
     deployment: &ProviderDeployment,
     options: ChatCompletionRequestOptions,
+    build_options: InferenceClientBuildOptions,
 ) -> HttpChatClient {
     HttpChatClient::new(
         &deployment.base_url,
@@ -251,7 +336,49 @@ fn build_chat_client(
         chat_completion_endpoint_suffix(deployment.kind),
         options,
         deployment.kind.as_str(),
+        build_managed_transport_recovery(config, provider_name, deployment, build_options),
     )
+}
+
+fn build_http_client(
+    config: &Arc<Config>,
+    provider_name: &str,
+    deployment: &ProviderDeployment,
+    api_key_scope: &'static str,
+    options: InferenceClientBuildOptions,
+) -> HttpJsonClient {
+    HttpJsonClient::new(
+        &deployment.base_url,
+        deployment.api_key_env.as_deref(),
+        deployment.timeout_ms,
+        deployment.max_retries,
+        api_key_scope,
+        deployment.kind.as_str(),
+        build_managed_transport_recovery(config, provider_name, deployment, options),
+    )
+}
+
+fn build_managed_transport_recovery(
+    config: &Arc<Config>,
+    provider_name: &str,
+    deployment: &ProviderDeployment,
+    options: InferenceClientBuildOptions,
+) -> Option<HttpTransportRecovery> {
+    if !options.enable_managed_recovery
+        || deployment.kind != GatewayProviderKind::LlamaCppServer
+        || !local::is_managed_provider_name(provider_name)
+    {
+        return None;
+    }
+
+    let config = Arc::clone(config);
+    let provider_name = provider_name.to_string();
+    let label = local::managed_provider_label(&provider_name).unwrap_or("managed local provider");
+    Some(HttpTransportRecovery::new(
+        label,
+        Arc::new(move || local::restart_managed_service(config.as_ref(), &provider_name)),
+        options.recovery_notice.clone(),
+    ))
 }
 
 fn embedding_endpoint_suffix(kind: GatewayProviderKind) -> &'static str {
@@ -1277,6 +1404,73 @@ mod tests {
             .embed_batch(EmbeddingInputKind::Document, &["hello".to_string()])
             .expect("embed should retry then succeed");
         assert_eq!(vectors, vec![vec![0.1, 0.2]]);
+    }
+
+    #[test]
+    fn managed_llama_provider_enables_transport_recovery() {
+        let deployment = ProviderDeployment {
+            kind: GatewayProviderKind::LlamaCppServer,
+            operation: ProviderOperation::Embedding,
+            base_url: "http://127.0.0.1:8101".to_string(),
+            model: "embeddinggemma".to_string(),
+            api_key_env: None,
+            timeout_ms: 5_000,
+            max_retries: 0,
+        };
+        let recovery = build_managed_transport_recovery(
+            &Arc::new(base_config()),
+            "kbolt_local_embed",
+            &deployment,
+            InferenceClientBuildOptions::with_managed_recovery(None),
+        )
+        .expect("managed recovery should exist");
+
+        assert_eq!(recovery.label(), "embedder");
+    }
+
+    #[test]
+    fn unmanaged_or_disabled_providers_do_not_enable_transport_recovery() {
+        let llama_deployment = ProviderDeployment {
+            kind: GatewayProviderKind::LlamaCppServer,
+            operation: ProviderOperation::Embedding,
+            base_url: "http://127.0.0.1:8101".to_string(),
+            model: "embeddinggemma".to_string(),
+            api_key_env: None,
+            timeout_ms: 5_000,
+            max_retries: 0,
+        };
+        let openai_deployment = ProviderDeployment {
+            kind: GatewayProviderKind::OpenAiCompatible,
+            operation: ProviderOperation::Embedding,
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "text-embedding-3-large".to_string(),
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            timeout_ms: 5_000,
+            max_retries: 0,
+        };
+        let config = Arc::new(base_config());
+
+        assert!(build_managed_transport_recovery(
+            &config,
+            "local_embed",
+            &llama_deployment,
+            InferenceClientBuildOptions::with_managed_recovery(None),
+        )
+        .is_none());
+        assert!(build_managed_transport_recovery(
+            &config,
+            "kbolt_local_embed",
+            &openai_deployment,
+            InferenceClientBuildOptions::with_managed_recovery(None),
+        )
+        .is_none());
+        assert!(build_managed_transport_recovery(
+            &config,
+            "kbolt_local_embed",
+            &llama_deployment,
+            InferenceClientBuildOptions::without_managed_recovery(),
+        )
+        .is_none());
     }
 
     #[test]

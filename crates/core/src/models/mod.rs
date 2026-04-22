@@ -16,7 +16,10 @@ mod variants_expander;
 
 pub(crate) use embedder::{Embedder, EmbeddingDocumentSizer, EmbeddingInputKind};
 pub(crate) use expander::{normalize_query_text, Expander};
-pub(crate) use inference::build_inference_clients;
+pub(crate) use inference::{
+    build_inference_clients, build_inference_clients_with_recovery_notice,
+    build_inference_clients_without_managed_recovery,
+};
 pub(crate) use reranker::Reranker;
 
 use gateway::{resolve_inference_gateway_bindings, ProviderDeployment};
@@ -51,6 +54,7 @@ fn readiness_for_binding(profile: &str, deployment: &ProviderDeployment) -> Mode
         0,
         deployment.operation.as_str(),
         deployment.kind.as_str(),
+        None,
     );
     let readiness = client.probe_readiness();
     ModelInfo {

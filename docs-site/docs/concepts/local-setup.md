@@ -27,6 +27,8 @@ The managed local stack owns:
 - service logs
 - local provider endpoints written into config
 
+If a managed local endpoint goes down later, `kbolt` now makes one automatic restart attempt before surfacing a transport error. During that recovery attempt, the CLI prints a short stderr notice. This applies only to the provider profiles written by `kbolt setup local` and `kbolt local enable deep`.
+
 You can inspect the current state with:
 
 ```bash

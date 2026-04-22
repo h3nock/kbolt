@@ -103,9 +103,17 @@ struct RankedChunk {
 
 impl Engine {
     pub fn new(config_path: Option<&Path>) -> Result<Self> {
+        Self::new_with_recovery_notice(config_path, None)
+    }
+
+    pub fn new_with_recovery_notice(
+        config_path: Option<&Path>,
+        recovery_notice: Option<crate::RecoveryNoticeSink>,
+    ) -> Result<Self> {
         let config = config::load(config_path)?;
         let storage = Storage::new(&config.cache_dir)?;
-        let built_models = models::build_inference_clients(&config)?;
+        let built_models =
+            models::build_inference_clients_with_recovery_notice(&config, recovery_notice)?;
         Ok(Self {
             storage,
             config,

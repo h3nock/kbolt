@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 pub mod config;
 pub mod doctor;
 pub mod engine;
@@ -15,3 +17,4 @@ mod schedule_support;
 pub mod storage;
 
 pub use error::{CoreError, Result};
+pub type RecoveryNoticeSink = Arc<dyn Fn(&str) + Send + Sync>;

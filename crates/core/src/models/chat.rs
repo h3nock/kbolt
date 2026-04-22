@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::models::completion::CompletionClient;
-use crate::models::http::{HttpJsonClient, HttpOperation};
+use crate::models::http::{HttpJsonClient, HttpOperation, HttpTransportRecovery};
 use crate::models::text::strip_json_fences;
 use crate::Result;
 
@@ -98,17 +98,29 @@ impl HttpChatClient {
         model: &str,
         endpoint_suffix: &'static str,
         options: ChatCompletionRequestOptions,
-        provider_name: &'static str,
+        provider_label: &str,
+        transport_recovery: Option<HttpTransportRecovery>,
+    ) -> Self {
+        let http = HttpJsonClient::new(
+            base_url,
+            api_key_env,
+            timeout_ms,
+            max_retries,
+            "inference",
+            provider_label,
+            transport_recovery,
+        );
+        Self::from_http(http, model, endpoint_suffix, options)
+    }
+
+    pub(super) fn from_http(
+        http: HttpJsonClient,
+        model: &str,
+        endpoint_suffix: &'static str,
+        options: ChatCompletionRequestOptions,
     ) -> Self {
         Self {
-            http: HttpJsonClient::new(
-                base_url,
-                api_key_env,
-                timeout_ms,
-                max_retries,
-                "inference",
-                provider_name,
-            ),
+            http,
             model: model.to_string(),
             endpoint_suffix,
             options,

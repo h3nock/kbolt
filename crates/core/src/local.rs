@@ -4,6 +4,7 @@ use std::io;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,7 +16,7 @@ use crate::config::{
     self, Config, EmbedderRoleConfig, ExpanderRoleConfig, ProviderOperation, ProviderProfileConfig,
     RerankerRoleConfig,
 };
-use crate::models::{self, build_inference_clients, EmbeddingInputKind};
+use crate::models::{self, build_inference_clients_without_managed_recovery, EmbeddingInputKind};
 use crate::Result;
 
 const APP_NAME: &str = "kbolt";
@@ -79,6 +80,43 @@ const EXPANDER_SPEC: ManagedServiceSpec = ManagedServiceSpec {
     model_file: "qmd-query-expansion-1.7B-q4_k_m.gguf",
     preferred_port: 8103,
 };
+
+static EMBEDDER_RECOVERY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static RERANKER_RECOVERY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static EXPANDER_RECOVERY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+pub(crate) fn is_managed_provider_name(provider_name: &str) -> bool {
+    managed_service_spec(provider_name).is_some()
+}
+
+pub(crate) fn managed_provider_label(provider_name: &str) -> Option<&'static str> {
+    managed_service_spec(provider_name).map(|spec| spec.name)
+}
+
+pub(crate) fn restart_managed_service(config: &Config, provider_name: &str) -> Result<()> {
+    let spec = managed_service_spec(provider_name).ok_or_else(|| {
+        KboltError::Config(format!(
+            "automatic recovery is only supported for managed local providers; got '{provider_name}'"
+        ))
+    })?;
+    let _guard = managed_service_recovery_lock(spec).lock().map_err(|_| {
+        KboltError::Internal(format!("managed {} recovery lock was poisoned", spec.name))
+    })?;
+
+    prepare_runtime_dirs(&config.cache_dir)?;
+    let llama_server_path = find_llama_server()?;
+    let port = provider_port(config, spec.provider_name)?;
+    let service = start_or_reuse_service(config, &llama_server_path, spec, port)?;
+    if service.ready {
+        return Ok(());
+    }
+
+    Err(KboltError::Inference(format!(
+        "managed {} on {} is running but not ready; run `kbolt local status`",
+        spec.name, service.endpoint
+    ))
+    .into())
+}
 
 pub fn setup_local(config_path: Option<&Path>) -> Result<LocalReport> {
     let llama_server_path = find_llama_server()?;
@@ -560,6 +598,23 @@ fn ensure_managed_local_base_configured(config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn managed_service_spec(provider_name: &str) -> Option<&'static ManagedServiceSpec> {
+    match provider_name {
+        MANAGED_EMBED_PROVIDER => Some(&EMBEDDER_SPEC),
+        MANAGED_RERANK_PROVIDER => Some(&RERANKER_SPEC),
+        MANAGED_EXPAND_PROVIDER => Some(&EXPANDER_SPEC),
+        _ => None,
+    }
+}
+
+fn managed_service_recovery_lock(spec: &ManagedServiceSpec) -> &'static Mutex<()> {
+    match spec.role {
+        ManagedRole::Embedder => EMBEDDER_RECOVERY_LOCK.get_or_init(|| Mutex::new(())),
+        ManagedRole::Reranker => RERANKER_RECOVERY_LOCK.get_or_init(|| Mutex::new(())),
+        ManagedRole::Expander => EXPANDER_RECOVERY_LOCK.get_or_init(|| Mutex::new(())),
+    }
+}
+
 fn configured_specs(config: &Config) -> Vec<&'static ManagedServiceSpec> {
     let mut specs = Vec::new();
     if config.providers.contains_key(MANAGED_EMBED_PROVIDER) {
@@ -867,7 +922,7 @@ fn probe_service(config: &Config, spec: &ManagedServiceSpec, port: u16) -> Resul
         .into());
     }
 
-    let clients = build_inference_clients(&probe_config)?;
+    let clients = build_inference_clients_without_managed_recovery(&probe_config)?;
     match spec.role {
         ManagedRole::Embedder => {
             let embedder = clients.embedder.as_ref().ok_or_else(|| {

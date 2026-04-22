@@ -16,6 +16,8 @@ This writes local provider bindings, downloads the default local models, and sta
 
 Use `local` to inspect and control the managed local services.
 
+When a managed local inference request hits a transport failure, `kbolt` attempts one automatic restart of the affected managed service before returning the error and prints a short stderr notice while it does so. `local status` remains the direct way to inspect that managed stack.
+
 Subcommands:
 
 - `status`

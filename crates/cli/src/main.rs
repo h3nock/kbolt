@@ -72,7 +72,7 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
 
     let output_format = cli.format;
     let wants_json = output_format == OutputFormat::Json;
-    let engine = Engine::new(None)?;
+    let engine = Engine::new_with_recovery_notice(None, cli_recovery_notice_sink())?;
     let mut adapter = CliAdapter::new(engine);
     let print_text = |line: &str| emit_text_output(output_format, line);
     let print_message = |line: &str| emit_message_output(output_format, line);
@@ -862,6 +862,10 @@ fn emit_error(format: OutputFormat, err: &RunError) {
     } else {
         eprintln!("{rendered}");
     }
+}
+
+fn cli_recovery_notice_sink() -> Option<kbolt_core::RecoveryNoticeSink> {
+    Some(Arc::new(|line| eprintln!("{line}")))
 }
 
 fn run_with_activity_indicator<T, E>(
