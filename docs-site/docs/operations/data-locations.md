@@ -38,8 +38,9 @@ kbolt doctor
 - `meta.sqlite`: SQLite metadata store
 - `spaces/`: per-space search indexes
 - `models/`: downloaded local model files
-- `run/`: pid files for managed local services
-- `logs/`: managed local-service logs
+- `run/`: pid files for managed local services and the watcher
+- `watch/state.json`: watcher runtime state for `kbolt watch status`
+- `logs/`: managed local-service logs and `watch.log`
 
 ## What to check when debugging
 

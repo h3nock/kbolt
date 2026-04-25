@@ -46,6 +46,14 @@ This registers the directory as a collection and runs the initial indexing pass 
 
 ## 4. Search the indexed content
 
+If you want kbolt to keep the collection fresh as files change, enable the watcher:
+
+```bash
+kbolt watch enable
+```
+
+The watcher runs in the background on macOS and Linux. It uses the same indexing path as `kbolt update`, so manual updates remain available when you want an immediate full refresh.
+
 Run:
 
 ```bash
@@ -74,6 +82,7 @@ At this point you should have:
 - a working `index.toml`
 - healthy local services
 - at least one indexed collection
+- automatic watching if you enabled `kbolt watch`
 - successful search results from your own content
 
 ## If something fails
@@ -86,5 +95,6 @@ At this point you should have:
 ## Next steps
 
 - Learn the retrieval options in [Search modes](concepts/search-modes.md).
+- Keep indexes fresh automatically with [Watch](reference/cli/watch.md).
 - If you want to use the index from Claude Desktop, go to [Use with Claude Desktop](guides/use-with-claude-desktop.md).
 - If you want to manage multiple indexes, read [Spaces and collections](concepts/spaces-and-collections.md).

@@ -82,6 +82,18 @@ Important options:
 - `--dry-run`
 - `--verbose`
 
+## `watch`
+
+Use `watch` to keep collections fresh automatically:
+
+```bash
+kbolt watch enable
+kbolt watch status
+kbolt watch logs
+```
+
+The watcher covers all configured collections and reuses the same indexing behavior as `kbolt update`.
+
 ## `ignore`
 
 Use `ignore` to add gitignore-style patterns on top of the built-in default ignores and the collection's own `.gitignore`.
@@ -108,4 +120,5 @@ After changing ignore rules, run `update` so the index reflects the new exclusio
 
 - [Spaces and collections](../../concepts/spaces-and-collections.md)
 - [Exclude files](../../guides/exclude-files.md)
+- [Watch](watch.md)
 - [Data locations](../../operations/data-locations.md)
