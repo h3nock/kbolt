@@ -9,7 +9,7 @@ use clap::Parser;
 use kbolt_cli::args::{
     Cli, CollectionCommand, Command, EvalCommand, EvalImportCommand, IgnoreCommand, LocalCommand,
     LocalFeature, ModelsCommand, OutputFormat, ScheduleAddArgs, ScheduleCommand, ScheduleDayArg,
-    ScheduleRemoveArgs, SetupCommand, SpaceCommand,
+    ScheduleRemoveArgs, SetupCommand, SpaceCommand, WatchCommand,
 };
 use kbolt_cli::{
     format_doctor_report, format_eval_import_report, format_local_report,
@@ -21,13 +21,15 @@ use kbolt_core::engine::Engine;
 use kbolt_core::error::CoreError;
 use kbolt_core::eval_import;
 use kbolt_core::local;
+use kbolt_core::watch;
 use kbolt_mcp::stdio;
 use kbolt_mcp::McpAdapter;
 use kbolt_types::{
     ActiveSpace, AddScheduleRequest, CollectionInfo, FileEntry, GetRequest, KboltError,
     LocalAction, LocalReport, Locator, ModelStatus, MultiGetRequest, RemoveScheduleRequest,
     RemoveScheduleSelector, ScheduleInterval, ScheduleIntervalUnit, ScheduleScope, ScheduleTrigger,
-    ScheduleWeekday, SearchMode, SearchRequest, SpaceInfo, UpdateOptions,
+    ScheduleWeekday, SearchMode, SearchRequest, SpaceInfo, UpdateOptions, WatchBackend,
+    WatchHealth, WatchMode, WatchRuntimeState, WatchStatusResponse,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -44,6 +46,11 @@ fn main() {
 }
 
 fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
+    if parse_internal_watch_run(&argv)? {
+        watch::runner::run_service()?;
+        return Ok(());
+    }
+
     if let Some(schedule_id) = parse_internal_schedule_run(&argv)? {
         let engine = Engine::new(None)?;
         engine.run_schedule(&schedule_id)?;
@@ -59,6 +66,9 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
         return Ok(());
     }
     if handle_eval_import(&cli)? {
+        return Ok(());
+    }
+    if handle_watch_commands(&cli)? {
         return Ok(());
     }
     maybe_print_first_run_inference_hint(&cli.command, cli.format);
@@ -317,6 +327,7 @@ fn run(argv: Vec<OsString>) -> std::result::Result<(), RunError> {
                 }
             }
         }
+        Command::Watch(_) => unreachable!("watch command handled before engine setup"),
         Command::Mcp => unreachable!("mcp command handled before adapter setup"),
         Command::Search(search) => {
             let mode = if search.deep {
@@ -559,6 +570,62 @@ fn handle_eval_import(cli: &Cli) -> std::result::Result<bool, RunError> {
     Ok(true)
 }
 
+fn handle_watch_commands(cli: &Cli) -> std::result::Result<bool, RunError> {
+    let Command::Watch(args) = &cli.command else {
+        return Ok(false);
+    };
+    ensure_watch_uses_local_scope(cli.space.as_deref())?;
+
+    if args.foreground {
+        if args.command.is_some() {
+            return Err(CoreError::Domain(KboltError::InvalidInput(
+                "`kbolt watch --foreground` cannot be combined with watch subcommands".to_string(),
+            ))
+            .into());
+        }
+        if cli.format == OutputFormat::Json {
+            return Err(CoreError::Domain(KboltError::InvalidInput(
+                "--format json is not supported for `kbolt watch --foreground`".to_string(),
+            ))
+            .into());
+        }
+        watch::runner::run_foreground()?;
+        return Ok(true);
+    }
+
+    match args.command.as_ref().unwrap_or(&WatchCommand::Status) {
+        WatchCommand::Enable => {
+            let response = watch::service::enable(None)?;
+            emit_watch_response(cli.format, Some("watch enabled"), &response)?;
+        }
+        WatchCommand::Disable => {
+            let response = watch::service::disable(None)?;
+            emit_watch_response(cli.format, Some("watch disabled"), &response)?;
+        }
+        WatchCommand::Status => {
+            let response = watch::service::status(None)?;
+            emit_watch_response(cli.format, None, &response)?;
+        }
+        WatchCommand::Logs { lines } => {
+            let status = watch::service::status(None)?;
+            let content = watch::service::logs(None, *lines)?;
+            if cli.format == OutputFormat::Json {
+                let lines = content.lines().map(ToString::to_string).collect::<Vec<_>>();
+                emit_structured_output(&json!({
+                    "log_file": status.log_file,
+                    "lines": lines,
+                }))?;
+            } else if content.is_empty() {
+                emit_text_output(cli.format, "no watcher logs found");
+            } else {
+                emit_text_output(cli.format, &content);
+            }
+        }
+    }
+
+    Ok(true)
+}
+
 #[derive(Debug)]
 enum RunError {
     Clap(clap::Error),
@@ -645,6 +712,7 @@ struct ModelsJsonResponse {
 }
 
 const INTERNAL_SCHEDULE_RUN_COMMAND: &str = "__schedule-run";
+const INTERNAL_WATCH_RUN_COMMAND: &str = "__watch-run";
 
 fn ensure_schedule_uses_local_scope(space: Option<&str>) -> std::result::Result<(), RunError> {
     if space.is_none() {
@@ -665,6 +733,18 @@ fn ensure_eval_uses_local_scope(space: Option<&str>) -> std::result::Result<(), 
 
     Err(CoreError::Domain(KboltError::InvalidInput(
         "eval commands do not use the top-level --space flag; set scope inside the eval manifest"
+            .to_string(),
+    ))
+    .into())
+}
+
+fn ensure_watch_uses_local_scope(space: Option<&str>) -> std::result::Result<(), RunError> {
+    if space.is_none() {
+        return Ok(());
+    }
+
+    Err(CoreError::Domain(KboltError::InvalidInput(
+        "watch commands keep all configured collections fresh and do not use the top-level --space flag"
             .to_string(),
     ))
     .into())
@@ -801,6 +881,25 @@ fn parse_internal_schedule_run(args: &[OsString]) -> std::result::Result<Option<
     Ok(Some(schedule_id.to_string()))
 }
 
+fn parse_internal_watch_run(args: &[OsString]) -> std::result::Result<bool, RunError> {
+    let Some(command) = args.get(1).and_then(|arg| arg.to_str()) else {
+        return Ok(false);
+    };
+
+    if command != INTERNAL_WATCH_RUN_COMMAND {
+        return Ok(false);
+    }
+
+    if args.len() != 2 {
+        return Err(CoreError::Domain(KboltError::InvalidInput(format!(
+            "internal watch runner usage: kbolt {INTERNAL_WATCH_RUN_COMMAND}"
+        )))
+        .into());
+    }
+
+    Ok(true)
+}
+
 fn requested_output_format_from_args(args: &[OsString]) -> OutputFormat {
     let mut args_iter = args.iter().skip(1);
     while let Some(arg) = args_iter.next() {
@@ -853,6 +952,141 @@ fn emit_message_output(format: OutputFormat, line: &str) {
 fn emit_structured_output<T: Serialize>(value: &T) -> std::result::Result<(), RunError> {
     println!("{}", render_structured_output(value)?);
     Ok(())
+}
+
+fn emit_watch_response(
+    format: OutputFormat,
+    prefix: Option<&str>,
+    response: &WatchStatusResponse,
+) -> std::result::Result<(), RunError> {
+    if format == OutputFormat::Json {
+        emit_structured_output(response)?;
+        return Ok(());
+    }
+
+    let rendered = format_watch_status(response);
+    let output = match prefix {
+        Some(prefix) if rendered.is_empty() => prefix.to_string(),
+        Some(prefix) => format!("{prefix}\n{rendered}"),
+        None => rendered,
+    };
+    emit_text_output(format, &output);
+    Ok(())
+}
+
+fn format_watch_status(response: &WatchStatusResponse) -> String {
+    let mut lines = Vec::new();
+    let service = &response.service;
+    let service_line = if service.enabled && service.running {
+        format!("watch: running ({})", watch_backend_label(service.backend))
+    } else if service.enabled {
+        format!(
+            "watch: enabled, not running ({})",
+            watch_backend_label(service.backend)
+        )
+    } else if service.running {
+        format!(
+            "watch: running, not enabled ({})",
+            watch_backend_label(service.backend)
+        )
+    } else {
+        "watch: disabled".to_string()
+    };
+    lines.push(service_line);
+
+    if let Some(pid) = service.pid {
+        lines.push(format!("pid: {pid}"));
+    }
+    if let Some(issue) = service.issue.as_deref() {
+        lines.push(format!("issue: {issue}"));
+    }
+
+    if let Some(runtime) = response.runtime.as_ref() {
+        lines.push(format!(
+            "runtime: {} / {} / {}",
+            watch_mode_label(runtime.mode),
+            watch_state_label(runtime.state),
+            watch_health_label(runtime.health)
+        ));
+        lines.push(format!(
+            "collections: {} watched, {} dirty",
+            runtime.watched_collections, runtime.dirty_collections
+        ));
+        if runtime.semantic_pending_collections > 0
+            || runtime.semantic_unavailable_collections > 0
+            || !runtime.semantic_blocked_spaces.is_empty()
+        {
+            lines.push(format!(
+                "semantic: {} pending, {} unavailable, {} blocked spaces",
+                runtime.semantic_pending_collections,
+                runtime.semantic_unavailable_collections,
+                runtime.semantic_blocked_spaces.len()
+            ));
+        }
+        if let Some(summary) = runtime.last_keyword_refresh.as_ref() {
+            lines.push(format!(
+                "last keyword refresh: {}/{} ({} changed, {}ms)",
+                summary.space, summary.collection, summary.changed_docs, summary.elapsed_ms
+            ));
+        }
+        if let Some(summary) = runtime.last_semantic_refresh.as_ref() {
+            lines.push(format!(
+                "last semantic refresh: {}/{} ({} embedded, {}ms)",
+                summary.space, summary.collection, summary.embedded_chunks, summary.elapsed_ms
+            ));
+        }
+        for block in &runtime.semantic_blocked_spaces {
+            lines.push(format!(
+                "blocked: space {} needs repair; run `{}`",
+                block.space, block.fix
+            ));
+        }
+        if let Some(error) = runtime.last_error.as_deref() {
+            lines.push(format!("last error: {error}"));
+        }
+    } else if service.enabled {
+        lines.push("runtime: no state written yet".to_string());
+    }
+
+    lines.push(format!("logs: {}", response.log_file.display()));
+    lines.join("\n")
+}
+
+fn watch_backend_label(value: WatchBackend) -> &'static str {
+    match value {
+        WatchBackend::Launchd => "launchd",
+        WatchBackend::SystemdUser => "systemd-user",
+        WatchBackend::Unsupported => "unsupported",
+    }
+}
+
+fn watch_mode_label(value: WatchMode) -> &'static str {
+    match value {
+        WatchMode::Native => "native",
+        WatchMode::Polling => "polling",
+        WatchMode::Foreground => "foreground",
+        WatchMode::Disabled => "disabled",
+    }
+}
+
+fn watch_health_label(value: WatchHealth) -> &'static str {
+    match value {
+        WatchHealth::Ok => "ok",
+        WatchHealth::Warning => "warning",
+        WatchHealth::Error => "error",
+    }
+}
+
+fn watch_state_label(value: WatchRuntimeState) -> &'static str {
+    match value {
+        WatchRuntimeState::Starting => "starting",
+        WatchRuntimeState::Idle => "idle",
+        WatchRuntimeState::RefreshingKeyword => "refreshing keyword",
+        WatchRuntimeState::RefreshingSemantic => "refreshing semantic",
+        WatchRuntimeState::Checking => "checking",
+        WatchRuntimeState::BackingOff => "backing off",
+        WatchRuntimeState::Stopping => "stopping",
+    }
 }
 
 fn emit_error(format: OutputFormat, err: &RunError) {
@@ -1114,7 +1348,10 @@ fn should_show_first_run_inference_hint(
     is_tty: bool,
     config_exists: bool,
 ) -> bool {
-    !matches!(command, Command::Mcp) && format == OutputFormat::Cli && is_tty && !config_exists
+    !matches!(command, Command::Mcp | Command::Watch(_))
+        && format == OutputFormat::Cli
+        && is_tty
+        && !config_exists
 }
 
 fn stdin_stdout_are_tty() -> bool {
@@ -1156,14 +1393,16 @@ mod tests {
     use super::{
         collection_add_activity_label, ensure_eval_uses_local_scope,
         ensure_schedule_uses_local_scope, ensure_supported_output_format,
-        invocation_has_no_subcommand, is_model_not_available_error, local_command_succeeds,
-        parse_internal_schedule_run, parse_schedule_interval, render_activity_status_line,
+        ensure_watch_uses_local_scope, format_watch_status, invocation_has_no_subcommand,
+        is_model_not_available_error, local_command_succeeds, parse_internal_schedule_run,
+        parse_internal_watch_run, parse_schedule_interval, render_activity_status_line,
         render_error_output, render_message_output, render_structured_output,
         requested_output_format_from_args, schedule_add_request, schedule_remove_request,
         should_show_activity_indicator, should_show_first_run_inference_hint,
         should_show_no_subcommand_first_run_hint, stdout_stderr_are_tty, update_activity_label,
         with_collection_add_model_missing_guidance, with_update_model_missing_guidance,
         DefaultSpaceJsonResponse, IgnoreShowJsonResponse, RunError, INTERNAL_SCHEDULE_RUN_COMMAND,
+        INTERNAL_WATCH_RUN_COMMAND,
     };
     use kbolt_cli::args::{
         Cli, Command, OutputFormat, ScheduleAddArgs, ScheduleDayArg, ScheduleRemoveArgs,
@@ -1172,7 +1411,8 @@ mod tests {
     use kbolt_types::{
         FileError, KboltError, LocalAction, LocalReport, RemoveScheduleSelector, ScheduleInterval,
         ScheduleIntervalUnit, ScheduleScope, ScheduleTrigger, ScheduleWeekday, UpdateDecision,
-        UpdateDecisionKind, UpdateReport,
+        UpdateDecisionKind, UpdateReport, WatchBackend, WatchHealth, WatchMode, WatchRuntimeState,
+        WatchRuntimeStatus, WatchServiceStatus, WatchStatusResponse,
     };
     use std::path::PathBuf;
 
@@ -1226,6 +1466,112 @@ mod tests {
         ])
         .expect_err("empty id should fail");
         assert!(empty.to_string().contains("schedule id must not be empty"));
+    }
+
+    #[test]
+    fn parse_internal_watch_run_recognizes_hidden_runner_command() {
+        let parsed = parse_internal_watch_run(&[
+            OsString::from("kbolt"),
+            OsString::from(INTERNAL_WATCH_RUN_COMMAND),
+        ])
+        .expect("parse internal watch runner");
+
+        assert!(parsed);
+    }
+
+    #[test]
+    fn parse_internal_watch_run_ignores_normal_cli_invocations() {
+        let parsed = parse_internal_watch_run(&[OsString::from("kbolt"), OsString::from("watch")])
+            .expect("parse normal cli");
+
+        assert!(!parsed);
+    }
+
+    #[test]
+    fn parse_internal_watch_run_rejects_extra_args() {
+        let err = parse_internal_watch_run(&[
+            OsString::from("kbolt"),
+            OsString::from(INTERNAL_WATCH_RUN_COMMAND),
+            OsString::from("extra"),
+        ])
+        .expect_err("extra args should fail");
+
+        assert!(err.to_string().contains("internal watch runner usage"));
+    }
+
+    #[test]
+    fn ensure_watch_uses_local_scope_rejects_top_level_space() {
+        let err =
+            ensure_watch_uses_local_scope(Some("work")).expect_err("top-level space should fail");
+        assert!(
+            err.to_string()
+                .contains("watch commands keep all configured collections fresh"),
+            "unexpected error: {err}"
+        );
+
+        ensure_watch_uses_local_scope(None).expect("no top-level scope");
+    }
+
+    #[test]
+    fn format_watch_status_renders_disabled_state() {
+        let response = WatchStatusResponse {
+            service: WatchServiceStatus {
+                enabled: false,
+                running: false,
+                backend: WatchBackend::Launchd,
+                pid: None,
+                issue: None,
+            },
+            runtime: None,
+            log_file: PathBuf::from("/tmp/kbolt/watch.log"),
+            state_file: PathBuf::from("/tmp/kbolt/state.json"),
+        };
+
+        let rendered = format_watch_status(&response);
+
+        assert!(rendered.contains("watch: disabled"));
+        assert!(rendered.contains("logs: /tmp/kbolt/watch.log"));
+    }
+
+    #[test]
+    fn format_watch_status_renders_runtime_summary() {
+        let response = WatchStatusResponse {
+            service: WatchServiceStatus {
+                enabled: true,
+                running: true,
+                backend: WatchBackend::SystemdUser,
+                pid: Some(123),
+                issue: None,
+            },
+            runtime: Some(WatchRuntimeStatus {
+                mode: WatchMode::Native,
+                health: WatchHealth::Ok,
+                state: WatchRuntimeState::Idle,
+                pid: 123,
+                started_at: "2026-04-25T00:00:00Z".to_string(),
+                updated_at: "2026-04-25T00:00:01Z".to_string(),
+                watched_collections: 2,
+                dirty_collections: 1,
+                semantic_pending_collections: 1,
+                semantic_unavailable_collections: 0,
+                semantic_blocked_spaces: Vec::new(),
+                collections: Vec::new(),
+                last_keyword_refresh: None,
+                last_semantic_refresh: None,
+                last_safety_scan: None,
+                last_catalog_refresh: None,
+                last_error: None,
+            }),
+            log_file: PathBuf::from("/tmp/kbolt/watch.log"),
+            state_file: PathBuf::from("/tmp/kbolt/state.json"),
+        };
+
+        let rendered = format_watch_status(&response);
+
+        assert!(rendered.contains("watch: running (systemd-user)"));
+        assert!(rendered.contains("runtime: native / idle / ok"));
+        assert!(rendered.contains("collections: 2 watched, 1 dirty"));
+        assert!(rendered.contains("semantic: 1 pending, 0 unavailable, 0 blocked spaces"));
     }
 
     #[test]

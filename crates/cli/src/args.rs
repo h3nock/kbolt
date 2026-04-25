@@ -52,6 +52,8 @@ pub enum Command {
     Eval(EvalArgs),
     #[command(about = "Manage automatic re-indexing schedules")]
     Schedule(ScheduleArgs),
+    #[command(about = "Keep collections fresh as files change")]
+    Watch(WatchArgs),
     #[command(about = "Start the MCP server for AI agent integration")]
     Mcp,
     #[command(about = "Search indexed documents")]
@@ -130,6 +132,17 @@ pub struct EvalRunArgs {
 pub struct ScheduleArgs {
     #[command(subcommand)]
     pub command: ScheduleCommand,
+}
+
+#[derive(Debug, Args)]
+pub struct WatchArgs {
+    #[arg(
+        long,
+        help = "Run the watcher attached to this terminal for debugging or custom supervision"
+    )]
+    pub foreground: bool,
+    #[command(subcommand)]
+    pub command: Option<WatchCommand>,
 }
 
 #[derive(Debug, Args, PartialEq, Eq)]
@@ -462,6 +475,21 @@ pub enum ScheduleCommand {
     Remove(ScheduleRemoveArgs),
 }
 
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum WatchCommand {
+    #[command(about = "Enable and start the background watcher")]
+    Enable,
+    #[command(about = "Disable the background watcher")]
+    Disable,
+    #[command(about = "Show watcher service and runtime status")]
+    Status,
+    #[command(about = "Show recent watcher activity")]
+    Logs {
+        #[arg(long, default_value_t = 80, help = "Number of log lines to show")]
+        lines: usize,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ScheduleDayArg {
     Mon,
@@ -550,7 +578,7 @@ mod tests {
         Cli, CollectionCommand, Command, EvalCommand, EvalImportArgs, EvalImportBeirArgs,
         EvalImportCommand, EvalRunArgs, GetArgs, LocalCommand, LocalFeature, MultiGetArgs,
         OutputFormat, ScheduleAddArgs, ScheduleCommand, ScheduleDayArg, ScheduleRemoveArgs,
-        SearchArgs, SetupCommand, SpaceCommand, UpdateArgs,
+        SearchArgs, SetupCommand, SpaceCommand, UpdateArgs, WatchArgs, WatchCommand,
     };
 
     fn parse<const N: usize>(args: [&str; N]) -> Cli {
@@ -883,6 +911,45 @@ mod tests {
                         space: Some("work".to_string()),
                         collections: vec!["api".to_string()],
                     })
+        ));
+    }
+
+    #[test]
+    fn parses_watch_commands_and_foreground_flag() {
+        let parsed = parse(["kbolt", "watch"]);
+        assert!(matches!(
+            parsed.command,
+            Command::Watch(WatchArgs {
+                foreground: false,
+                command: None,
+            })
+        ));
+
+        let parsed = parse(["kbolt", "watch", "enable"]);
+        assert!(matches!(
+            parsed.command,
+            Command::Watch(WatchArgs {
+                foreground: false,
+                command: Some(WatchCommand::Enable),
+            })
+        ));
+
+        let parsed = parse(["kbolt", "watch", "--foreground"]);
+        assert!(matches!(
+            parsed.command,
+            Command::Watch(WatchArgs {
+                foreground: true,
+                command: None,
+            })
+        ));
+
+        let parsed = parse(["kbolt", "watch", "logs", "--lines", "20"]);
+        assert!(matches!(
+            parsed.command,
+            Command::Watch(WatchArgs {
+                foreground: false,
+                command: Some(WatchCommand::Logs { lines: 20 }),
+            })
         ));
     }
 
