@@ -8,6 +8,7 @@ pub mod schedule;
 pub mod search;
 pub mod space;
 pub mod status;
+pub mod watch;
 
 pub use doctor::{DoctorCheck, DoctorCheckStatus, DoctorReport, DoctorSetupStatus};
 pub use document::{
@@ -37,4 +38,9 @@ pub use space::{
 };
 pub use status::{
     CollectionStatus, DiskUsage, ModelInfo, ModelStatus, SpaceStatus, StatusResponse,
+};
+pub use watch::{
+    WatchBackend, WatchCollectionStatus, WatchHealth, WatchMode, WatchRefreshSummary,
+    WatchRuntimeState, WatchRuntimeStatus, WatchSemanticState, WatchServiceStatus, WatchSpaceBlock,
+    WatchStatusResponse,
 };

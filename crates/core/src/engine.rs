@@ -26,7 +26,7 @@ use kbolt_types::{
 };
 mod eval_ops;
 mod file_utils;
-mod ignore_helpers;
+pub(crate) mod ignore_helpers;
 mod ignore_ops;
 mod path_utils;
 mod schedule_ops;

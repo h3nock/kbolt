@@ -6,7 +6,7 @@ use kbolt_types::KboltError;
 
 use crate::Result;
 
-pub(super) fn is_hard_ignored_dir_name(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_hard_ignored_dir_name(name: &std::ffi::OsStr) -> bool {
     const HARD_IGNORED_DIRS: &[&str] = &[
         ".git",
         "node_modules",
@@ -30,7 +30,7 @@ pub(super) fn is_hard_ignored_dir_name(name: &std::ffi::OsStr) -> bool {
     })
 }
 
-pub(super) fn is_hard_ignored_file(path: &Path) -> bool {
+pub(crate) fn is_hard_ignored_file(path: &Path) -> bool {
     if path.file_name().and_then(|name| name.to_str()) == Some(".DS_Store") {
         return true;
     }
@@ -90,7 +90,7 @@ pub(super) fn build_collection_walk(collection_root: &Path) -> Walk {
     builder.build()
 }
 
-pub(super) fn collection_ignore_file_path(
+pub(crate) fn collection_ignore_file_path(
     config_dir: &Path,
     space: &str,
     collection: &str,

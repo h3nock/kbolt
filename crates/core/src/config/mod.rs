@@ -497,13 +497,13 @@ fn resolve_config_dir(config_path: Option<&Path>) -> Result<PathBuf> {
     }
 }
 
-fn default_config_dir() -> Result<PathBuf> {
+pub fn default_config_dir() -> Result<PathBuf> {
     let base = dirs::config_dir()
         .ok_or_else(|| KboltError::Config("unable to determine user config directory".into()))?;
     Ok(base.join(APP_NAME))
 }
 
-fn default_cache_dir() -> Result<PathBuf> {
+pub fn default_cache_dir() -> Result<PathBuf> {
     let base = dirs::cache_dir()
         .ok_or_else(|| KboltError::Config("unable to determine user cache directory".into()))?;
     Ok(base.join(APP_NAME))

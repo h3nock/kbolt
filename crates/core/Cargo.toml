@@ -9,11 +9,13 @@ readme = "README.md"
 
 [dependencies]
 dirs.workspace = true
+ctrlc = { workspace = true, features = ["termination"] }
 fs2.workspace = true
 hf-hub.workspace = true
 httpdate.workspace = true
 ignore.workspace = true
 kbolt-types = { path = "../types", version = "0.1.2" }
+notify-debouncer-full.workspace = true
 pulldown-cmark.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
