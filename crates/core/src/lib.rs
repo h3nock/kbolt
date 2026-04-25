@@ -15,6 +15,7 @@ mod schedule_state_store;
 mod schedule_store;
 mod schedule_support;
 pub mod storage;
+pub mod watch;
 
 pub use error::{CoreError, Result};
 pub type RecoveryNoticeSink = Arc<dyn Fn(&str) + Send + Sync>;
