@@ -66,6 +66,55 @@ fn storage_instances_can_share_cache_before_any_tantivy_write() {
 }
 
 #[test]
+fn commit_tantivy_releases_writer_for_other_processes() {
+    let tmp = tempdir().expect("create tempdir");
+    let cache_dir = tmp.path().join("cache");
+    let storage_a = Storage::new(&cache_dir).expect("create first storage");
+    storage_a.create_space("work", None).expect("create work");
+
+    storage_a
+        .index_tantivy(
+            "work",
+            &[super::TantivyEntry {
+                chunk_id: 11,
+                doc_id: 1,
+                filepath: "docs/a.md".to_string(),
+                semantic_title: Some("alpha".to_string()),
+                heading: None,
+                body: "alpha from first storage".to_string(),
+            }],
+        )
+        .expect("index from first storage");
+    storage_a
+        .commit_tantivy("work")
+        .expect("commit first writer");
+
+    let storage_b = Storage::new(&cache_dir).expect("create second storage");
+    storage_b
+        .index_tantivy(
+            "work",
+            &[super::TantivyEntry {
+                chunk_id: 22,
+                doc_id: 2,
+                filepath: "docs/b.md".to_string(),
+                semantic_title: Some("beta".to_string()),
+                heading: None,
+                body: "beta from second storage".to_string(),
+            }],
+        )
+        .expect("second storage should acquire tantivy writer");
+    storage_b
+        .commit_tantivy("work")
+        .expect("commit second writer");
+
+    let hits = storage_a
+        .query_bm25("work", "beta", &[("body", 1.0)], 10)
+        .expect("query second entry from first storage");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].chunk_id, 22);
+}
+
+#[test]
 fn tantivy_index_and_query_returns_ranked_hits() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");

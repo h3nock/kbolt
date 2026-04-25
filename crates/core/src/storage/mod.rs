@@ -1622,7 +1622,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .tantivy_writer
             .lock()
             .map_err(|_| CoreError::poisoned("tantivy writer"))?;
-        let Some(writer) = writer.as_mut() else {
+        let Some(mut writer) = writer.take() else {
             return Ok(());
         };
         writer.commit()?;
