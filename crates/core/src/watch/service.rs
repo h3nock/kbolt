@@ -171,7 +171,11 @@ fn status_from_paths(
     runner: &dyn WatchCommandRunner,
 ) -> Result<WatchStatusResponse> {
     let service = service_status(paths, runner)?;
-    let runtime = WatchStateStore::load(&paths.cache_dir)?;
+    let runtime = if service.running {
+        WatchStateStore::load(&paths.cache_dir)?
+    } else {
+        None
+    };
     Ok(WatchStatusResponse {
         service,
         runtime,
@@ -581,7 +585,48 @@ pub(crate) fn pid_is_alive(_pid: u32) -> bool {
 mod tests {
     use std::path::Path;
 
-    use super::{render_launchd_plist, render_systemd_service};
+    use kbolt_types::{WatchHealth, WatchMode, WatchRuntimeState, WatchRuntimeStatus};
+    use tempfile::tempdir;
+
+    use super::{
+        render_launchd_plist, render_systemd_service, status_from_paths, CommandOutput,
+        WatchCommandRunner, WatchPaths,
+    };
+    use crate::watch::state::WatchStateStore;
+
+    struct InactiveRunner;
+
+    impl WatchCommandRunner for InactiveRunner {
+        fn run(&self, _program: &str, _args: &[&str]) -> crate::Result<CommandOutput> {
+            Ok(CommandOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    fn sample_runtime_state() -> WatchRuntimeStatus {
+        WatchRuntimeStatus {
+            mode: WatchMode::Native,
+            health: WatchHealth::Ok,
+            state: WatchRuntimeState::Idle,
+            pid: 42,
+            started_at: "2026-04-25T00:00:00Z".to_string(),
+            updated_at: "2026-04-25T00:00:01Z".to_string(),
+            watched_collections: 1,
+            dirty_collections: 0,
+            semantic_pending_collections: 0,
+            semantic_unavailable_collections: 0,
+            semantic_blocked_spaces: Vec::new(),
+            collections: Vec::new(),
+            last_keyword_refresh: None,
+            last_semantic_refresh: None,
+            last_safety_scan: None,
+            last_catalog_refresh: None,
+            last_error: None,
+        }
+    }
 
     #[test]
     fn launchd_plist_runs_hidden_watch_runner() {
@@ -603,5 +648,32 @@ mod tests {
         assert!(unit.contains("ExecStart=/usr/local/bin/kbolt __watch-run"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn status_suppresses_runtime_state_when_watcher_is_not_running() {
+        let tmp = tempdir().expect("tempdir");
+        let cache_dir = tmp.path().join("cache");
+        let paths = WatchPaths {
+            cache_dir: cache_dir.clone(),
+            pid_file: cache_dir.join("run").join("watch.pid"),
+            log_file: cache_dir.join("logs").join("watch.log"),
+            state_file: WatchStateStore::file_path(&cache_dir),
+            service_file: None,
+        };
+        WatchStateStore::save(&cache_dir, &sample_runtime_state()).expect("save stale state");
+
+        let status = status_from_paths(&paths, &InactiveRunner).expect("load status");
+
+        assert!(
+            status.runtime.is_none(),
+            "stale runtime state should not be reported when no watcher is running"
+        );
+        assert!(
+            WatchStateStore::load(&cache_dir)
+                .expect("load state")
+                .is_some(),
+            "status reads should not delete the stale state file"
+        );
     }
 }

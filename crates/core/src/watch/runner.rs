@@ -67,14 +67,33 @@ fn run(foreground: bool) -> Result<()> {
     let shutdown = install_signal_handler()?;
     let mut runner = WatchRunner::new(engine, paths, logger, foreground, shutdown)?;
     let result = runner.run_loop();
-    let cleanup_result = remove_pid_file(&runner.paths.pid_file);
+    let cleanup_result = cleanup_runtime_files(&runner.paths);
 
     match (result, cleanup_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(err), Ok(())) => Err(err),
         (Ok(()), Err(err)) => Err(err),
         (Err(err), Err(cleanup_err)) => Err(KboltError::Internal(format!(
-            "watcher failed: {err}; pid cleanup also failed: {cleanup_err}"
+            "watcher failed: {err}; runtime cleanup also failed: {cleanup_err}"
+        ))
+        .into()),
+    }
+}
+
+fn cleanup_runtime_files(paths: &WatchPaths) -> Result<()> {
+    let pid_result = remove_pid_file(&paths.pid_file);
+    let state_result = WatchStateStore::remove(&paths.cache_dir);
+
+    match (pid_result, state_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(err), Ok(())) => {
+            Err(KboltError::Internal(format!("pid cleanup failed: {err}")).into())
+        }
+        (Ok(()), Err(err)) => {
+            Err(KboltError::Internal(format!("state cleanup failed: {err}")).into())
+        }
+        (Err(pid_err), Err(state_err)) => Err(KboltError::Internal(format!(
+            "pid cleanup failed: {pid_err}; state cleanup failed: {state_err}"
         ))
         .into()),
     }
