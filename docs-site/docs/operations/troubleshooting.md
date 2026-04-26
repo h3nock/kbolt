@@ -4,6 +4,7 @@ Start with the command that best matches the failure:
 
 - `kbolt doctor` for setup and readiness problems
 - `kbolt local status` for managed local-service problems
+- `kbolt watch status` for automatic freshness problems
 - `kbolt status` for index and storage state
 
 ## `doctor` says `kbolt is not set up`
@@ -121,11 +122,51 @@ kbolt search "query" --keyword
 kbolt search "query" --semantic
 ```
 
-If files changed after the first indexing pass, rerun:
+If files changed after the first indexing pass, make sure the watcher is running:
+
+```bash
+kbolt watch status
+```
+
+If you need a refresh immediately, run:
 
 ```bash
 kbolt update
 ```
+
+## Changed files do not appear in search
+
+Check whether automatic watching is enabled and running:
+
+```bash
+kbolt watch status
+```
+
+On macOS and Linux, if the watcher is disabled, start it:
+
+```bash
+kbolt watch enable
+```
+
+If the watcher reports an error, inspect recent logs:
+
+```bash
+kbolt watch logs --lines 200
+```
+
+If you need fresh keyword and metadata results immediately, run:
+
+```bash
+kbolt update --no-embed
+```
+
+If semantic search is stale while a file is actively changing, wait for the collection to become quiet or run a full update:
+
+```bash
+kbolt update
+```
+
+If `watch status` says semantic indexing is blocked for a space, run the exact `kbolt --space <space> update` command shown in the status output.
 
 ## Indexing is slower than expected
 
@@ -143,7 +184,7 @@ Use:
 kbolt ignore show my_docs
 ```
 
-Then tighten the exclusion set and rerun `update`.
+Then tighten the exclusion set. If the watcher is running, it will refresh the affected collection automatically; run `kbolt update` when you want the change applied immediately.
 
 ## Update output says more errors were omitted
 
@@ -165,4 +206,5 @@ If the failed collection was scoped, keep the same `--space` and `--collection` 
 
 - Re-run [Quickstart](../quickstart.md) against a small test directory first.
 - Compare the current paths with [Data locations](data-locations.md).
+- Check automatic freshness in [Keep indexes fresh](../guides/keep-indexes-fresh.md).
 - Use [Search modes](../concepts/search-modes.md) if the problem is retrieval quality rather than availability.

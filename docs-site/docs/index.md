@@ -10,6 +10,7 @@ The default path is local: `kbolt setup local` downloads the local embedder and 
 
 - If you have not installed `kbolt` yet, start with [Install](install.md).
 - If you want a first successful search end to end, go to [Quickstart](quickstart.md).
+- If you want changed files to stay searchable automatically on macOS or Linux, go to [Keep indexes fresh](guides/keep-indexes-fresh.md).
 - If you want to use the index from Claude Desktop, go to [Use with Claude Desktop](guides/use-with-claude-desktop.md).
 - If something is already broken, start with [Troubleshooting](operations/troubleshooting.md).
 
@@ -25,6 +26,7 @@ brew install h3nock/kbolt/kbolt
 - groups content into spaces and collections
 - supports keyword, semantic, hybrid reranked, and deep retrieval modes
 - exposes the index over MCP for agent workflows
+- keeps collections fresh automatically with a background watcher on macOS and Linux
 - keeps local setup and health visible through `doctor`, `status`, and `models list`
 
 ## Common paths
@@ -46,6 +48,12 @@ brew install h3nock/kbolt/kbolt
 1. [Use with Claude Desktop](guides/use-with-claude-desktop.md)
 2. [MCP tools](reference/mcp-tools.md)
 3. [Read and integration](reference/cli/read-and-integration.md)
+
+### Keep indexes current
+
+1. [Keep indexes fresh](guides/keep-indexes-fresh.md)
+2. [Watch reference](reference/cli/watch.md)
+3. [Troubleshooting](operations/troubleshooting.md)
 
 ### Manage multiple indexes
 

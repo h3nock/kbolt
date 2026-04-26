@@ -2,6 +2,8 @@
 
 `kbolt` is a local-first retrieval engine for indexing local notes and docs and searching them with keyword, semantic, reranked, and deep retrieval modes.
 
+Full documentation: <https://h3nock.github.io/kbolt/>
+
 ## Install
 
 macOS and Linux x86_64 with Homebrew:
@@ -33,7 +35,7 @@ Add a folder of notes or docs:
 ```bash
 kbolt collection add /path/to/docs --name my_docs
 ```
-Keep it fresh automatically:
+On macOS and Linux, keep it fresh automatically:
 ```bash
 kbolt watch enable
 ```
@@ -66,7 +68,7 @@ kbolt local enable deep
 - Read underlying source files with `kbolt get`, `kbolt multi-get`, and `kbolt ls`
 - Check indexed content and disk usage with `kbolt status`
 - Re-scan and re-index changed files with `kbolt update`
-- Keep collections fresh automatically with `kbolt watch enable`
+- Keep collections fresh automatically on macOS and Linux with `kbolt watch enable`
 - Exclude files with gitignore-style patterns via `kbolt ignore`
 - Check readiness with `kbolt doctor` and `kbolt models list`
 - Run local models via `llama-server` or bind remote OpenAI-compatible endpoints through provider profiles

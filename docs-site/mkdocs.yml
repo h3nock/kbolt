@@ -70,6 +70,7 @@ nav:
   - Install: install.md
   - Quickstart: quickstart.md
   - Guides:
+      - Keep Indexes Fresh: guides/keep-indexes-fresh.md
       - Use with Claude Desktop: guides/use-with-claude-desktop.md
       - Exclude Files: guides/exclude-files.md
   - Concepts:
@@ -80,6 +81,7 @@ nav:
       - CLI:
           - Overview: reference/cli-overview.md
           - Search: reference/cli/search.md
+          - Watch: reference/cli/watch.md
           - Schedule: reference/cli/schedule.md
           - Eval: reference/cli/eval.md
           - Content Management: reference/cli/content-management.md

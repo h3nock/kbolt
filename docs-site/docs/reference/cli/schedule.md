@@ -10,7 +10,9 @@ kbolt schedule remove [ID | --all | --space <SPACE> [--collection <COLLECTIONS>]
 
 ## What schedule does
 
-`schedule` runs the same indexing work as `kbolt update`, but on an automatic trigger.
+`schedule` runs the same indexing work as `kbolt update`, but on a periodic trigger.
+
+For directories you edit regularly, prefer `kbolt watch enable`. Use schedules when you want predictable batch refreshes, for example on archive collections or machines where a long-running watcher is not the right fit.
 
 The scope determines what gets updated:
 
@@ -140,5 +142,6 @@ If the current platform does not support scheduling, schedule commands fail.
 ## Related pages
 
 - [CLI overview](../cli-overview.md)
+- [Keep indexes fresh](../../guides/keep-indexes-fresh.md)
 - [Content management](content-management.md)
 - [Data locations](../../operations/data-locations.md)

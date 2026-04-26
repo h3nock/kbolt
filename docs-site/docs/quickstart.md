@@ -44,15 +44,17 @@ kbolt collection add /path/to/docs --name my_docs
 
 This registers the directory as a collection and runs the initial indexing pass unless you add `--no-index`.
 
-## 4. Search the indexed content
+## 4. Keep it fresh
 
-If you want kbolt to keep the collection fresh as files change, enable the watcher:
+On macOS and Linux, enable the watcher so future file changes are picked up automatically:
 
 ```bash
 kbolt watch enable
 ```
 
-The watcher runs in the background on macOS and Linux. It uses the same indexing path as `kbolt update`, so manual updates remain available when you want an immediate full refresh.
+It keeps all configured collections fresh in the background. Manual `kbolt update` remains available when you want an immediate refresh or when managed watching is not supported on your platform.
+
+## 5. Search the indexed content
 
 Run:
 
@@ -66,7 +68,7 @@ If you want the same default retrieval path with stronger ranking quality, rerun
 kbolt search "rust error handling" --rerank
 ```
 
-## 5. Read the underlying files
+## 6. Read the underlying files
 
 Search gets you the matching documents and snippets. Use the read commands to inspect the source files directly:
 
@@ -82,19 +84,20 @@ At this point you should have:
 - a working `index.toml`
 - healthy local services
 - at least one indexed collection
-- automatic watching if you enabled `kbolt watch`
+- automatic watching from `kbolt watch enable` on macOS or Linux
 - successful search results from your own content
 
 ## If something fails
 
 - If `doctor` says `kbolt is not set up`, run `kbolt setup local` first.
 - If local services are not reachable, see [Local setup](concepts/local-setup.md) and [Troubleshooting](operations/troubleshooting.md).
+- If changed files do not appear in search, check `kbolt watch status` or run `kbolt update` for an immediate refresh.
 - If indexing succeeds but search returns nothing useful, see [Search modes](concepts/search-modes.md).
 - If `update` or initial indexing says more errors were omitted, rerun the suggested command with `--verbose`.
 
 ## Next steps
 
 - Learn the retrieval options in [Search modes](concepts/search-modes.md).
-- Keep indexes fresh automatically with [Watch](reference/cli/watch.md).
+- Learn the freshness options in [Keep indexes fresh](guides/keep-indexes-fresh.md).
 - If you want to use the index from Claude Desktop, go to [Use with Claude Desktop](guides/use-with-claude-desktop.md).
 - If you want to manage multiple indexes, read [Spaces and collections](concepts/spaces-and-collections.md).

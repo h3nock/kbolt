@@ -8,6 +8,7 @@ Before you wire Claude Desktop to `kbolt`:
 
 - `kbolt` must be installed and runnable from your shell
 - at least one collection should already be indexed
+- on macOS and Linux, `kbolt watch enable` should be running if you want changed files to stay searchable automatically
 - Claude Desktop must support MCP stdio servers
 
 If you have not indexed anything yet, start with [Quickstart](../quickstart.md).
@@ -52,13 +53,21 @@ You can verify this by asking Claude to search your indexed content or by checki
 
 Claude can only search what `kbolt` has already indexed.
 
-When the underlying files change, run:
+For normal use on macOS and Linux, enable the watcher once from a terminal:
+
+```bash
+kbolt watch enable
+```
+
+`kbolt mcp` does not start the watcher itself. The MCP server and the watcher are separate processes that share the same local index.
+
+When you need an immediate refresh, run:
 
 ```bash
 kbolt update
 ```
 
-If you use multiple spaces, update the intended one explicitly:
+If you use multiple spaces and want to force one space immediately, scope the manual update:
 
 ```bash
 kbolt --space work update
@@ -86,10 +95,12 @@ Use:
 
 ```bash
 kbolt status
+kbolt watch status
 kbolt doctor
 ```
 
 ## Next steps
 
 - For the exact tool surface, see [MCP tools](../reference/mcp-tools.md).
+- For freshness behavior, see [Keep indexes fresh](keep-indexes-fresh.md).
 - For the CLI command behind this integration, see [Read and integration](../reference/cli/read-and-integration.md).

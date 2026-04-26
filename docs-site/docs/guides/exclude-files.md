@@ -67,9 +67,11 @@ To list all collections that currently have custom ignore rules:
 kbolt ignore list
 ```
 
-## Re-index after changing ignore rules
+## Refresh after changing ignore rules
 
-Ignore rules only affect future indexing work. After adding or removing patterns, run:
+Ignore rules only affect future indexing work. If the watcher is running, it refreshes the affected collection automatically after the ignore file changes.
+
+If you want the new exclusion set applied immediately, run:
 
 ```bash
 kbolt update --collection my_docs
@@ -88,4 +90,5 @@ Use custom rules for:
 ## Next steps
 
 - For the grouped command reference, see [Content management](../reference/cli/content-management.md).
+- For automatic freshness, see [Keep indexes fresh](keep-indexes-fresh.md).
 - For indexing behavior and default local setup, see [Quickstart](../quickstart.md).

@@ -9,8 +9,8 @@ Use these commands for the normal local path:
 - `kbolt setup local`
 - `kbolt doctor`
 - `kbolt collection add`
+- `kbolt watch enable`
 - `kbolt search`
-- `kbolt update`
 
 ## Command map
 
@@ -30,16 +30,22 @@ Reference:
 
 - `space` for namespaces
 - `collection` for registered directories
-- `update` for re-indexing
 - `ignore` for gitignore-style exclusions
 - `watch` for automatic freshness as files change
-- `schedule` for automatic re-indexing
+- `update` for immediate manual re-indexing
+- `schedule` for periodic batch re-indexing
 
 Reference:
 
 - [Content management](cli/content-management.md)
 - [Watch](cli/watch.md)
 - [Schedule](cli/schedule.md)
+
+Freshness rule of thumb:
+
+- use `watch` for directories you edit
+- use `update` when you need a refresh now
+- use `schedule` when periodic batch work fits better than a live watcher
 
 ### Local setup and health
 
@@ -84,4 +90,5 @@ Use `cli` for humans and `json` when another tool needs structured output.
 ## Next steps
 
 - For the end-to-end path, see [Quickstart](../quickstart.md).
+- For freshness choices, see [Keep indexes fresh](../guides/keep-indexes-fresh.md).
 - For concepts that shape the CLI, see [Search modes](../concepts/search-modes.md) and [Spaces and collections](../concepts/spaces-and-collections.md).

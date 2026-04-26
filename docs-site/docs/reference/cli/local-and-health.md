@@ -58,6 +58,12 @@ If you use multiple spaces, scope it explicitly:
 kbolt --space work status
 ```
 
+For automatic freshness state, use:
+
+```bash
+kbolt watch status
+```
+
 ## `models list`
 
 Use `models list` to inspect the configured role bindings and whether each one is ready:
@@ -70,4 +76,5 @@ kbolt models list
 
 - [Local setup](../../concepts/local-setup.md)
 - [Quickstart](../../quickstart.md)
+- [Keep indexes fresh](../../guides/keep-indexes-fresh.md)
 - [Troubleshooting](../../operations/troubleshooting.md)

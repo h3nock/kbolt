@@ -64,7 +64,9 @@ Use `--no-index` when you want to register first and run the initial indexing pa
 
 ## `update`
 
-Use `update` to re-scan and re-index collections after files change.
+Use `update` to re-scan and re-index collections immediately.
+
+If the watcher is enabled, normal file changes are picked up automatically. `update` is still useful after bulk changes or when you want fresh results right now.
 
 Examples:
 
@@ -92,7 +94,9 @@ kbolt watch status
 kbolt watch logs
 ```
 
-The watcher covers all configured collections and reuses the same indexing behavior as `kbolt update`.
+The watcher covers all configured collections. Use it for directories you edit regularly.
+
+Use `schedule` instead when you prefer periodic batch refreshes over a live watcher.
 
 ## `ignore`
 
@@ -114,11 +118,12 @@ kbolt ignore show my_docs
 kbolt ignore edit my_docs
 ```
 
-After changing ignore rules, run `update` so the index reflects the new exclusion set.
+After changing ignore rules, the watcher picks up the change automatically if it is running. Run `update` when you want the index refreshed immediately.
 
 ## Related pages
 
 - [Spaces and collections](../../concepts/spaces-and-collections.md)
+- [Keep indexes fresh](../../guides/keep-indexes-fresh.md)
 - [Exclude files](../../guides/exclude-files.md)
 - [Watch](watch.md)
 - [Data locations](../../operations/data-locations.md)

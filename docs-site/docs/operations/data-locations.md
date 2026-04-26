@@ -39,7 +39,7 @@ kbolt doctor
 - `spaces/`: per-space search indexes
 - `models/`: downloaded local model files
 - `run/`: pid files for managed local services and the watcher
-- `watch/state.json`: watcher runtime state for `kbolt watch status`
+- `watch/state.json`: watcher runtime state while `kbolt watch` is running
 - `logs/`: managed local-service logs and `watch.log`
 
 ## What to check when debugging
@@ -56,8 +56,10 @@ Use the cache root when you need to inspect:
 - whether the index exists yet
 - local model downloads
 - managed-service pid files and logs
+- watcher state and logs
 
 ## Related pages
 
 - [Troubleshooting](troubleshooting.md)
+- [Keep indexes fresh](../guides/keep-indexes-fresh.md)
 - [index.toml](../reference/config/index-toml.md)
