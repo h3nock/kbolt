@@ -96,7 +96,7 @@ To stop tracking one directory entirely, remove its collection:
 kbolt collection remove my_docs
 ```
 
-## Related pages
+## Next steps
 
 - [Watch reference](../reference/cli/watch.md)
 - [Content management](../reference/cli/content-management.md)

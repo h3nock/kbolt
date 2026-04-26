@@ -1,6 +1,6 @@
 # Platform support
 
-`kbolt` is developed and released primarily for macOS and Linux. Some commands also work on Windows through Cargo builds, but managed background services are not available there yet.
+`kbolt` is developed primarily on macOS and tested in CI on macOS and Linux. Windows support is best-effort through Cargo builds, and managed background services are not available there yet.
 
 ## At a glance
 
@@ -8,10 +8,10 @@
 | --- | --- | --- | --- |
 | Homebrew install | yes | yes, x86_64 | no |
 | GitHub release binary | x86_64, aarch64 | x86_64 | no |
-| Cargo install | yes | yes | yes |
-| `kbolt setup local` | yes, with `llama-server` | yes, with `llama-server` | not covered by the public quickstart |
+| Cargo install | yes | yes, including aarch64 when native dependencies build | yes, best effort |
+| `kbolt setup local` | yes, with `llama-server` | yes, with `llama-server` | best effort; requires `llama-server` |
 | `kbolt watch enable` | yes, via user `launchd` | yes, via user `systemd` | no managed service |
-| `kbolt watch --foreground` | yes | yes | not covered as a public workflow |
+| `kbolt watch --foreground` | yes | yes | manual process |
 | `kbolt schedule` | yes, via user `launchd` | yes, via user `systemd` | no managed scheduler |
 
 ## macOS
@@ -37,6 +37,14 @@ brew install h3nock/kbolt/kbolt
 The release workflow also builds a Linux x86_64 archive.
 
 Managed watcher and schedule commands install user-level `systemd` units. They do not require `sudo`.
+
+For Linux aarch64, use Cargo:
+
+```bash
+cargo install kbolt
+```
+
+There is no prebuilt Linux aarch64 release archive yet.
 
 ## Windows
 

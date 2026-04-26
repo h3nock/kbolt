@@ -4,7 +4,7 @@
 
 Most users start with the local setup path. `kbolt setup local` downloads the default local models, starts managed `llama-server` processes, and writes provider bindings into your config.
 
-Remote OpenAI-compatible providers are supported by the config model. A step-by-step remote-provider guide will be added after that workflow is manually validated end to end.
+Remote OpenAI-compatible providers are supported through `index.toml`. The quickstart documents the local model stack.
 
 ## Start here
 
@@ -18,6 +18,8 @@ Remote OpenAI-compatible providers are supported by the config model. A step-by-
 | Read the files behind search results | [Read source files](guides/read-source-files.md) |
 | Use kbolt from Claude Desktop | [Use with Claude Desktop](guides/use-with-claude-desktop.md) |
 | Fix setup or freshness problems | [Health and status](operations/health-and-status.md) |
+| Check platform support | [Platform support](concepts/platform-support.md) |
+| Look up command details | [CLI overview](reference/cli-overview.md) |
 
 ## Common paths
 
@@ -54,11 +56,4 @@ Remote OpenAI-compatible providers are supported by the config model. A step-by-
 - keeps collections fresh automatically on macOS and Linux
 - runs the default local model stack through managed `llama-server` processes
 
-## Documentation map
-
-- **Guides** solve user jobs.
-- **Concepts** explain the mental model.
-- **Reference** gives exact command and config details.
-- **Operations** helps with health checks, troubleshooting, and local files.
-
-Internal architecture records and maintainer release steps live in the repository under `docs/`, not on the public site.
+Guides solve user jobs. Reference pages give exact command and config details.
