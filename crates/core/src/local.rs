@@ -32,7 +32,7 @@ const MANAGED_EXPAND_PROVIDER: &str = "kbolt_local_expand";
 
 const EMBEDDER_MODEL_LABEL: &str = "embeddinggemma";
 const RERANKER_MODEL_LABEL: &str = "qwen3-reranker";
-const EXPANDER_MODEL_LABEL: &str = "qmd-query-expansion-1.7b";
+const EXPANDER_MODEL_LABEL: &str = "qwen3-1.7b";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManagedRole {
@@ -77,8 +77,8 @@ const EXPANDER_SPEC: ManagedServiceSpec = ManagedServiceSpec {
     name: "expander",
     provider_name: MANAGED_EXPAND_PROVIDER,
     model_label: EXPANDER_MODEL_LABEL,
-    model_repo: "tobil/qmd-query-expansion-1.7B-gguf",
-    model_file: "qmd-query-expansion-1.7B-q4_k_m.gguf",
+    model_repo: "Qwen/Qwen3-1.7B-GGUF",
+    model_file: "Qwen3-1.7B-Q8_0.gguf",
     preferred_port: 8103,
 };
 
@@ -1280,6 +1280,14 @@ operation = "embedding"
                 .join("models")
                 .join("reranker")
                 .join("qwen3-reranker-0.6b-q8_0.gguf")
+        );
+        assert_eq!(
+            managed_model_path(cache.path(), &EXPANDER_SPEC),
+            cache
+                .path()
+                .join("models")
+                .join("expander")
+                .join("Qwen3-1.7B-Q8_0.gguf")
         );
     }
 

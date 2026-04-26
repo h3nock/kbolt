@@ -2025,7 +2025,7 @@ Injected into LLM system prompt on connection:
 |---|---|---|---|---|
 | Embedding | embeddinggemma 300M | GGUF Q8 | ~314MB | `llama.cpp server` |
 | Reranker | Qwen3-Reranker 0.6B | GGUF Q8 | ~640MB | `llama.cpp server` |
-| Expander | query expansion 1.7B | GGUF Q4_K_M | ~1.1GB | `llama.cpp server` |
+| Expander | Qwen3 1.7B | GGUF Q8 | ~1.83GB | `llama.cpp server` |
 
 In the provider-profile architecture, local inference still crosses an HTTP boundary through `providers.*` + `roles.*`. The default convenience path is now `kbolt setup local`, which downloads the default local models into the kbolt cache, starts managed `llama-server` processes, and writes provider-role bindings into `index.toml`. Advanced users can still point profiles at their own externally managed `llama.cpp server` deployments.
 
