@@ -23,7 +23,7 @@ kbolt watch enable
 
 On macOS this installs a user `launchd` agent. On Linux this installs a user `systemd` service. No `sudo` is required.
 
-Managed background watching is currently available on macOS and Linux. On other platforms, use `kbolt update` manually or run `kbolt watch --foreground` under your own supervisor.
+Managed background watching is available on macOS and Linux. On other platforms, use `kbolt update` for refreshes, or run `kbolt watch --foreground` in a terminal.
 
 ## Freshness behavior
 

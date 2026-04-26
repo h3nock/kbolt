@@ -18,7 +18,7 @@ The watcher runs in the background on macOS and Linux. It watches every configur
 | Refresh immediately after a large change | `kbolt update` |
 | Refresh a specific collection now | `kbolt update --collection my_docs` |
 | Run periodic batch refreshes instead of a watcher | `kbolt schedule add --every 1h` |
-| Run under your own supervisor | `kbolt watch --foreground` |
+| Run attached to a terminal | `kbolt watch --foreground` |
 
 `watch` is the recommended default for directories you edit regularly. `update` is still useful when you want an immediate refresh instead of waiting for the watcher quiet window. `schedule` is better for archive-style collections or machines where you prefer predictable batch work.
 

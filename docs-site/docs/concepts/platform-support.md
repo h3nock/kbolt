@@ -1,6 +1,6 @@
 # Platform support
 
-`kbolt` is developed primarily on macOS and tested in CI on macOS and Linux. Windows support is best-effort through Cargo builds, and managed background services are not available there yet.
+`kbolt` supports macOS and Linux for the full local workflow. Windows can run the CLI through Cargo, but managed background services are not available on Windows.
 
 ## At a glance
 
@@ -8,10 +8,10 @@
 | --- | --- | --- | --- |
 | Homebrew install | yes | yes, x86_64 | no |
 | GitHub release binary | x86_64, aarch64 | x86_64 | no |
-| Cargo install | yes | yes, including aarch64 when native dependencies build | yes, best effort |
-| `kbolt setup local` | yes, with `llama-server` | yes, with `llama-server` | best effort; requires `llama-server` |
+| Cargo install | yes | yes, including aarch64 when native dependencies build | yes |
+| `kbolt setup local` | yes, with `llama-server` | yes, with `llama-server` | requires `llama-server` |
 | `kbolt watch enable` | yes, via user `launchd` | yes, via user `systemd` | no managed service |
-| `kbolt watch --foreground` | yes | yes | manual process |
+| `kbolt watch --foreground` | yes | yes | terminal process |
 | `kbolt schedule` | yes, via user `launchd` | yes, via user `systemd` | no managed scheduler |
 
 ## macOS
@@ -44,7 +44,7 @@ For Linux aarch64, use Cargo:
 cargo install kbolt
 ```
 
-There is no prebuilt Linux aarch64 release archive yet.
+Prebuilt release archives are available for Linux x86_64. Linux aarch64 users should install with Cargo.
 
 ## Windows
 
@@ -54,7 +54,7 @@ Windows users should install with Cargo:
 cargo install kbolt
 ```
 
-Managed watcher and schedule commands are not supported on Windows. Use manual `kbolt update` or run `kbolt watch --foreground` under your own supervision.
+Managed watcher and schedule commands are not supported on Windows. Use `kbolt update` for refreshes, or run `kbolt watch --foreground` in a terminal.
 
 ## Next steps
 

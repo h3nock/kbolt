@@ -52,7 +52,7 @@ On macOS and Linux, enable the watcher so future file changes are picked up auto
 kbolt watch enable
 ```
 
-It keeps all configured collections fresh in the background. Manual `kbolt update` remains available when you want an immediate refresh or when managed watching is not supported on your platform.
+It keeps all configured collections fresh in the background. Use `kbolt update` when you want an immediate refresh or when managed watching is not supported on your platform.
 
 ## 5. Search the indexed content
 
