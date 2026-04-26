@@ -205,6 +205,7 @@ If the failed collection was scoped, keep the same `--space` and `--collection` 
 ## Still stuck?
 
 - Re-run [Quickstart](../quickstart.md) against a small test directory first.
+- Use [Health and status](health-and-status.md) to choose the right status command.
 - Compare the current paths with [Data locations](data-locations.md).
 - Check automatic freshness in [Keep indexes fresh](../guides/keep-indexes-fresh.md).
 - Use [Search modes](../concepts/search-modes.md) if the problem is retrieval quality rather than availability.

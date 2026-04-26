@@ -1,77 +1,64 @@
 # kbolt
 
-`kbolt` is a local-first retrieval engine for indexing notes, documentation, and source code, then searching them with keyword, semantic, reranked, and deep retrieval modes.
+`kbolt` indexes local notes, documentation, and source code, then searches them with keyword, semantic, reranked, and deep retrieval modes.
 
-The default path is local: `kbolt setup local` downloads the local embedder and reranker models, starts managed `llama-server` processes, and writes the local provider bindings into your config.
+Most users start with the local setup path. `kbolt setup local` downloads the default local models, starts managed `llama-server` processes, and writes provider bindings into your config.
 
-`kbolt` also supports remote OpenAI-compatible providers. The product is local-first, not local-only.
+Remote OpenAI-compatible providers are supported by the config model. A step-by-step remote-provider guide will be added after that workflow is manually validated end to end.
 
 ## Start here
 
-- If you have not installed `kbolt` yet, start with [Install](install.md).
-- If you want a first successful search end to end, go to [Quickstart](quickstart.md).
-- If you want changed files to stay searchable automatically on macOS or Linux, go to [Keep indexes fresh](guides/keep-indexes-fresh.md).
-- If you want to use the index from Claude Desktop, go to [Use with Claude Desktop](guides/use-with-claude-desktop.md).
-- If something is already broken, start with [Troubleshooting](operations/troubleshooting.md).
-
-Fast install on macOS or Linux with Homebrew:
-
-```bash
-brew install h3nock/kbolt/kbolt
-```
-
-## What kbolt does
-
-- indexes Markdown, plaintext, and source code from one or more directories
-- groups content into spaces and collections
-- supports keyword, semantic, hybrid reranked, and deep retrieval modes
-- exposes the index over MCP for agent workflows
-- keeps collections fresh automatically with a background watcher on macOS and Linux
-- keeps local setup and health visible through `doctor`, `status`, and `models list`
+| I want to... | Go to |
+| --- | --- |
+| Install kbolt | [Install](install.md) |
+| Get one successful search | [Quickstart](quickstart.md) |
+| Add more directories or spaces | [Add and organize content](guides/add-and-organize-content.md) |
+| Keep changed files searchable | [Keep indexes fresh](guides/keep-indexes-fresh.md) |
+| Search better | [Search effectively](guides/search-effectively.md) |
+| Read the files behind search results | [Read source files](guides/read-source-files.md) |
+| Use kbolt from Claude Desktop | [Use with Claude Desktop](guides/use-with-claude-desktop.md) |
+| Fix setup or freshness problems | [Health and status](operations/health-and-status.md) |
 
 ## Common paths
 
-### Index local files and search them
+### First local index
 
 1. [Install](install.md)
 2. [Quickstart](quickstart.md)
-3. [Search modes](concepts/search-modes.md)
+3. [Keep indexes fresh](guides/keep-indexes-fresh.md)
 
-### Run the default local stack
+### Day-to-day search
 
-1. [Quickstart](quickstart.md)
-2. [Local setup](concepts/local-setup.md)
-3. [Troubleshooting](operations/troubleshooting.md)
+1. [Search effectively](guides/search-effectively.md)
+2. [Search modes](concepts/search-modes.md)
+3. [Read source files](guides/read-source-files.md)
 
-### Use kbolt from an agent client
+### Agent workflow
 
 1. [Use with Claude Desktop](guides/use-with-claude-desktop.md)
-2. [MCP tools](reference/mcp-tools.md)
-3. [Read and integration](reference/cli/read-and-integration.md)
+2. [Keep indexes fresh](guides/keep-indexes-fresh.md)
+3. [MCP tools](reference/mcp-tools.md)
 
-### Keep indexes current
+### Index management
 
-1. [Keep indexes fresh](guides/keep-indexes-fresh.md)
-2. [Watch reference](reference/cli/watch.md)
-3. [Troubleshooting](operations/troubleshooting.md)
-
-### Manage multiple indexes
-
-1. [Spaces and collections](concepts/spaces-and-collections.md)
-2. [Content management](reference/cli/content-management.md)
+1. [Add and organize content](guides/add-and-organize-content.md)
+2. [Spaces and collections](concepts/spaces-and-collections.md)
 3. [Exclude files](guides/exclude-files.md)
 
-## What this site is for
+## What kbolt does
 
-This site is the public long-form documentation for `kbolt`.
+- indexes Markdown, plaintext, and source code from local directories
+- groups content into spaces and collections
+- searches with keyword, semantic, hybrid reranked, and deep retrieval modes
+- reads source files through CLI and MCP tools
+- keeps collections fresh automatically on macOS and Linux
+- runs the default local model stack through managed `llama-server` processes
 
-Use it for:
+## Documentation map
 
-- installation
-- setup
-- search usage
-- CLI reference
-- troubleshooting
-- MCP integration
+- **Guides** solve user jobs.
+- **Concepts** explain the mental model.
+- **Reference** gives exact command and config details.
+- **Operations** helps with health checks, troubleshooting, and local files.
 
-It is not the place for internal architecture records or maintainer release steps. Those stay in the repository.
+Internal architecture records and maintainer release steps live in the repository under `docs/`, not on the public site.

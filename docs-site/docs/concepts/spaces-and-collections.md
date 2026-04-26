@@ -63,5 +63,6 @@ Do not create new spaces just to give one directory a label. That is a collectio
 
 ## Next steps
 
+- For a practical workflow, see [Add and organize content](../guides/add-and-organize-content.md).
 - For the grouped command reference, see [Content management](../reference/cli/content-management.md).
 - For the read path once content is indexed, see [Read and integration](../reference/cli/read-and-integration.md).

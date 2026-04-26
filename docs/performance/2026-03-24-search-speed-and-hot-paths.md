@@ -1,6 +1,6 @@
 # Search Speed Baseline and Hot Paths
 
-- Status: Current baseline
+- Status: Dated baseline
 - Date: 2026-03-24
 - Scope: Search latency and hot-path analysis for the current global ranking-window default:
   - `initial_candidate_limit_min = 40`
@@ -15,12 +15,12 @@ Kbolt's speed profile is not uniform across modes:
 - `auto+rerank` is materially slower because it builds rerank inputs and runs local model inference.
 - `deep` is the slowest mode because it adds expansion, repeated first-stage retrieval, and often reranking.
 
-This document records the measured baseline for `40/20/30` and the current best understanding of the main bottlenecks.
+This document records the measured baseline for `40/20/30` on 2026-03-24 and the best understanding at that time of the main bottlenecks.
 
 This report was written before the provider-profile refactor removed the old in-process local
-runtime modules. The performance conclusions still matter, but some file references below point
-to historical implementations. The current reranker/expander provider-backed implementations now
-live under `crates/core/src/models/inference.rs`.
+runtime modules. Treat the measurements and file references as dated context, not as a fresh
+performance claim. The higher-level conclusions about reranking, expansion, and source-file reads
+remain useful until a newer benchmark replaces them.
 
 ## Benchmark Method
 

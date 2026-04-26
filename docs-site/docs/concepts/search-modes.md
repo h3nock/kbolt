@@ -109,6 +109,7 @@ This exposes pipeline stages and per-signal scores in the CLI output.
 
 ## Next steps
 
+- For a practical workflow, see [Search effectively](../guides/search-effectively.md).
 - For the exact command contract, see [Search](../reference/cli/search.md).
 - For local model setup, see [Local setup](local-setup.md).
 - If results still look wrong, see [Troubleshooting](../operations/troubleshooting.md).

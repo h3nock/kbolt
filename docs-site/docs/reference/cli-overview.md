@@ -1,6 +1,6 @@
 # CLI overview
 
-This page maps the main command groups to the job they do.
+This page maps the public command groups. Use the workflow guides when you need help deciding which command to run.
 
 ## Core workflow
 
@@ -40,12 +40,6 @@ Reference:
 - [Content management](cli/content-management.md)
 - [Watch](cli/watch.md)
 - [Schedule](cli/schedule.md)
-
-Freshness rule of thumb:
-
-- use `watch` for directories you edit
-- use `update` when you need a refresh now
-- use `schedule` when periodic batch work fits better than a live watcher
 
 ### Local setup and health
 
@@ -91,4 +85,5 @@ Use `cli` for humans and `json` when another tool needs structured output.
 
 - For the end-to-end path, see [Quickstart](../quickstart.md).
 - For freshness choices, see [Keep indexes fresh](../guides/keep-indexes-fresh.md).
+- For health checks, see [Health and status](../operations/health-and-status.md).
 - For concepts that shape the CLI, see [Search modes](../concepts/search-modes.md) and [Spaces and collections](../concepts/spaces-and-collections.md).

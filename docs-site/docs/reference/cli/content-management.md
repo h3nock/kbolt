@@ -122,6 +122,7 @@ After changing ignore rules, the watcher picks up the change automatically if it
 
 ## Related pages
 
+- [Add and organize content](../../guides/add-and-organize-content.md)
 - [Spaces and collections](../../concepts/spaces-and-collections.md)
 - [Keep indexes fresh](../../guides/keep-indexes-fresh.md)
 - [Exclude files](../../guides/exclude-files.md)

@@ -97,7 +97,8 @@ At this point you should have:
 
 ## Next steps
 
-- Learn the retrieval options in [Search modes](concepts/search-modes.md).
+- Add more directories or spaces with [Add and organize content](guides/add-and-organize-content.md).
+- Search better with [Search effectively](guides/search-effectively.md).
+- Read the underlying files with [Read source files](guides/read-source-files.md).
 - Learn the freshness options in [Keep indexes fresh](guides/keep-indexes-fresh.md).
 - If you want to use the index from Claude Desktop, go to [Use with Claude Desktop](guides/use-with-claude-desktop.md).
-- If you want to manage multiple indexes, read [Spaces and collections](concepts/spaces-and-collections.md).

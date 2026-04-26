@@ -70,26 +70,31 @@ nav:
   - Install: install.md
   - Quickstart: quickstart.md
   - Guides:
+      - Add and Organize Content: guides/add-and-organize-content.md
       - Keep Indexes Fresh: guides/keep-indexes-fresh.md
+      - Search Effectively: guides/search-effectively.md
+      - Read Source Files: guides/read-source-files.md
       - Use with Claude Desktop: guides/use-with-claude-desktop.md
       - Exclude Files: guides/exclude-files.md
   - Concepts:
       - Search Modes: concepts/search-modes.md
       - Spaces and Collections: concepts/spaces-and-collections.md
       - Local Setup: concepts/local-setup.md
+      - Platform Support: concepts/platform-support.md
   - Reference:
       - CLI:
           - Overview: reference/cli-overview.md
           - Search: reference/cli/search.md
+          - Read and Integration: reference/cli/read-and-integration.md
+          - Content Management: reference/cli/content-management.md
           - Watch: reference/cli/watch.md
           - Schedule: reference/cli/schedule.md
-          - Eval: reference/cli/eval.md
-          - Content Management: reference/cli/content-management.md
           - Local and Health: reference/cli/local-and-health.md
-          - Read and Integration: reference/cli/read-and-integration.md
+          - Eval: reference/cli/eval.md
       - Configuration:
           - index.toml: reference/config/index-toml.md
       - MCP Tools: reference/mcp-tools.md
   - Operations:
+      - Health and Status: operations/health-and-status.md
       - Troubleshooting: operations/troubleshooting.md
       - Data Locations: operations/data-locations.md

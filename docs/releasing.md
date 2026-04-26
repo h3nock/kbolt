@@ -36,9 +36,16 @@ The release workflow also uploads a `SHA256SUMS` file covering all archives.
 It verifies:
 
 - formatting
+- public docs build with `mkdocs build --strict`
 - tests on Linux and macOS
 - release binary builds on Linux and macOS
 - basic CLI smoke for the release binary
+
+### Documentation
+
+`.github/workflows/docs.yml` builds the public docs site from `docs-site/` and deploys it to GitHub Pages on pushes to `main`.
+
+Before tagging a release, make sure docs CI is green and that user-facing docs describe the release behavior accurately.
 
 ### GitHub Releases
 
@@ -77,8 +84,9 @@ After the GitHub Release is live:
 ## Recommended release order
 
 1. Make sure CI is green on `main`.
-2. Bump the workspace version if needed.
-3. Create and push a `vX.Y.Z` tag.
-4. Wait for `release.yml` to finish and verify the published GitHub Release.
-5. Publish crates.io packages for the same version.
-6. Update the Homebrew tap formula to the same version.
+2. Make sure the public docs site is current and docs CI is green.
+3. Bump the workspace version if needed.
+4. Create and push a `vX.Y.Z` tag.
+5. Wait for `release.yml` to finish and verify the published GitHub Release.
+6. Publish crates.io packages for the same version.
+7. Update the Homebrew tap formula to the same version.

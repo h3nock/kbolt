@@ -63,5 +63,6 @@ This downloads the optional expander model and wires the corresponding local rol
 ## Next steps
 
 - For the first end-to-end path, go to [Quickstart](../quickstart.md).
+- For platform-specific support, see [Platform support](platform-support.md).
 - For the grouped command reference, see [Local and health](../reference/cli/local-and-health.md).
 - If local services are not reachable, see [Troubleshooting](../operations/troubleshooting.md).

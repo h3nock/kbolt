@@ -3,6 +3,15 @@
 ## Status
 Accepted
 
+## Amendment 2026-04-26
+After this ADR was accepted, `kbolt setup local` grew a managed convenience path that downloads
+default local models and starts local `llama-server` processes for configured roles.
+
+That does not change the inference boundary selected here. Search and indexing code still bind
+roles through provider profiles and talk to inference deployments over provider-backed clients.
+The managed local lifecycle is a setup and operations convenience, not a return to in-process model
+runtime ownership.
+
 ## Supersedes
 - [ADR 0002](./0002-role-inference-config.md)
 
@@ -62,17 +71,12 @@ Examples:
 - expander role: provider + generation settings
 
 ### Local lifecycle
-The first implementation is **connect-only** for local server profiles.
+Inference code is client-only with respect to provider profiles.
 
-Kbolt will:
-- resolve the configured localhost deployment
-- health-check it
-- use it as a client
-
-Kbolt will not, in this first architecture step:
-- auto-start local servers
-- supervise them
-- own local GGUF runtime construction for normal inference
+Kbolt resolves configured localhost deployments, health-checks them, and uses them through provider
+clients. Product setup commands may create and manage default local `llama-server` processes, but
+normal inference still crosses the provider boundary rather than constructing in-process local
+runtimes.
 
 ## Rejected Alternatives
 

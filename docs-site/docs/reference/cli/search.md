@@ -73,6 +73,7 @@ kbolt --space work search "deploy checklist" --collection runbooks
 
 ## Related pages
 
+- [Search effectively](../../guides/search-effectively.md)
 - [Search modes](../../concepts/search-modes.md)
 - [Quickstart](../../quickstart.md)
 - [Troubleshooting](../../operations/troubleshooting.md)

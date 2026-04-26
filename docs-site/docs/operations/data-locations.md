@@ -60,6 +60,7 @@ Use the cache root when you need to inspect:
 
 ## Related pages
 
+- [Health and status](health-and-status.md)
 - [Troubleshooting](troubleshooting.md)
 - [Keep indexes fresh](../guides/keep-indexes-fresh.md)
 - [index.toml](../reference/config/index-toml.md)

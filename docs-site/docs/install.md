@@ -69,4 +69,5 @@ kbolt --help
 ## Next steps
 
 - For the default local setup path, continue to [Quickstart](quickstart.md).
+- For platform-specific support, see [Platform support](concepts/platform-support.md).
 - If you need installation recovery steps, see [Troubleshooting](operations/troubleshooting.md).

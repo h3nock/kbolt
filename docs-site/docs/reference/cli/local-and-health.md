@@ -74,6 +74,7 @@ kbolt models list
 
 ## Related pages
 
+- [Health and status](../../operations/health-and-status.md)
 - [Local setup](../../concepts/local-setup.md)
 - [Quickstart](../../quickstart.md)
 - [Keep indexes fresh](../../guides/keep-indexes-fresh.md)
