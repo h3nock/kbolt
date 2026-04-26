@@ -22,6 +22,7 @@ use crate::Result;
 const APP_NAME: &str = "kbolt";
 const LOCALHOST: &str = "127.0.0.1";
 const LLAMA_SERVER_BREW_HINT: &str = "brew install llama.cpp";
+const LLAMA_SERVER_LOG_VERBOSITY: &str = "1";
 const MODEL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
 const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -827,30 +828,33 @@ fn provider_profile_port(profile: &ProviderProfileConfig) -> Result<u16> {
     Ok(port)
 }
 
-fn spawn_llama_server(
+fn open_managed_service_log(log_file: &Path) -> Result<File> {
+    if let Some(parent) = log_file.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    File::options()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(log_file)
+        .map_err(Into::into)
+}
+
+fn configure_llama_server_command(
+    command: &mut Command,
     llama_server_path: &Path,
     spec: &ManagedServiceSpec,
     model_path: &Path,
     port: u16,
-    log_file: &Path,
-) -> Result<std::process::Child> {
-    if let Some(parent) = log_file.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let stdout = File::options().create(true).append(true).open(log_file)?;
-    let stderr = stdout.try_clone()?;
-
-    let mut command = if Path::new("/usr/bin/nohup").is_file() {
-        Command::new("/usr/bin/nohup")
-    } else {
-        Command::new("nohup")
-    };
+) {
     command
         .arg(llama_server_path)
         .arg("-m")
         .arg(model_path)
         .arg("--port")
-        .arg(port.to_string());
+        .arg(port.to_string())
+        .arg("--log-verbosity")
+        .arg(LLAMA_SERVER_LOG_VERBOSITY);
 
     match spec.role {
         ManagedRole::Embedder => {
@@ -883,6 +887,24 @@ fn spawn_llama_server(
             command.arg("-ngl").arg("99").arg("-c").arg("2048");
         }
     }
+}
+
+fn spawn_llama_server(
+    llama_server_path: &Path,
+    spec: &ManagedServiceSpec,
+    model_path: &Path,
+    port: u16,
+    log_file: &Path,
+) -> Result<std::process::Child> {
+    let stdout = open_managed_service_log(log_file)?;
+    let stderr = stdout.try_clone()?;
+
+    let mut command = if Path::new("/usr/bin/nohup").is_file() {
+        Command::new("/usr/bin/nohup")
+    } else {
+        Command::new("nohup")
+    };
+    configure_llama_server_command(&mut command, llama_server_path, spec, model_path, port);
 
     command
         .stdin(Stdio::null())
@@ -1091,14 +1113,18 @@ fn stop_started_children(started: &[u32]) {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Write;
     use std::net::TcpListener;
+    use std::path::Path;
+    use std::process::Command;
 
     use tempfile::tempdir;
 
     use super::{
-        apply_managed_service_config, endpoint_for_port, load_setup_config, managed_model_path,
-        missing_service_report, select_port, started_service_note, EMBEDDER_SPEC, EXPANDER_SPEC,
-        RERANKER_SPEC,
+        apply_managed_service_config, configure_llama_server_command, endpoint_for_port,
+        load_setup_config, managed_model_path, missing_service_report, open_managed_service_log,
+        select_port, started_service_note, EMBEDDER_SPEC, EXPANDER_SPEC,
+        LLAMA_SERVER_LOG_VERBOSITY, RERANKER_SPEC,
     };
     use crate::config::{self, Config};
 
@@ -1255,6 +1281,48 @@ operation = "embedding"
                 .join("reranker")
                 .join("qwen3-reranker-0.6b-q8_0.gguf")
         );
+    }
+
+    #[test]
+    fn managed_service_log_is_truncated_on_spawn_open() {
+        let tmp = tempdir().expect("tempdir");
+        let log_file = tmp.path().join("logs").join("embedder.log");
+        fs::create_dir_all(log_file.parent().expect("log parent")).expect("create log dir");
+        fs::write(&log_file, "old output\n").expect("write old log");
+
+        {
+            let mut log = open_managed_service_log(&log_file).expect("open managed log");
+            log.write_all(b"new output\n").expect("write new log");
+        }
+
+        let content = fs::read_to_string(&log_file).expect("read log");
+        assert_eq!(content, "new output\n");
+    }
+
+    #[test]
+    fn llama_server_command_limits_managed_log_verbosity() {
+        for spec in [&EMBEDDER_SPEC, &RERANKER_SPEC, &EXPANDER_SPEC] {
+            let mut command = Command::new("nohup");
+            configure_llama_server_command(
+                &mut command,
+                Path::new("/usr/local/bin/llama-server"),
+                spec,
+                Path::new("/tmp/model.gguf"),
+                spec.preferred_port,
+            );
+            let args = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+
+            assert!(
+                args.windows(2).any(|pair| {
+                    pair[0] == "--log-verbosity" && pair[1] == LLAMA_SERVER_LOG_VERBOSITY
+                }),
+                "expected log verbosity in args for {}: {args:?}",
+                spec.name
+            );
+        }
     }
 
     #[test]
