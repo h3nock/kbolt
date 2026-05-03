@@ -2,15 +2,6 @@ use super::*;
 
 const DEEP_SELECTED_GENERATED_VARIANTS_MAX: usize = 2;
 const DEEP_VARIANT_NEAR_DUPLICATE_SIMILARITY: f32 = 0.98;
-const DEEP_RETRIEVAL_GATE_ENV: &str = "KBOLT_DEEP_RETRIEVAL_GATE";
-const DEEP_GATE_KNEE_MAX_RANK: usize = 5;
-const DEEP_GATE_MARGIN_MIN: f32 = 0.7;
-const DEEP_GATE_OVERLAP_MIN: f32 = 0.3;
-const DEEP_GATE_MARGIN_DEPTH: usize = 5;
-const DEEP_GATE_OVERLAP_DEPTH: usize = 10;
-const DEEP_GATE_MARGIN_STDDEV_DEPTH: usize = 40;
-const DEEP_GATE_KNEE_PROMINENCE_MIN: f32 = 0.05;
-const DEEP_GATE_TERMINAL_GAP_MIN: f32 = 0.35;
 
 impl Engine {
     pub(super) fn initial_search_pipeline(&self, requested_mode: &SearchMode) -> SearchPipeline {
@@ -333,54 +324,6 @@ impl Engine {
             .into());
         };
 
-        if deep_retrieval_gate_enabled() {
-            return self.rank_deep_with_retrieval_gate(
-                targets,
-                query,
-                limit,
-                min_score,
-                pipeline,
-                expander.as_ref(),
-            );
-        }
-
-        self.rank_current_deep_chunks(
-            targets,
-            query,
-            limit,
-            min_score,
-            pipeline,
-            expander.as_ref(),
-        )
-    }
-
-    fn rank_deep_with_retrieval_gate(
-        &self,
-        targets: &[UpdateTarget],
-        query: &str,
-        limit: usize,
-        min_score: f32,
-        pipeline: &mut SearchPipeline,
-        expander: &dyn crate::models::Expander,
-    ) -> Result<Vec<RankedChunk>> {
-        let auto_ranked = self.rank_auto_chunks(targets, query, limit, min_score, pipeline)?;
-        if auto_retrieval_is_confident(&auto_ranked) {
-            pipeline.expansion = false;
-            return Ok(auto_ranked);
-        }
-
-        self.rank_current_deep_chunks(targets, query, limit, min_score, pipeline, expander)
-    }
-
-    fn rank_current_deep_chunks(
-        &self,
-        targets: &[UpdateTarget],
-        query: &str,
-        limit: usize,
-        min_score: f32,
-        pipeline: &mut SearchPipeline,
-        expander: &dyn crate::models::Expander,
-    ) -> Result<Vec<RankedChunk>> {
         let normalized_query = crate::models::normalize_query_text(query);
         let mut variants = vec![normalized_query.clone()];
         let max_generated = self.config.ranking.deep_variants_max.saturating_sub(1);
@@ -1200,54 +1143,6 @@ mod tests {
 
         assert_eq!(selected, vec![0, 1, 3]);
     }
-
-    #[test]
-    fn deep_retrieval_gate_accepts_sharp_agreeing_fused_curve() {
-        let ranked = vec![
-            ranked_chunk(10, 1.00, Some(1.00), Some(0.98)),
-            ranked_chunk(20, 0.96, Some(0.94), Some(0.95)),
-            ranked_chunk(30, 0.92, Some(0.90), Some(0.91)),
-            ranked_chunk(40, 0.40, Some(0.30), None),
-            ranked_chunk(50, 0.38, None, Some(0.30)),
-            ranked_chunk(60, 0.36, Some(0.20), None),
-        ];
-
-        assert_eq!(score_curve_knee_rank(&ranked), Some(4));
-        assert!(normalized_top_margin(&ranked) >= DEEP_GATE_MARGIN_MIN);
-        assert!(sparse_dense_overlap(&ranked) >= DEEP_GATE_OVERLAP_MIN);
-        assert!(auto_retrieval_is_confident(&ranked));
-    }
-
-    #[test]
-    fn deep_retrieval_gate_rejects_flat_fused_curve() {
-        let ranked = vec![
-            ranked_chunk(10, 0.50, Some(0.50), Some(0.49)),
-            ranked_chunk(20, 0.50, Some(0.50), Some(0.49)),
-            ranked_chunk(30, 0.50, Some(0.50), Some(0.49)),
-            ranked_chunk(40, 0.50, Some(0.50), Some(0.49)),
-            ranked_chunk(50, 0.50, Some(0.50), Some(0.49)),
-            ranked_chunk(60, 0.50, Some(0.50), Some(0.49)),
-        ];
-
-        assert_eq!(score_curve_knee_rank(&ranked), None);
-        assert!(!auto_retrieval_is_confident(&ranked));
-    }
-
-    #[test]
-    fn deep_retrieval_gate_rejects_sparse_dense_disagreement() {
-        let ranked = vec![
-            ranked_chunk(10, 1.00, Some(1.00), None),
-            ranked_chunk(20, 0.97, Some(0.97), None),
-            ranked_chunk(30, 0.94, Some(0.94), None),
-            ranked_chunk(40, 0.35, None, Some(0.35)),
-            ranked_chunk(50, 0.34, None, Some(0.34)),
-            ranked_chunk(60, 0.33, None, Some(0.33)),
-        ];
-
-        assert_eq!(score_curve_knee_rank(&ranked), Some(4));
-        assert_eq!(sparse_dense_overlap(&ranked), 0.0);
-        assert!(!auto_retrieval_is_confident(&ranked));
-    }
 }
 
 fn fuse_ranked_chunks(
@@ -1465,134 +1360,6 @@ fn aggregate_deep_variant_rankings(
     finalize_ranked_chunks(aggregates.into_values().collect(), limit, min_score)
 }
 
-fn auto_retrieval_is_confident(ranked: &[RankedChunk]) -> bool {
-    let overlap = sparse_dense_overlap(ranked);
-    let knee_rank = score_curve_knee_rank(ranked);
-    let margin = normalized_top_margin(ranked);
-    if overlap < DEEP_GATE_OVERLAP_MIN {
-        return false;
-    }
-
-    let has_early_knee = knee_rank.is_some_and(|rank| rank <= DEEP_GATE_KNEE_MAX_RANK);
-    let has_clear_margin = margin >= DEEP_GATE_MARGIN_MIN;
-    has_early_knee || has_clear_margin
-}
-
-fn score_curve_knee_rank(ranked: &[RankedChunk]) -> Option<usize> {
-    if ranked.len() < 3 {
-        return None;
-    }
-
-    let scores = ranked.iter().map(|item| item.score).collect::<Vec<_>>();
-    let first = scores[0];
-    let last = *scores.last()?;
-    let denominator = last - first;
-    if !denominator.is_finite() || denominator.abs() <= f32::EPSILON {
-        return None;
-    }
-
-    let max_index = (scores.len() - 1) as f32;
-    let residuals = scores
-        .iter()
-        .enumerate()
-        .map(|(index, score)| {
-            let y = (*score - first) / denominator;
-            let x = index as f32 / max_index;
-            y - x
-        })
-        .collect::<Vec<_>>();
-
-    for index in 1..(residuals.len() - 1) {
-        let neighbor_floor = residuals[index - 1].max(residuals[index + 1]);
-        if residuals[index] > residuals[index - 1]
-            && residuals[index] >= residuals[index + 1]
-            && residuals[index] - neighbor_floor >= DEEP_GATE_KNEE_PROMINENCE_MIN
-        {
-            return Some(index + 1);
-        }
-    }
-
-    terminal_gap_knee_rank(&scores)
-}
-
-fn terminal_gap_knee_rank(scores: &[f32]) -> Option<usize> {
-    let first = scores.first().copied()?;
-    let last = scores.last().copied()?;
-    let range = (first - last).abs();
-    if !range.is_finite() || range <= f32::EPSILON {
-        return None;
-    }
-
-    let mut best_rank = None;
-    let mut best_gap = 0.0_f32;
-    for (index, pair) in scores.windows(2).enumerate() {
-        let gap = pair[0] - pair[1];
-        if gap > best_gap {
-            best_gap = gap;
-            best_rank = Some(index + 1);
-        }
-    }
-
-    let normalized_gap = best_gap / range;
-    // Local-max knee detection cannot see a final-pair cliff, so handle that shape separately.
-    (normalized_gap >= DEEP_GATE_TERMINAL_GAP_MIN)
-        .then_some(best_rank?)
-        .filter(|rank| {
-            let terminal_rank = scores.len().saturating_sub(1);
-            *rank == terminal_rank
-        })
-}
-
-fn normalized_top_margin(ranked: &[RankedChunk]) -> f32 {
-    if ranked.len() < 2 {
-        return 0.0;
-    }
-
-    let margin_depth = ranked.len().min(DEEP_GATE_MARGIN_DEPTH);
-    let stddev_depth = ranked.len().min(DEEP_GATE_MARGIN_STDDEV_DEPTH);
-    let top = ranked[0].score;
-    let comparison = ranked[margin_depth - 1].score;
-    let stddev = score_stddev(&ranked[..stddev_depth]);
-    if stddev <= f32::EPSILON {
-        return 0.0;
-    }
-
-    (top - comparison) / stddev
-}
-
-fn score_stddev(ranked: &[RankedChunk]) -> f32 {
-    if ranked.is_empty() {
-        return 0.0;
-    }
-
-    let count = ranked.len() as f32;
-    let mean = ranked.iter().map(|item| item.score).sum::<f32>() / count;
-    let variance = ranked
-        .iter()
-        .map(|item| {
-            let delta = item.score - mean;
-            delta * delta
-        })
-        .sum::<f32>()
-        / count;
-    variance.sqrt()
-}
-
-fn sparse_dense_overlap(ranked: &[RankedChunk]) -> f32 {
-    let depth = ranked.len().min(DEEP_GATE_OVERLAP_DEPTH);
-    if depth == 0 {
-        return 0.0;
-    }
-
-    // Fusion drops source rank lists, so agreement is measured as shared source membership.
-    let overlapping = ranked
-        .iter()
-        .take(depth)
-        .filter(|item| item.bm25.is_some() && item.dense.is_some())
-        .count();
-    overlapping as f32 / depth as f32
-}
-
 fn finalize_ranked_chunks(
     mut ranked: Vec<RankedChunk>,
     limit: usize,
@@ -1789,13 +1556,4 @@ fn add_search_pipeline_notice(
 
 fn is_model_not_available_error(err: &CoreError) -> bool {
     matches!(err, CoreError::Domain(KboltError::ModelNotAvailable { .. }))
-}
-
-fn deep_retrieval_gate_enabled() -> bool {
-    std::env::var(DEEP_RETRIEVAL_GATE_ENV)
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            !matches!(normalized.as_str(), "" | "0" | "false" | "off" | "no")
-        })
-        .unwrap_or(false)
 }

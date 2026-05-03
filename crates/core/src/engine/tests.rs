@@ -41,28 +41,6 @@ impl crate::models::Embedder for DeterministicEmbedder {
 }
 
 #[derive(Default)]
-struct PhraseMatchEmbedder;
-
-impl crate::models::Embedder for PhraseMatchEmbedder {
-    fn embed_batch(
-        &self,
-        _kind: crate::models::EmbeddingInputKind,
-        texts: &[String],
-    ) -> crate::Result<Vec<Vec<f32>>> {
-        Ok(texts
-            .iter()
-            .map(|text| {
-                if text.to_ascii_lowercase().contains("alpha beta") {
-                    vec![1.0, 0.0]
-                } else {
-                    vec![0.0, 1.0]
-                }
-            })
-            .collect())
-    }
-}
-
-#[derive(Default)]
 struct SelectiveFailureEmbedder;
 
 impl crate::models::Embedder for SelectiveFailureEmbedder {
@@ -163,18 +141,6 @@ struct StaticExpander {
 
 impl crate::models::Expander for StaticExpander {
     fn expand(&self, _query: &str, _max_variants: usize) -> crate::Result<Vec<String>> {
-        Ok(self.items.clone())
-    }
-}
-
-struct RecordingExpander {
-    calls: Mutex<usize>,
-    items: Vec<String>,
-}
-
-impl crate::models::Expander for RecordingExpander {
-    fn expand(&self, _query: &str, _max_variants: usize) -> crate::Result<Vec<String>> {
-        *self.calls.lock().unwrap() += 1;
         Ok(self.items.clone())
     }
 }
@@ -328,25 +294,6 @@ fn with_kbolt_space_env<T>(value: Option<&str>, run: impl FnOnce() -> T) -> T {
     match old_value {
         Some(v) => std::env::set_var("KBOLT_SPACE", v),
         None => std::env::remove_var("KBOLT_SPACE"),
-    }
-    result
-}
-
-fn with_deep_retrieval_gate_env<T>(value: Option<&str>, run: impl FnOnce() -> T) -> T {
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let lock = ENV_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = lock.lock().expect("lock env mutex");
-
-    let old_value: Option<OsString> = std::env::var_os("KBOLT_DEEP_RETRIEVAL_GATE");
-    match value {
-        Some(v) => std::env::set_var("KBOLT_DEEP_RETRIEVAL_GATE", v),
-        None => std::env::remove_var("KBOLT_DEEP_RETRIEVAL_GATE"),
-    }
-
-    let result = run();
-    match old_value {
-        Some(v) => std::env::set_var("KBOLT_DEEP_RETRIEVAL_GATE", v),
-        None => std::env::remove_var("KBOLT_DEEP_RETRIEVAL_GATE"),
     }
     result
 }
@@ -2253,107 +2200,6 @@ fn search_deep_mode_filters_duplicate_and_original_query_expansions() {
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].path, "api/guide.md");
         assert!(response.pipeline.expansion);
-    });
-}
-
-#[test]
-fn search_deep_retrieval_gate_skips_expansion_when_auto_retrieval_is_confident() {
-    with_kbolt_space_env(None, || {
-        with_deep_retrieval_gate_env(Some("1"), || {
-            let expander = Arc::new(RecordingExpander {
-                calls: Mutex::new(0),
-                items: vec!["expanded fallback".to_string()],
-            });
-            let engine = test_engine_with_search_models(
-                Some(Arc::new(PhraseMatchEmbedder)),
-                None,
-                Some(expander.clone()),
-            );
-            engine.add_space("work", None).expect("add work");
-
-            let root = tempdir().expect("create temp root");
-            let work_path = root.path().join("work-api");
-            std::fs::create_dir_all(&work_path).expect("create collection dir");
-            add_collection_fixture(&engine, "work", "api", work_path.clone());
-
-            write_text_file(
-                &work_path.join("primary.md"),
-                "alpha beta alpha beta alpha beta alpha beta alpha beta\n",
-            );
-            for index in 0..5 {
-                write_text_file(
-                    &work_path.join(format!("support-{index}.md")),
-                    &format!("alpha beta supporting document {index}\n"),
-                );
-            }
-            engine
-                .update(update_options(Some("work"), &["api"]))
-                .expect("initial update");
-
-            let response = engine
-                .search(SearchRequest {
-                    query: "alpha beta".to_string(),
-                    mode: SearchMode::Deep,
-                    space: Some("work".to_string()),
-                    collections: vec!["api".to_string()],
-                    limit: 10,
-                    min_score: 0.0,
-                    no_rerank: true,
-                    debug: true,
-                })
-                .expect("deep search should use confident auto retrieval");
-
-            assert_eq!(response.effective_mode, SearchMode::Deep);
-            assert!(!response.pipeline.expansion);
-            assert!(!response.results.is_empty());
-            assert_eq!(*expander.calls.lock().unwrap(), 0);
-        });
-    });
-}
-
-#[test]
-fn search_deep_retrieval_gate_expands_when_auto_retrieval_is_weak() {
-    with_kbolt_space_env(None, || {
-        with_deep_retrieval_gate_env(Some("1"), || {
-            let expander = Arc::new(RecordingExpander {
-                calls: Mutex::new(0),
-                items: vec!["expanded answer".to_string()],
-            });
-            let engine = test_engine_with_search_models(None, None, Some(expander.clone()));
-            engine.add_space("work", None).expect("add work");
-
-            let root = tempdir().expect("create temp root");
-            let work_path = root.path().join("work-api");
-            std::fs::create_dir_all(&work_path).expect("create collection dir");
-            add_collection_fixture(&engine, "work", "api", work_path.clone());
-
-            write_text_file(
-                &work_path.join("answer.md"),
-                "This document contains the expanded answer text.\n",
-            );
-            engine
-                .update(update_options(Some("work"), &["api"]))
-                .expect("initial update");
-
-            let response = engine
-                .search(SearchRequest {
-                    query: "missing phrase".to_string(),
-                    mode: SearchMode::Deep,
-                    space: Some("work".to_string()),
-                    collections: vec!["api".to_string()],
-                    limit: 10,
-                    min_score: 0.0,
-                    no_rerank: true,
-                    debug: false,
-                })
-                .expect("deep search should expand weak auto retrieval");
-
-            assert_eq!(response.effective_mode, SearchMode::Deep);
-            assert!(response.pipeline.expansion);
-            assert_eq!(*expander.calls.lock().unwrap(), 1);
-            assert_eq!(response.results.len(), 1);
-            assert_eq!(response.results[0].path, "api/answer.md");
-        });
     });
 }
 
