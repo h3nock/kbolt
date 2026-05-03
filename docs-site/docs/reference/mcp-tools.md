@@ -21,6 +21,7 @@ Notes:
 
 - default limit is `10`
 - supported modes are `auto`, `deep`, `keyword`, and `semantic`
+- use `deep` for vocabulary-mismatch or underspecified queries; use `auto` for normal searches and lexically clear lookups
 
 ### `get`
 

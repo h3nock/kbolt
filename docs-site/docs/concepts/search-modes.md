@@ -65,13 +65,25 @@ Good fits:
 
 ## `--deep`
 
-Use `--deep` when the first pass is too narrow and you need broader recall:
+Use `--deep` when the query may not share vocabulary with the best matching documents, or when a short/underspecified query needs broader recall:
 
 ```bash
 kbolt search "index corruption recovery" --deep
 ```
 
-Deep mode expands the query and runs a broader retrieval path. It is slower than the default mode and belongs in a second pass, not the first one.
+Deep mode expands the query and runs a broader multi-variant retrieval path. It runs expansion on every search, is slower than the default mode and `--rerank`, and belongs in a second pass, not the first one.
+
+Good fits:
+
+- vocabulary mismatch between the query and stored documents
+- short or underspecified queries
+- searches where normal search or `--rerank` missed useful material
+
+Poor fits:
+
+- exact titles
+- named entities
+- identifiers, config keys, and lexically clear lookups
 
 `--deep` reranks by default. If you want the broader retrieval path without the reranking step, pass `--no-rerank`:
 
@@ -104,7 +116,7 @@ This exposes pipeline stages and per-signal scores in the CLI output.
 - Add `--rerank` when ranking quality matters more than latency.
 - Use `--keyword` for exact terms.
 - Use `--semantic` for conceptual language.
-- Use `--deep` when the first pass misses useful material.
+- Use `--deep` when vocabulary mismatch or an underspecified query needs broader recall.
 - Use `--debug` when you are diagnosing search behavior.
 
 ## Next steps

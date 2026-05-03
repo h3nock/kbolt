@@ -49,16 +49,18 @@ kbolt search "rust error handling"
 `kbolt search "query"` runs hybrid keyword + semantic retrieval. Reranking is opt-in for this default mode.
 
 - `kbolt search "query"`: hybrid keyword + semantic
-- `kbolt search "query" --rerank`: hybrid + reranking (best quality)
+- `kbolt search "query" --rerank`: hybrid + reranking (higher quality, slower)
 - `kbolt search "query" --keyword`: keyword only
 - `kbolt search "query" --semantic`: dense only
-- `kbolt search "query" --deep`: query expansion + reranked retrieval
+- `kbolt search "query" --deep`: explicit query expansion + multi-variant retrieval, reranked by default
 
 `kbolt setup local` configures the default local embedder and reranker. To enable deep search later:
 
 ```bash
 kbolt local enable deep
 ```
+
+Use `--deep` when the query may not share vocabulary with the best matching documents, or when a short/underspecified query needs broader recall. It runs query expansion on every search and is slower than the default search and `--rerank`; for exact titles, named entities, or lexically clear lookups, start with normal search or `--rerank`.
 
 ## What kbolt supports
 

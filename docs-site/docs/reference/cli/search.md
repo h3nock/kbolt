@@ -15,7 +15,7 @@ kbolt search [OPTIONS] <QUERY>
 - `--collection <COLLECTIONS>`: restrict search to specific collections as a comma-separated list
 - `--limit <LIMIT>`: maximum number of results to return
 - `--min-score <MIN_SCORE>`: filter out results below a score threshold
-- `--deep`: query expansion plus multi-variant retrieval
+- `--deep`: query expansion plus multi-variant retrieval for vocabulary-mismatch or underspecified queries
 - `--keyword`: keyword-only search
 - `--semantic`: dense-vector-only search
 - `--no-rerank`: skip cross-encoder reranking

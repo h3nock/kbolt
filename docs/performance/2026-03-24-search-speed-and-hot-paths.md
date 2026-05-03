@@ -208,7 +208,7 @@ Why this matters:
 - simplifies rerank input construction
 - reduces repeated neighbor assembly work
 
-### High ROI: Make deep selective instead of always-on
+### Medium ROI: Keep deep explicit
 
 Current issue:
 
@@ -217,13 +217,15 @@ Current issue:
 
 Best near-term direction:
 
-- add a strong-signal gate so deep skips expansion on easy queries
-- only pay expansion cost when the base query is weak or ambiguous
+- keep `--deep` as an explicit opt-in for broad recall searches
+- avoid hiding conditional skip/escalation behavior behind the same user-facing mode
+- revisit automatic deep escalation only as a separate retrieval policy after stronger evaluation
 
 Why this matters:
 
 - deep is the slowest mode
 - many queries do not need expansion to perform well
+- users who request `--deep` should get deterministic expansion behavior
 
 ### Medium ROI: Make rerank windows per-mode
 
@@ -359,4 +361,4 @@ Why this is a redesign:
    - final result assembly
 2. Rework the local reranker to support true multi-document batching.
 3. Persist rerank/search text so reranking no longer depends on raw file reads.
-4. Add deep gating before doing any larger deep-specific tuning.
+4. Treat automatic deep escalation as a separate product policy from explicit `--deep`.

@@ -43,13 +43,15 @@ Reranking improves ordering but adds latency.
 
 ## Use deep search as a second pass
 
-Use deep search when the first pass misses useful material:
+Use deep search when the query may not share vocabulary with the best matching documents, or when a short/underspecified query needs broader recall:
 
 ```bash
 kbolt search "index corruption recovery" --deep
 ```
 
-Deep search expands the query and runs a broader retrieval path. It is slower than the default mode.
+Deep search expands the query and runs a broader multi-variant retrieval path. It runs expansion on every search and is slower than the default mode and `--rerank`.
+
+Good fits include vocabulary mismatch, short queries, and searches where normal search or `--rerank` missed useful material. Poor fits include exact titles, named entities, identifiers, config keys, and other lexically clear lookups.
 
 ## Diagnose search behavior
 

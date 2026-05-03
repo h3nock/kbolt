@@ -229,7 +229,7 @@ pub struct SearchArgs {
     pub min_score: f32,
     #[arg(
         long,
-        help = "Query expansion plus multi-variant retrieval (highest recall, slower)"
+        help = "Query expansion for vocabulary-mismatch or underspecified queries (slower)"
     )]
     pub deep: bool,
     #[arg(long, help = "Keyword-only (BM25) search; skips dense retrieval")]
