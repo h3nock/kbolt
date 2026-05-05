@@ -653,7 +653,7 @@ impl CliAdapter {
             verbose,
         })?;
 
-        Ok(format_update_report(&report, verbose))
+        Ok(format_update_report(&report, verbose, no_embed))
     }
 
     pub fn schedule_add(&self, req: AddScheduleRequest) -> Result<String> {
@@ -1364,7 +1364,7 @@ fn format_normal_search_pipeline_notice(
     }
 }
 
-fn format_update_report(report: &UpdateReport, verbose: bool) -> String {
+fn format_update_report(report: &UpdateReport, verbose: bool, no_embed: bool) -> String {
     let mut lines = Vec::new();
     if verbose {
         for decision in &report.decisions {
@@ -1381,7 +1381,7 @@ fn format_update_report(report: &UpdateReport, verbose: bool) -> String {
     }
 
     lines.push("update complete".to_string());
-    append_update_summary_lines(&mut lines, report);
+    append_update_summary_lines(&mut lines, report, no_embed);
 
     if !report.errors.is_empty() && !verbose {
         let truncated = append_update_error_lines(&mut lines, report, 3);
@@ -1432,7 +1432,7 @@ fn format_collection_add_indexing_report(
         lines.push("initial indexing incomplete".to_string());
     }
 
-    append_update_summary_lines(&mut lines, report);
+    append_update_summary_lines(&mut lines, report, false);
 
     let truncated = if !report.errors.is_empty() {
         append_update_error_lines(&mut lines, report, 3)
@@ -1502,7 +1502,7 @@ fn append_update_error_lines(lines: &mut Vec<String>, report: &UpdateReport, lim
     truncated
 }
 
-fn append_update_summary_lines(lines: &mut Vec<String>, report: &UpdateReport) {
+fn append_update_summary_lines(lines: &mut Vec<String>, report: &UpdateReport, no_embed: bool) {
     lines.push(format!("- {} document(s) scanned", report.scanned_docs));
 
     let unchanged = report.skipped_mtime_docs + report.skipped_hash_docs;
@@ -1529,6 +1529,9 @@ fn append_update_summary_lines(lines: &mut Vec<String>, report: &UpdateReport) {
     }
     if report.embedded_chunks > 0 {
         lines.push(format!("- {} chunk(s) embedded", report.embedded_chunks));
+    }
+    if no_embed {
+        lines.push("- embedding skipped (--no-embed)".to_string());
     }
 
     lines.push(format!(
@@ -3717,6 +3720,7 @@ mod tests {
                 elapsed_ms: 1_250,
             },
             false,
+            false,
         );
 
         assert!(output.starts_with("update complete"));
@@ -3733,6 +3737,21 @@ mod tests {
         assert!(
             !output.contains("scanned_docs:"),
             "unexpected output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn update_report_mentions_no_embed_skip() {
+        let report = make_update_report(Vec::new(), 0);
+        let output = format_update_report(&report, false, true);
+
+        assert!(
+            output.contains("- embedding skipped (--no-embed)"),
+            "expected no-embed summary line: {output}"
+        );
+        assert!(
+            output.contains("- completed in 0ms"),
+            "expected elapsed summary to remain present: {output}"
         );
     }
 
@@ -3900,7 +3919,7 @@ mod tests {
             ],
             4,
         );
-        let output = format_update_report(&report, false);
+        let output = format_update_report(&report, false, false);
         assert!(
             output.contains("- 1 more error(s)"),
             "expected truncation summary: {output}"
@@ -3914,7 +3933,7 @@ mod tests {
     #[test]
     fn format_update_report_omits_verbose_hint_without_truncation() {
         let report = make_update_report(vec![make_file_error("a.md"), make_file_error("b.md")], 2);
-        let output = format_update_report(&report, false);
+        let output = format_update_report(&report, false, false);
         assert!(
             !output.contains("more error(s)"),
             "expected no truncation: {output}"
