@@ -573,6 +573,14 @@ impl CliAdapter {
 
         if let Some(hint) = response.staleness_hint {
             lines.push(String::new());
+            if !debug {
+                for notice in &response.pipeline.notices {
+                    lines.push(
+                        format_normal_search_pipeline_notice(notice, &response.effective_mode)
+                            .to_string(),
+                    );
+                }
+            }
             lines.push(hint);
         }
 
@@ -1341,6 +1349,19 @@ fn format_search_pipeline_notice(notice: &SearchPipelineNotice) -> String {
         SearchPipelineUnavailableReason::ModelNotAvailable => "required provider is not ready",
     };
     format!("{step} unavailable: {reason}")
+}
+
+fn format_normal_search_pipeline_notice(
+    notice: &SearchPipelineNotice,
+    effective_mode: &SearchMode,
+) -> &'static str {
+    match notice.step {
+        SearchPipelineStep::Dense if effective_mode == &SearchMode::Keyword => {
+            "keyword only (dense unavailable)"
+        }
+        SearchPipelineStep::Dense => "dense unavailable",
+        SearchPipelineStep::Rerank => "rerank skipped",
+    }
 }
 
 fn format_update_report(report: &UpdateReport, verbose: bool) -> String {
@@ -2902,6 +2923,62 @@ mod tests {
             assert!(
                 output.contains("note: dense retrieval unavailable: not configured"),
                 "unexpected output: {output}"
+            );
+        });
+    }
+
+    #[test]
+    fn search_normal_output_includes_subtle_capability_fallbacks() {
+        with_isolated_xdg_dirs(|| {
+            let root = tempdir().expect("create collection root");
+            let engine = Engine::new(None).expect("create engine");
+            engine.add_space("work", None).expect("add work");
+
+            let work_path = new_collection_dir(root.path(), "work-api");
+            engine
+                .add_collection(AddCollectionRequest {
+                    path: work_path.clone(),
+                    space: Some("work".to_string()),
+                    name: Some("api".to_string()),
+                    description: None,
+                    extensions: None,
+                    no_index: true,
+                })
+                .expect("add collection");
+            fs::write(work_path.join("a.md"), "fallback token\n").expect("write file");
+
+            let adapter = CliAdapter::new(engine);
+            adapter
+                .update(Some("work"), &["api".to_string()], true, false, false)
+                .expect("run update");
+
+            let output = adapter
+                .search(CliSearchOptions {
+                    space: Some("work"),
+                    query: "fallback",
+                    collections: &["api".to_string()],
+                    limit: 5,
+                    min_score: 0.0,
+                    deep: false,
+                    keyword: false,
+                    semantic: false,
+                    rerank: true,
+                    no_rerank: false,
+                    debug: false,
+                })
+                .expect("run auto search");
+
+            assert!(
+                output.contains("keyword only (dense unavailable)"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                output.contains("rerank skipped"),
+                "unexpected output: {output}"
+            );
+            assert!(
+                !output.contains("note:"),
+                "normal output should keep fallback messaging subtle: {output}"
             );
         });
     }
