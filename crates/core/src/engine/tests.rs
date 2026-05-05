@@ -2512,12 +2512,12 @@ fn search_validates_semantic_and_collection_scope() {
         match KboltError::from(deep) {
             KboltError::InvalidInput(message) => {
                 assert!(
-                    message.contains("deep search requires a configured expander role"),
+                    message.contains("deep search needs the optional expander"),
                     "unexpected message: {message}"
                 );
                 assert!(
-                    message.contains("[roles.expander]"),
-                    "expected role-binding guidance in message: {message}"
+                    message.contains("kbolt local enable deep"),
+                    "expected managed expander guidance in message: {message}"
                 );
             }
             other => panic!("unexpected error: {other}"),

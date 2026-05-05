@@ -319,7 +319,8 @@ impl Engine {
     ) -> Result<Vec<RankedChunk>> {
         let Some(expander) = self.expander.as_ref() else {
             return Err(KboltError::InvalidInput(
-                "deep search requires a configured expander role. bind [roles.expander] to a chat_completion provider profile in index.toml".to_string(),
+                "deep search needs the optional expander. run `kbolt local enable deep`."
+                    .to_string(),
             )
             .into());
         };
