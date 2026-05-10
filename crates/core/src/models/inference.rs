@@ -16,6 +16,7 @@ use crate::models::gateway::{
     InferenceGatewayBindings, ProviderDeployment, RerankerBinding,
 };
 use crate::models::http::{HttpJsonClient, HttpOperation, HttpTransportRecovery};
+use crate::models::tiktoken_tokenizer::TiktokenEncoding;
 use crate::models::tokenizer::{build_embedding_tokenizer_runtime, EmbeddingTokenizerSpec};
 use crate::models::variants_expander::{ChatVariantsExpander, VARIANTS_GRAMMAR};
 use crate::models::{Embedder, EmbeddingInputKind, Expander, Reranker, TokenizerRuntime};
@@ -216,7 +217,15 @@ fn build_embedding_tokenizer_from_binding(
     let managed_model_path =
         local::managed_embedder_model_path(&config.cache_dir, &binding.provider_name);
     let spec = match binding.deployment.kind {
-        GatewayProviderKind::OpenAiCompatible => EmbeddingTokenizerSpec::NoLocalTokenizer,
+        GatewayProviderKind::OpenAiCompatible => {
+            if let Some(encoding) =
+                TiktokenEncoding::for_official_openai_embedding_model(&binding.deployment.model)
+            {
+                EmbeddingTokenizerSpec::Tiktoken { encoding }
+            } else {
+                EmbeddingTokenizerSpec::NoLocalTokenizer
+            }
+        }
         GatewayProviderKind::LlamaCppServer => {
             if let Some(model_path) = managed_model_path.as_deref() {
                 EmbeddingTokenizerSpec::LlamaSpmGguf { model_path }
@@ -1134,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn openai_compatible_embedder_does_not_build_tokenizer_runtime() {
+    fn unknown_openai_compatible_embedder_does_not_build_tokenizer_runtime() {
         let body = r#"{"data":[{"index":0,"embedding":[0.1,0.2]}]}"#;
         let mut config = base_config();
         config.providers.insert(
@@ -1155,6 +1164,35 @@ mod tests {
 
         let built = build_inference_clients(&config).expect("build clients");
         assert!(built.embedding_tokenizer.is_none());
+    }
+
+    #[test]
+    fn official_openai_embedding_model_builds_tiktoken_runtime() {
+        let body = r#"{"data":[{"index":0,"embedding":[0.1,0.2]}]}"#;
+        let mut config = base_config();
+        config.providers.insert(
+            "remote_embed".to_string(),
+            ProviderProfileConfig::OpenAiCompatible {
+                operation: ProviderOperation::Embedding,
+                base_url: serve_once(200, body),
+                model: "text-embedding-3-large".to_string(),
+                api_key_env: None,
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        );
+        config.roles.embedder = Some(EmbedderRoleConfig {
+            provider: "remote_embed".to_string(),
+            batch_size: 64,
+        });
+
+        let built = build_inference_clients(&config).expect("build clients");
+        let tokenizer = built
+            .embedding_tokenizer
+            .expect("tokenizer runtime should exist");
+
+        assert_eq!(tokenizer.kind(), TokenizerRuntimeKind::Tiktoken);
+        assert_eq!(tokenizer.count_embedding_tokens("hello world").unwrap(), 2);
     }
 
     #[test]

@@ -13,6 +13,7 @@ mod http;
 mod inference;
 mod reranker;
 mod text;
+mod tiktoken_tokenizer;
 mod tokenizer;
 mod variants_expander;
 

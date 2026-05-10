@@ -6,12 +6,14 @@ use serde_json::{json, Value};
 
 use crate::models::gguf_tokenizer::LlamaSpmGgufTokenizerRuntime;
 use crate::models::http::{HttpJsonClient, HttpOperation};
+use crate::models::tiktoken_tokenizer::{TiktokenEncoding, TiktokenTokenizerRuntime};
 use crate::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TokenizerRuntimeKind {
     LlamaSpmGgufEmbedded,
     LlamaCppHttpTokenize,
+    Tiktoken,
     #[cfg(test)]
     Test,
 }
@@ -38,6 +40,7 @@ pub(crate) enum EmbeddingTokenizerSpec<'a> {
     NoLocalTokenizer,
     LlamaSpmGguf { model_path: &'a Path },
     LlamaCppHttpTokenize { client: HttpJsonClient },
+    Tiktoken { encoding: TiktokenEncoding },
 }
 
 pub(crate) fn build_embedding_tokenizer_runtime(
@@ -50,6 +53,9 @@ pub(crate) fn build_embedding_tokenizer_runtime(
         ))),
         EmbeddingTokenizerSpec::LlamaCppHttpTokenize { client } => {
             Ok(Some(Arc::new(LlamaCppHttpTokenizeRuntime { client })))
+        }
+        EmbeddingTokenizerSpec::Tiktoken { encoding } => {
+            Ok(Some(Arc::new(TiktokenTokenizerRuntime::new(encoding))))
         }
     }
 }
