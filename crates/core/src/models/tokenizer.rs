@@ -11,13 +11,13 @@ use crate::Result;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TokenizerRuntimeKind {
     LlamaSpmGgufEmbedded,
-    RemoteLlamaCppServer,
+    LlamaCppHttpTokenize,
     #[cfg(test)]
     Test,
 }
 
 #[derive(Debug, Clone)]
-struct RemoteLlamaCppTokenizerRuntime {
+struct LlamaCppHttpTokenizeRuntime {
     client: HttpJsonClient,
 }
 
@@ -35,28 +35,28 @@ pub(crate) trait TokenizerRuntime: Send + Sync {
 }
 
 pub(crate) enum EmbeddingTokenizerSpec<'a> {
-    Unconfigured,
+    NoLocalTokenizer,
     LlamaSpmGguf { model_path: &'a Path },
-    RemoteLlamaCpp { client: HttpJsonClient },
+    LlamaCppHttpTokenize { client: HttpJsonClient },
 }
 
 pub(crate) fn build_embedding_tokenizer_runtime(
     spec: EmbeddingTokenizerSpec<'_>,
 ) -> Result<Option<Arc<dyn TokenizerRuntime>>> {
     match spec {
-        EmbeddingTokenizerSpec::Unconfigured => Ok(None),
+        EmbeddingTokenizerSpec::NoLocalTokenizer => Ok(None),
         EmbeddingTokenizerSpec::LlamaSpmGguf { model_path } => Ok(Some(Arc::new(
             LlamaSpmGgufTokenizerRuntime::from_path(model_path)?,
         ))),
-        EmbeddingTokenizerSpec::RemoteLlamaCpp { client } => {
-            Ok(Some(Arc::new(RemoteLlamaCppTokenizerRuntime { client })))
+        EmbeddingTokenizerSpec::LlamaCppHttpTokenize { client } => {
+            Ok(Some(Arc::new(LlamaCppHttpTokenizeRuntime { client })))
         }
     }
 }
 
-impl TokenizerRuntime for RemoteLlamaCppTokenizerRuntime {
+impl TokenizerRuntime for LlamaCppHttpTokenizeRuntime {
     fn kind(&self) -> TokenizerRuntimeKind {
-        TokenizerRuntimeKind::RemoteLlamaCppServer
+        TokenizerRuntimeKind::LlamaCppHttpTokenize
     }
 
     fn count_embedding_tokens(&self, text: &str) -> Result<usize> {
@@ -99,8 +99,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn openai_compatible_embedding_tokenizer_is_unconfigured() {
-        let runtime = build_embedding_tokenizer_runtime(EmbeddingTokenizerSpec::Unconfigured)
+    fn openai_compatible_embedding_tokenizer_has_no_local_runtime() {
+        let runtime = build_embedding_tokenizer_runtime(EmbeddingTokenizerSpec::NoLocalTokenizer)
             .expect("build tokenizer runtime");
 
         assert!(runtime.is_none());

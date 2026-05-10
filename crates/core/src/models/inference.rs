@@ -216,12 +216,12 @@ fn build_embedding_tokenizer_from_binding(
     let managed_model_path =
         local::managed_embedder_model_path(&config.cache_dir, &binding.provider_name);
     let spec = match binding.deployment.kind {
-        GatewayProviderKind::OpenAiCompatible => EmbeddingTokenizerSpec::Unconfigured,
+        GatewayProviderKind::OpenAiCompatible => EmbeddingTokenizerSpec::NoLocalTokenizer,
         GatewayProviderKind::LlamaCppServer => {
             if let Some(model_path) = managed_model_path.as_deref() {
                 EmbeddingTokenizerSpec::LlamaSpmGguf { model_path }
             } else {
-                EmbeddingTokenizerSpec::RemoteLlamaCpp {
+                EmbeddingTokenizerSpec::LlamaCppHttpTokenize {
                     client: build_http_client(
                         config,
                         &binding.provider_name,
@@ -1046,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn llama_cpp_embedder_builds_tokenizer_runtime_against_tokenize_endpoint() {
+    fn llama_cpp_embedder_builds_http_tokenize_runtime() {
         let (base_url, requests) = serve_once_capturing_request(200, r#"{"tokens":[1,2,3]}"#);
         let mut config = base_config();
         config.providers.insert(
@@ -1068,7 +1068,7 @@ mod tests {
         let tokenizer = built
             .embedding_tokenizer
             .expect("tokenizer runtime should exist");
-        assert_eq!(tokenizer.kind(), TokenizerRuntimeKind::RemoteLlamaCppServer);
+        assert_eq!(tokenizer.kind(), TokenizerRuntimeKind::LlamaCppHttpTokenize);
         let token_count = tokenizer
             .count_embedding_tokens("hello world")
             .expect("count tokens");
@@ -1093,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn llama_cpp_tokenizer_runtime_counts_batches_through_runtime_contract() {
+    fn llama_cpp_http_tokenize_runtime_counts_batches_through_runtime_contract() {
         let base_url = serve_sequence(vec![
             TestResponse {
                 status_code: 200,
