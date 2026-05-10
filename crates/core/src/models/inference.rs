@@ -1100,7 +1100,7 @@ mod tests {
             "missing add_special payload: {request}"
         );
         assert!(
-            request.contains("\"parse_special\":false"),
+            request.contains("\"parse_special\":true"),
             "missing parse_special payload: {request}"
         );
     }

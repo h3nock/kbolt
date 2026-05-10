@@ -23,6 +23,7 @@ const GGUF_TYPE_INT64: u32 = 11;
 const GGUF_TYPE_FLOAT64: u32 = 12;
 
 const TOKEN_TYPE_NORMAL: i32 = 1;
+const TOKEN_TYPE_UNKNOWN: i32 = 2;
 const TOKEN_TYPE_CONTROL: i32 = 3;
 const TOKEN_TYPE_USER_DEFINED: i32 = 4;
 const TOKEN_TYPE_BYTE: i32 = 6;
@@ -65,7 +66,7 @@ impl TokenizerRuntime for LlamaSpmGgufTokenizerRuntime {
 #[derive(Debug)]
 struct GgufTokenizer {
     token_scores: HashMap<Vec<u8>, f64>,
-    user_defined_tokens: Vec<Vec<u8>>,
+    special_tokens: Vec<Vec<u8>>,
     byte_tokens: [bool; 256],
     add_bos: bool,
     add_eos: bool,
@@ -109,7 +110,7 @@ impl GgufTokenizer {
         }
 
         let mut token_scores: HashMap<Vec<u8>, f64> = HashMap::with_capacity(metadata.tokens.len());
-        let mut user_defined_tokens = Vec::new();
+        let mut special_tokens = Vec::new();
         let mut byte_tokens = [false; 256];
         for (index, token) in metadata.tokens.iter().enumerate() {
             let score = f64::from(metadata.scores[index]);
@@ -125,11 +126,11 @@ impl GgufTokenizer {
                 }
                 TOKEN_TYPE_USER_DEFINED => {
                     insert_token_score(&mut token_scores, token.as_bytes(), score);
-                    user_defined_tokens.push(token.as_bytes().to_vec());
+                    special_tokens.push(token.as_bytes().to_vec());
                     if token.contains(SPACE_MARKER) {
                         let unescaped = token.replace(SPACE_MARKER, " ");
                         insert_token_score(&mut token_scores, unescaped.as_bytes(), score);
-                        user_defined_tokens.push(unescaped.into_bytes());
+                        special_tokens.push(unescaped.into_bytes());
                     }
                 }
                 TOKEN_TYPE_BYTE => {
@@ -137,14 +138,16 @@ impl GgufTokenizer {
                         byte_tokens[usize::from(byte)] = true;
                     }
                 }
-                TOKEN_TYPE_CONTROL => {}
+                TOKEN_TYPE_UNKNOWN | TOKEN_TYPE_CONTROL => {
+                    special_tokens.push(token.as_bytes().to_vec());
+                }
                 _ => {}
             }
         }
 
         Ok(Self {
             token_scores,
-            user_defined_tokens: sort_user_defined_tokens(user_defined_tokens),
+            special_tokens: sort_special_tokens(special_tokens),
             byte_tokens,
             add_bos: metadata
                 .bos_token_id
@@ -170,7 +173,7 @@ impl GgufTokenizer {
         let mut cursor = 0;
         let mut previous_was_special = true;
         while cursor < input.len() {
-            if let Some(token_len) = self.match_user_defined(input, cursor) {
+            if let Some(token_len) = self.match_special(input, cursor) {
                 count +=
                     self.count_raw_segment(&input[segment_start..cursor], previous_was_special)?;
                 count += 1;
@@ -201,8 +204,8 @@ impl GgufTokenizer {
         }
     }
 
-    fn match_user_defined(&self, input: &[u8], start: usize) -> Option<usize> {
-        self.user_defined_tokens
+    fn match_special(&self, input: &[u8], start: usize) -> Option<usize> {
+        self.special_tokens
             .iter()
             .find_map(|token| input[start..].starts_with(token).then_some(token.len()))
     }
@@ -223,7 +226,7 @@ fn insert_token_score(token_scores: &mut HashMap<Vec<u8>, f64>, token: &[u8], sc
         .or_insert(score);
 }
 
-fn sort_user_defined_tokens(mut tokens: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+fn sort_special_tokens(mut tokens: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
     tokens.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
     tokens.dedup();
     tokens
@@ -725,6 +728,18 @@ mod tests {
     }
 
     #[test]
+    fn gguf_embedded_tokenizer_parses_control_tokens_for_embedding_counts() {
+        let dir = tempdir().expect("create tempdir");
+        let path = dir.path().join("model.gguf");
+        write_test_gguf(&path, default_test_tokens()).expect("write test gguf");
+
+        let runtime = LlamaSpmGgufTokenizerRuntime::from_path(&path).expect("load tokenizer");
+
+        assert_eq!(runtime.count_embedding_tokens("<bos>").unwrap(), 3);
+        assert_eq!(runtime.count_embedding_tokens("<unk>").unwrap(), 3);
+    }
+
+    #[test]
     fn gguf_embedded_tokenizer_add_space_prefix_matches_llama_spm_fragments() {
         let dir = tempdir().expect("create tempdir");
         let path = dir.path().join("model.gguf");
@@ -846,8 +861,8 @@ mod tests {
             ("HTTPRequest::new(url)?;", 8),
             ("\"quoted\" `code` [link](url)", 13),
             ("0xdeadbeef 1234567890 3.14159", 25),
-            ("<bos> literal", 6),
-            ("<start_of_turn>user\nhi<end_of_turn>", 19),
+            ("<bos> literal", 4),
+            ("<start_of_turn>user\nhi<end_of_turn>", 7),
         ];
         for (text, expected) in cases {
             assert_eq!(
@@ -1122,7 +1137,6 @@ mod tests {
             .arg(text)
             .arg("--show-count")
             .arg("--ids")
-            .arg("--no-parse-special")
             .arg("--log-disable")
             .output()
             .expect("run llama-tokenize");
