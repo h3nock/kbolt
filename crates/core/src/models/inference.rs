@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use kbolt_types::KboltError;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::config::{Config, ProviderOperation};
 use crate::local;
@@ -16,28 +16,23 @@ use crate::models::gateway::{
     InferenceGatewayBindings, ProviderDeployment, RerankerBinding,
 };
 use crate::models::http::{HttpJsonClient, HttpOperation, HttpTransportRecovery};
+use crate::models::tokenizer::build_embedding_tokenizer_runtime;
 use crate::models::variants_expander::{ChatVariantsExpander, VARIANTS_GRAMMAR};
-use crate::models::{
-    Embedder, EmbeddingInputKind, Expander, Reranker, TokenizerRuntime, TokenizerRuntimeKind,
-};
+use crate::models::{Embedder, EmbeddingInputKind, Expander, Reranker, TokenizerRuntime};
 use crate::{RecoveryNoticeSink, Result};
 
 #[cfg(test)]
 use crate::models::chat::build_chat_payload;
 #[cfg(test)]
 use crate::models::http::parse_retry_after_seconds;
+#[cfg(test)]
+use crate::models::TokenizerRuntimeKind;
 
 #[derive(Debug, Clone)]
 struct HttpApiEmbedder {
     client: HttpJsonClient,
     model: String,
     batch_size: usize,
-    endpoint_suffix: &'static str,
-}
-
-#[derive(Debug, Clone)]
-struct RemoteLlamaCppTokenizerRuntime {
-    client: HttpJsonClient,
     endpoint_suffix: &'static str,
 }
 
@@ -218,19 +213,17 @@ fn build_embedding_tokenizer_from_binding(
         .into());
     }
 
-    match binding.deployment.kind {
-        GatewayProviderKind::LlamaCppServer => Ok(Some(Arc::new(RemoteLlamaCppTokenizerRuntime {
-            client: build_http_client(
-                config,
-                &binding.provider_name,
-                &binding.deployment,
-                "embedding",
-                options,
-            ),
-            endpoint_suffix: llama_cpp_tokenize_endpoint_suffix(),
-        }))),
-        GatewayProviderKind::OpenAiCompatible => Ok(None),
-    }
+    let remote_client = match binding.deployment.kind {
+        GatewayProviderKind::LlamaCppServer => Some(build_http_client(
+            config,
+            &binding.provider_name,
+            &binding.deployment,
+            "embedding",
+            options,
+        )),
+        GatewayProviderKind::OpenAiCompatible => None,
+    };
+    build_embedding_tokenizer_runtime(binding.deployment.kind, remote_client)
 }
 
 fn build_reranker_from_binding(
@@ -405,10 +398,6 @@ fn openai_compatible_reranking_endpoint_suffix() -> &'static str {
     "rerank"
 }
 
-fn llama_cpp_tokenize_endpoint_suffix() -> &'static str {
-    "tokenize"
-}
-
 fn openai_expander_options(binding: &ExpanderBinding) -> ChatCompletionRequestOptions {
     ChatCompletionRequestOptions {
         output_mode: ChatCompletionOutputMode::Text,
@@ -495,25 +484,6 @@ impl Embedder for HttpApiEmbedder {
             self.batch_size,
             texts,
         )
-    }
-}
-
-impl TokenizerRuntime for RemoteLlamaCppTokenizerRuntime {
-    fn kind(&self) -> TokenizerRuntimeKind {
-        TokenizerRuntimeKind::RemoteLlamaCppServer
-    }
-
-    fn count_embedding_tokens(&self, text: &str) -> Result<usize> {
-        let payload = json!({
-            "content": text,
-            "add_special": true,
-        });
-        let response = self.client.post_json::<TokenizeResponseEnvelope>(
-            self.endpoint_suffix,
-            &payload,
-            HttpOperation::Tokenize,
-        )?;
-        response.token_count()
     }
 }
 
@@ -646,13 +616,6 @@ enum EmbeddingResponseEnvelope {
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum TokenizeResponseEnvelope {
-    Wrapped { tokens: Vec<Value> },
-    Direct(Vec<Value>),
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
 enum RerankerResponse {
     Scores(Vec<f32>),
     Wrapped { scores: Vec<f32> },
@@ -753,16 +716,6 @@ impl EmbeddingResponseEnvelope {
         }
 
         Ok(std::mem::take(&mut vectors))
-    }
-}
-
-impl TokenizeResponseEnvelope {
-    fn token_count(self) -> Result<usize> {
-        let tokens = match self {
-            Self::Wrapped { tokens } => tokens,
-            Self::Direct(tokens) => tokens,
-        };
-        Ok(tokens.len())
     }
 }
 

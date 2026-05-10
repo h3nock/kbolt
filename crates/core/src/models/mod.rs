@@ -22,7 +22,9 @@ pub(crate) use inference::{
     build_inference_clients_without_managed_recovery,
 };
 pub(crate) use reranker::Reranker;
-pub(crate) use tokenizer::{TokenizerRuntime, TokenizerRuntimeKind};
+pub(crate) use tokenizer::TokenizerRuntime;
+#[cfg(test)]
+pub(crate) use tokenizer::TokenizerRuntimeKind;
 
 use gateway::{resolve_inference_gateway_bindings, ProviderDeployment};
 use http::HttpJsonClient;
