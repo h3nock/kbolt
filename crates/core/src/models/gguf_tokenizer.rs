@@ -159,13 +159,7 @@ impl GgufTokenizer {
     }
 
     fn count_embedding_tokens(&self, text: &str) -> Result<usize> {
-        let mut input = String::new();
-        if self.add_space_prefix {
-            input.push(' ');
-        }
-        input.push_str(text);
-
-        let body = self.count_body_tokens(input.as_bytes())?;
+        let body = self.count_body_tokens(text.as_bytes())?;
         let specials = usize::from(self.add_bos) + usize::from(self.add_eos);
         Ok(body.saturating_add(specials))
     }
@@ -174,20 +168,37 @@ impl GgufTokenizer {
         let mut count = 0;
         let mut segment_start = 0;
         let mut cursor = 0;
+        let mut previous_was_special = true;
         while cursor < input.len() {
             if let Some(token_len) = self.match_user_defined(input, cursor) {
-                count += SpmTokenizationSession::new(&self.token_scores, &self.byte_tokens)
-                    .count_tokens(&input[segment_start..cursor])?;
+                count +=
+                    self.count_raw_segment(&input[segment_start..cursor], previous_was_special)?;
                 count += 1;
                 cursor += token_len;
                 segment_start = cursor;
+                previous_was_special = true;
             } else {
                 cursor = next_utf8_boundary(input, cursor);
             }
         }
-        count += SpmTokenizationSession::new(&self.token_scores, &self.byte_tokens)
-            .count_tokens(&input[segment_start..])?;
+        count += self.count_raw_segment(&input[segment_start..], previous_was_special)?;
         Ok(count)
+    }
+
+    fn count_raw_segment(&self, segment: &[u8], previous_was_special: bool) -> Result<usize> {
+        if segment.is_empty() {
+            return Ok(0);
+        }
+
+        if self.add_space_prefix && previous_was_special {
+            let mut prefixed = Vec::with_capacity(segment.len() + 1);
+            prefixed.push(b' ');
+            prefixed.extend_from_slice(segment);
+            SpmTokenizationSession::new(&self.token_scores, &self.byte_tokens)
+                .count_tokens(&prefixed)
+        } else {
+            SpmTokenizationSession::new(&self.token_scores, &self.byte_tokens).count_tokens(segment)
+        }
     }
 
     fn match_user_defined(&self, input: &[u8], start: usize) -> Option<usize> {
@@ -457,25 +468,34 @@ impl GgufTokenizerMetadataBuilder {
                 path.display()
             ))
         })?;
-        let token_count = tokens.len();
+        let model = self.model.ok_or_else(|| {
+            KboltError::Inference(format!(
+                "GGUF tokenizer {} is missing tokenizer.ggml.model",
+                path.display()
+            ))
+        })?;
+        let is_llama_spm = model == "llama";
         Ok(GgufTokenizerMetadata {
-            model: self.model.ok_or_else(|| {
+            model,
+            pre: self.pre,
+            scores: self.scores.ok_or_else(|| {
                 KboltError::Inference(format!(
-                    "GGUF tokenizer {} is missing tokenizer.ggml.model",
+                    "GGUF tokenizer {} is missing tokenizer.ggml.scores",
                     path.display()
                 ))
             })?,
-            pre: self.pre,
-            scores: self.scores.unwrap_or_else(|| vec![0.0; token_count]),
-            token_types: self
-                .token_types
-                .unwrap_or_else(|| vec![TOKEN_TYPE_NORMAL; token_count]),
+            token_types: self.token_types.ok_or_else(|| {
+                KboltError::Inference(format!(
+                    "GGUF tokenizer {} is missing tokenizer.ggml.token_type",
+                    path.display()
+                ))
+            })?,
             tokens,
             bos_token_id: self.bos_token_id,
             eos_token_id: self.eos_token_id,
-            add_bos_token: self.add_bos_token.unwrap_or(false),
+            add_bos_token: self.add_bos_token.unwrap_or(is_llama_spm),
             add_eos_token: self.add_eos_token.unwrap_or(false),
-            add_space_prefix: self.add_space_prefix.unwrap_or(false),
+            add_space_prefix: self.add_space_prefix.unwrap_or(is_llama_spm),
         })
     }
 }
@@ -705,6 +725,21 @@ mod tests {
     }
 
     #[test]
+    fn gguf_embedded_tokenizer_add_space_prefix_matches_llama_spm_fragments() {
+        let dir = tempdir().expect("create tempdir");
+        let path = dir.path().join("model.gguf");
+        let mut fixture = default_test_tokens();
+        fixture.add_space_prefix = true;
+        write_test_gguf(&path, fixture).expect("write test gguf");
+
+        let runtime = LlamaSpmGgufTokenizerRuntime::from_path(&path).expect("load tokenizer");
+
+        assert_eq!(runtime.count_embedding_tokens("").unwrap(), 2);
+        assert_eq!(runtime.count_embedding_tokens("hello").unwrap(), 4);
+        assert_eq!(runtime.count_embedding_tokens("  hello").unwrap(), 5);
+    }
+
+    #[test]
     fn gguf_embedded_tokenizer_rejects_unsupported_tokenizer_model() {
         let dir = tempdir().expect("create tempdir");
         let path = dir.path().join("model.gguf");
@@ -717,6 +752,53 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("unsupported GGUF tokenizer model 'gpt2'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn gguf_embedded_tokenizer_uses_llama_spm_defaults_when_special_flags_are_missing() {
+        let dir = tempdir().expect("create tempdir");
+        let path = dir.path().join("model.gguf");
+        let mut fixture = default_test_tokens();
+        fixture.include_special_flags = false;
+        write_test_gguf(&path, fixture).expect("write test gguf");
+
+        let runtime = LlamaSpmGgufTokenizerRuntime::from_path(&path).expect("load tokenizer");
+
+        assert_eq!(runtime.count_embedding_tokens("").unwrap(), 1);
+        assert_eq!(runtime.count_embedding_tokens("hello").unwrap(), 3);
+    }
+
+    #[test]
+    fn gguf_embedded_tokenizer_rejects_missing_scores() {
+        let dir = tempdir().expect("create tempdir");
+        let path = dir.path().join("model.gguf");
+        let mut fixture = default_test_tokens();
+        fixture.include_scores = false;
+        write_test_gguf(&path, fixture).expect("write test gguf");
+
+        let err =
+            LlamaSpmGgufTokenizerRuntime::from_path(&path).expect_err("missing scores should fail");
+        assert!(
+            err.to_string().contains("missing tokenizer.ggml.scores"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn gguf_embedded_tokenizer_rejects_missing_token_types() {
+        let dir = tempdir().expect("create tempdir");
+        let path = dir.path().join("model.gguf");
+        let mut fixture = default_test_tokens();
+        fixture.include_token_types = false;
+        write_test_gguf(&path, fixture).expect("write test gguf");
+
+        let err = LlamaSpmGgufTokenizerRuntime::from_path(&path)
+            .expect_err("missing token types should fail");
+        assert!(
+            err.to_string()
+                .contains("missing tokenizer.ggml.token_type"),
             "unexpected error: {err}"
         );
     }
@@ -801,6 +883,12 @@ mod tests {
         bos_id: u32,
         eos_id: u32,
         unk_id: u32,
+        add_bos: bool,
+        add_eos: bool,
+        add_space_prefix: bool,
+        include_scores: bool,
+        include_token_types: bool,
+        include_special_flags: bool,
     }
 
     fn default_test_tokens() -> TestGgufTokens {
@@ -840,6 +928,12 @@ mod tests {
             bos_id: 1,
             eos_id: 0,
             unk_id: 2,
+            add_bos: true,
+            add_eos: true,
+            add_space_prefix: false,
+            include_scores: true,
+            include_token_types: true,
+            include_special_flags: true,
         }
     }
 
@@ -848,7 +942,11 @@ mod tests {
         bytes.extend_from_slice(GGUF_MAGIC);
         write_u32(&mut bytes, GGUF_SUPPORTED_VERSION)?;
         write_u64(&mut bytes, 0)?;
-        write_u64(&mut bytes, 11)?;
+        let metadata_count = 6
+            + u64::from(fixture.include_scores)
+            + u64::from(fixture.include_token_types)
+            + if fixture.include_special_flags { 3 } else { 0 };
+        write_u64(&mut bytes, metadata_count)?;
 
         write_kv_string(&mut bytes, "tokenizer.ggml.model", fixture.model)?;
         write_kv_string(&mut bytes, "tokenizer.ggml.pre", "default")?;
@@ -861,24 +959,28 @@ mod tests {
                 .map(|(token, _, _)| *token)
                 .collect::<Vec<_>>(),
         )?;
-        write_kv_f32_array(
-            &mut bytes,
-            "tokenizer.ggml.scores",
-            &fixture
-                .tokens
-                .iter()
-                .map(|(_, score, _)| *score)
-                .collect::<Vec<_>>(),
-        )?;
-        write_kv_i32_array(
-            &mut bytes,
-            "tokenizer.ggml.token_type",
-            &fixture
-                .tokens
-                .iter()
-                .map(|(_, _, token_type)| *token_type)
-                .collect::<Vec<_>>(),
-        )?;
+        if fixture.include_scores {
+            write_kv_f32_array(
+                &mut bytes,
+                "tokenizer.ggml.scores",
+                &fixture
+                    .tokens
+                    .iter()
+                    .map(|(_, score, _)| *score)
+                    .collect::<Vec<_>>(),
+            )?;
+        }
+        if fixture.include_token_types {
+            write_kv_i32_array(
+                &mut bytes,
+                "tokenizer.ggml.token_type",
+                &fixture
+                    .tokens
+                    .iter()
+                    .map(|(_, _, token_type)| *token_type)
+                    .collect::<Vec<_>>(),
+            )?;
+        }
         write_kv_u32(&mut bytes, "tokenizer.ggml.bos_token_id", fixture.bos_id)?;
         write_kv_u32(&mut bytes, "tokenizer.ggml.eos_token_id", fixture.eos_id)?;
         write_kv_u32(
@@ -886,9 +988,15 @@ mod tests {
             "tokenizer.ggml.unknown_token_id",
             fixture.unk_id,
         )?;
-        write_kv_bool(&mut bytes, "tokenizer.ggml.add_bos_token", true)?;
-        write_kv_bool(&mut bytes, "tokenizer.ggml.add_eos_token", true)?;
-        write_kv_bool(&mut bytes, "tokenizer.ggml.add_space_prefix", false)?;
+        if fixture.include_special_flags {
+            write_kv_bool(&mut bytes, "tokenizer.ggml.add_bos_token", fixture.add_bos)?;
+            write_kv_bool(&mut bytes, "tokenizer.ggml.add_eos_token", fixture.add_eos)?;
+            write_kv_bool(
+                &mut bytes,
+                "tokenizer.ggml.add_space_prefix",
+                fixture.add_space_prefix,
+            )?;
+        }
 
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;

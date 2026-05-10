@@ -69,6 +69,7 @@ impl TokenizerRuntime for LlamaCppHttpTokenizeRuntime {
         let payload = json!({
             "content": text,
             "add_special": true,
+            "parse_special": false,
         });
         let response = self.client.post_json::<TokenizeResponseEnvelope>(
             "tokenize",
