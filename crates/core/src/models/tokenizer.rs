@@ -1,15 +1,16 @@
+use std::path::Path;
 use std::sync::Arc;
 
-use kbolt_types::KboltError;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::models::gateway::GatewayProviderKind;
+use crate::models::gguf_tokenizer::LlamaSpmGgufTokenizerRuntime;
 use crate::models::http::{HttpJsonClient, HttpOperation};
 use crate::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TokenizerRuntimeKind {
+    LlamaSpmGgufEmbedded,
     RemoteLlamaCppServer,
     #[cfg(test)]
     Test,
@@ -18,7 +19,6 @@ pub(crate) enum TokenizerRuntimeKind {
 #[derive(Debug, Clone)]
 struct RemoteLlamaCppTokenizerRuntime {
     client: HttpJsonClient,
-    endpoint_suffix: &'static str,
 }
 
 pub(crate) trait TokenizerRuntime: Send + Sync {
@@ -34,23 +34,23 @@ pub(crate) trait TokenizerRuntime: Send + Sync {
     }
 }
 
+pub(crate) enum EmbeddingTokenizerSpec<'a> {
+    Unconfigured,
+    LlamaSpmGguf { model_path: &'a Path },
+    RemoteLlamaCpp { client: HttpJsonClient },
+}
+
 pub(crate) fn build_embedding_tokenizer_runtime(
-    kind: GatewayProviderKind,
-    remote_client: Option<HttpJsonClient>,
+    spec: EmbeddingTokenizerSpec<'_>,
 ) -> Result<Option<Arc<dyn TokenizerRuntime>>> {
-    match kind {
-        GatewayProviderKind::LlamaCppServer => {
-            let client = remote_client.ok_or_else(|| {
-                KboltError::Internal(
-                    "llama.cpp embedding tokenizer runtime requires an HTTP client".to_string(),
-                )
-            })?;
-            Ok(Some(Arc::new(RemoteLlamaCppTokenizerRuntime {
-                client,
-                endpoint_suffix: llama_cpp_tokenize_endpoint_suffix(),
-            })))
+    match spec {
+        EmbeddingTokenizerSpec::Unconfigured => Ok(None),
+        EmbeddingTokenizerSpec::LlamaSpmGguf { model_path } => Ok(Some(Arc::new(
+            LlamaSpmGgufTokenizerRuntime::from_path(model_path)?,
+        ))),
+        EmbeddingTokenizerSpec::RemoteLlamaCpp { client } => {
+            Ok(Some(Arc::new(RemoteLlamaCppTokenizerRuntime { client })))
         }
-        GatewayProviderKind::OpenAiCompatible => Ok(None),
     }
 }
 
@@ -65,16 +65,12 @@ impl TokenizerRuntime for RemoteLlamaCppTokenizerRuntime {
             "add_special": true,
         });
         let response = self.client.post_json::<TokenizeResponseEnvelope>(
-            self.endpoint_suffix,
+            "tokenize",
             &payload,
             HttpOperation::Tokenize,
         )?;
         Ok(response.token_count())
     }
-}
-
-fn llama_cpp_tokenize_endpoint_suffix() -> &'static str {
-    "tokenize"
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,27 +92,35 @@ impl TokenizeResponseEnvelope {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
     use super::*;
 
     #[test]
     fn openai_compatible_embedding_tokenizer_is_unconfigured() {
-        let runtime =
-            build_embedding_tokenizer_runtime(GatewayProviderKind::OpenAiCompatible, None)
-                .expect("build tokenizer runtime");
+        let runtime = build_embedding_tokenizer_runtime(EmbeddingTokenizerSpec::Unconfigured)
+            .expect("build tokenizer runtime");
 
         assert!(runtime.is_none());
     }
 
     #[test]
-    fn llama_cpp_embedding_tokenizer_requires_remote_client_for_now() {
-        let err = match build_embedding_tokenizer_runtime(GatewayProviderKind::LlamaCppServer, None)
-        {
-            Ok(_) => panic!("missing remote client should fail"),
+    fn llama_spm_gguf_tokenizer_spec_loads_from_model_path() {
+        let dir = tempdir().expect("tempdir");
+        let model_path = dir.path().join("model.gguf");
+        fs::write(&model_path, b"not gguf").expect("write invalid gguf");
+
+        let err = match build_embedding_tokenizer_runtime(EmbeddingTokenizerSpec::LlamaSpmGguf {
+            model_path: &model_path,
+        }) {
+            Ok(_) => panic!("invalid GGUF tokenizer should fail"),
             Err(err) => err,
         };
 
         assert!(
-            err.to_string().contains("requires an HTTP client"),
+            err.to_string().contains("not a GGUF file"),
             "unexpected error: {err}"
         );
     }

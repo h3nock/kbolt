@@ -8,6 +8,7 @@ mod completion;
 mod embedder;
 mod expander;
 mod gateway;
+mod gguf_tokenizer;
 mod http;
 mod inference;
 mod reranker;

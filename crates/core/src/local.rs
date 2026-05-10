@@ -94,6 +94,15 @@ pub(crate) fn managed_provider_label(provider_name: &str) -> Option<&'static str
     managed_service_spec(provider_name).map(|spec| spec.name)
 }
 
+pub(crate) fn managed_embedder_model_path(
+    cache_dir: &Path,
+    provider_name: &str,
+) -> Option<PathBuf> {
+    managed_service_spec(provider_name)
+        .filter(|spec| spec.role == ManagedRole::Embedder)
+        .map(|spec| managed_model_path(cache_dir, spec))
+}
+
 pub(crate) fn restart_managed_service(config: &Config, provider_name: &str) -> Result<()> {
     let spec = managed_service_spec(provider_name).ok_or_else(|| {
         KboltError::Config(format!(
@@ -1129,9 +1138,10 @@ mod tests {
 
     use super::{
         apply_managed_service_config, configure_llama_server_command, endpoint_for_port,
-        load_setup_config, managed_model_path, missing_service_report, open_managed_service_log,
-        select_port, started_service_note, EMBEDDER_SPEC, EXPANDER_SPEC,
-        LLAMA_SERVER_LOG_VERBOSITY, RERANKER_SPEC,
+        load_setup_config, managed_embedder_model_path, managed_model_path, missing_service_report,
+        open_managed_service_log, select_port, started_service_note, EMBEDDER_SPEC, EXPANDER_SPEC,
+        LLAMA_SERVER_LOG_VERBOSITY, MANAGED_EMBED_PROVIDER, MANAGED_EXPAND_PROVIDER,
+        MANAGED_RERANK_PROVIDER, RERANKER_SPEC,
     };
     use crate::config::{self, Config};
 
@@ -1295,6 +1305,29 @@ operation = "embedding"
                 .join("models")
                 .join("expander")
                 .join("Qwen3-1.7B-Q8_0.gguf")
+        );
+    }
+
+    #[test]
+    fn managed_embedder_model_path_only_resolves_embedder_provider() {
+        let cache = tempdir().expect("tempdir");
+        assert_eq!(
+            managed_embedder_model_path(cache.path(), MANAGED_EMBED_PROVIDER),
+            Some(
+                cache
+                    .path()
+                    .join("models")
+                    .join("embedder")
+                    .join("embeddinggemma-300M-Q8_0.gguf")
+            )
+        );
+        assert_eq!(
+            managed_embedder_model_path(cache.path(), MANAGED_RERANK_PROVIDER),
+            None
+        );
+        assert_eq!(
+            managed_embedder_model_path(cache.path(), MANAGED_EXPAND_PROVIDER),
+            None
         );
     }
 

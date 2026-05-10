@@ -16,7 +16,7 @@ use crate::models::gateway::{
     InferenceGatewayBindings, ProviderDeployment, RerankerBinding,
 };
 use crate::models::http::{HttpJsonClient, HttpOperation, HttpTransportRecovery};
-use crate::models::tokenizer::build_embedding_tokenizer_runtime;
+use crate::models::tokenizer::{build_embedding_tokenizer_runtime, EmbeddingTokenizerSpec};
 use crate::models::variants_expander::{ChatVariantsExpander, VARIANTS_GRAMMAR};
 use crate::models::{Embedder, EmbeddingInputKind, Expander, Reranker, TokenizerRuntime};
 use crate::{RecoveryNoticeSink, Result};
@@ -213,17 +213,27 @@ fn build_embedding_tokenizer_from_binding(
         .into());
     }
 
-    let remote_client = match binding.deployment.kind {
-        GatewayProviderKind::LlamaCppServer => Some(build_http_client(
-            config,
-            &binding.provider_name,
-            &binding.deployment,
-            "embedding",
-            options,
-        )),
-        GatewayProviderKind::OpenAiCompatible => None,
+    let managed_model_path =
+        local::managed_embedder_model_path(&config.cache_dir, &binding.provider_name);
+    let spec = match binding.deployment.kind {
+        GatewayProviderKind::OpenAiCompatible => EmbeddingTokenizerSpec::Unconfigured,
+        GatewayProviderKind::LlamaCppServer => {
+            if let Some(model_path) = managed_model_path.as_deref() {
+                EmbeddingTokenizerSpec::LlamaSpmGguf { model_path }
+            } else {
+                EmbeddingTokenizerSpec::RemoteLlamaCpp {
+                    client: build_http_client(
+                        config,
+                        &binding.provider_name,
+                        &binding.deployment,
+                        "embedding",
+                        options,
+                    ),
+                }
+            }
+        }
     };
-    build_embedding_tokenizer_runtime(binding.deployment.kind, remote_client)
+    build_embedding_tokenizer_runtime(spec)
 }
 
 fn build_reranker_from_binding(
