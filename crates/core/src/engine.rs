@@ -53,7 +53,7 @@ pub struct Engine {
     storage: Storage,
     config: Config,
     embedder: Option<Arc<dyn models::Embedder>>,
-    embedding_document_sizer: Option<Arc<dyn models::EmbeddingDocumentSizer>>,
+    embedding_tokenizer: Option<Arc<dyn models::TokenizerRuntime>>,
     reranker: Option<Arc<dyn models::Reranker>>,
     expander: Option<Arc<dyn models::Expander>>,
 }
@@ -118,7 +118,7 @@ impl Engine {
             storage,
             config,
             embedder: built_models.embedder,
-            embedding_document_sizer: built_models.embedding_document_sizer,
+            embedding_tokenizer: built_models.embedding_tokenizer,
             reranker: built_models.reranker,
             expander: built_models.expander,
         })
@@ -143,16 +143,9 @@ impl Engine {
         storage: Storage,
         config: Config,
         embedder: Option<Arc<dyn models::Embedder>>,
-        embedding_document_sizer: Option<Arc<dyn models::EmbeddingDocumentSizer>>,
+        embedding_tokenizer: Option<Arc<dyn models::TokenizerRuntime>>,
     ) -> Self {
-        Self::from_parts_with_inference(
-            storage,
-            config,
-            embedder,
-            embedding_document_sizer,
-            None,
-            None,
-        )
+        Self::from_parts_with_inference(storage, config, embedder, embedding_tokenizer, None, None)
     }
 
     #[cfg(test)]
@@ -171,7 +164,7 @@ impl Engine {
         storage: Storage,
         config: Config,
         embedder: Option<Arc<dyn models::Embedder>>,
-        embedding_document_sizer: Option<Arc<dyn models::EmbeddingDocumentSizer>>,
+        embedding_tokenizer: Option<Arc<dyn models::TokenizerRuntime>>,
         reranker: Option<Arc<dyn models::Reranker>>,
         expander: Option<Arc<dyn models::Expander>>,
     ) -> Self {
@@ -181,8 +174,7 @@ impl Engine {
             storage,
             config,
             embedder: embedder.or(built_models.embedder),
-            embedding_document_sizer: embedding_document_sizer
-                .or(built_models.embedding_document_sizer),
+            embedding_tokenizer: embedding_tokenizer.or(built_models.embedding_tokenizer),
             reranker: reranker.or(built_models.reranker),
             expander: expander.or(built_models.expander),
         }

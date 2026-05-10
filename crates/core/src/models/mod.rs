@@ -12,15 +12,17 @@ mod http;
 mod inference;
 mod reranker;
 mod text;
+mod tokenizer;
 mod variants_expander;
 
-pub(crate) use embedder::{Embedder, EmbeddingDocumentSizer, EmbeddingInputKind};
+pub(crate) use embedder::{Embedder, EmbeddingInputKind};
 pub(crate) use expander::{normalize_query_text, Expander};
 pub(crate) use inference::{
     build_inference_clients, build_inference_clients_with_recovery_notice,
     build_inference_clients_without_managed_recovery,
 };
 pub(crate) use reranker::Reranker;
+pub(crate) use tokenizer::{TokenizerRuntime, TokenizerRuntimeKind};
 
 use gateway::{resolve_inference_gateway_bindings, ProviderDeployment};
 use http::HttpJsonClient;

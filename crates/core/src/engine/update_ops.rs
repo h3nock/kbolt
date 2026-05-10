@@ -460,13 +460,13 @@ impl Engine {
         failed_docs: &mut HashSet<UpdateDocKey>,
         failed_chunk_ids: &mut Vec<i64>,
     ) -> Result<Vec<PendingChunkEmbedding>> {
-        let Some(sizer) = self.embedding_document_sizer.as_ref() else {
+        let Some(tokenizer) = self.embedding_tokenizer.as_ref() else {
             return Ok(pending);
         };
 
         let mut accepted = Vec::with_capacity(pending.len());
         for embedding in pending {
-            match sizer.count_document_tokens(&embedding.text) {
+            match tokenizer.count_embedding_tokens(&embedding.text) {
                 Ok(token_count) if token_count <= embedding.max_document_tokens => {
                     accepted.push(embedding);
                 }
@@ -501,7 +501,7 @@ impl Engine {
         report: &mut UpdateReport,
         failed_docs: &mut HashSet<UpdateDocKey>,
     ) -> Result<PreparedEmbeddingPreflight> {
-        let Some(sizer) = self.embedding_document_sizer.as_ref() else {
+        let Some(tokenizer) = self.embedding_tokenizer.as_ref() else {
             return Ok(PreparedEmbeddingPreflight {
                 accepted: prepared,
                 rejected_chunk_indexes: Vec::new(),
@@ -513,7 +513,7 @@ impl Engine {
             rejected_chunk_indexes: Vec::new(),
         };
         for embedding in prepared {
-            match sizer.count_document_tokens(&embedding.text) {
+            match tokenizer.count_embedding_tokens(&embedding.text) {
                 Ok(token_count) if token_count <= embedding.max_document_tokens => {
                     preflight.accepted.push(embedding);
                 }
@@ -1078,10 +1078,10 @@ impl Engine {
 
             let policy = resolve_policy(&self.config.chunking, Some(extractor.profile_key()), None);
             let max_document_tokens = effective_chunk_hard_max(&policy);
-            let final_chunks = match self.embedding_document_sizer.as_ref() {
-                Some(sizer) => {
-                    let sizer_counter = EmbeddingDocumentSizerCounter(sizer.as_ref());
-                    match chunk_document_with_counter(&extracted, &policy, &sizer_counter) {
+            let final_chunks = match self.embedding_tokenizer.as_ref() {
+                Some(tokenizer) => {
+                    let token_counter = TokenizerRuntimeCounter(tokenizer.as_ref());
+                    match chunk_document_with_counter(&extracted, &policy, &token_counter) {
                         Ok(chunks) => chunks,
                         Err(err) => {
                             let detail = format!("chunking failed: {err}");
@@ -1332,11 +1332,11 @@ struct UpdateDocKey {
     path: String,
 }
 
-struct EmbeddingDocumentSizerCounter<'a>(&'a dyn crate::models::EmbeddingDocumentSizer);
+struct TokenizerRuntimeCounter<'a>(&'a dyn crate::models::TokenizerRuntime);
 
-impl crate::ingest::chunk::TokenCounter for EmbeddingDocumentSizerCounter<'_> {
+impl crate::ingest::chunk::TokenCounter for TokenizerRuntimeCounter<'_> {
     fn count(&self, text: &str) -> Result<usize> {
-        self.0.count_document_tokens(text)
+        self.0.count_embedding_tokens(text)
     }
 }
 

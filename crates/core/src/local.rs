@@ -960,10 +960,17 @@ fn probe_service(config: &Config, spec: &ManagedServiceSpec, port: u16) -> Resul
                 )
                 .into());
             }
-            let sizer = clients.embedding_document_sizer.as_ref().ok_or_else(|| {
-                KboltError::Inference("managed embedder tokenizer client was not built".to_string())
+            let tokenizer = clients.embedding_tokenizer.as_ref().ok_or_else(|| {
+                KboltError::Inference(
+                    "managed embedder tokenizer runtime was not built".to_string(),
+                )
             })?;
-            let tokens = sizer.count_document_tokens("kbolt local probe")?;
+            let counts = tokenizer.count_embedding_tokens_batch(&["kbolt local probe"])?;
+            let tokens = counts.into_iter().next().ok_or_else(|| {
+                KboltError::Inference(
+                    "managed embedder tokenize smoke returned no token count".to_string(),
+                )
+            })?;
             if tokens == 0 {
                 return Err(KboltError::Inference(
                     "managed embedder tokenize smoke returned zero tokens".to_string(),

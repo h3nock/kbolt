@@ -17,7 +17,9 @@ use crate::models::gateway::{
 };
 use crate::models::http::{HttpJsonClient, HttpOperation, HttpTransportRecovery};
 use crate::models::variants_expander::{ChatVariantsExpander, VARIANTS_GRAMMAR};
-use crate::models::{Embedder, EmbeddingDocumentSizer, EmbeddingInputKind, Expander, Reranker};
+use crate::models::{
+    Embedder, EmbeddingInputKind, Expander, Reranker, TokenizerRuntime, TokenizerRuntimeKind,
+};
 use crate::{RecoveryNoticeSink, Result};
 
 #[cfg(test)]
@@ -34,7 +36,7 @@ struct HttpApiEmbedder {
 }
 
 #[derive(Debug, Clone)]
-struct LlamaCppServerDocumentSizer {
+struct RemoteLlamaCppTokenizerRuntime {
     client: HttpJsonClient,
     endpoint_suffix: &'static str,
 }
@@ -60,7 +62,7 @@ struct OpenAiCompatibleEndpointReranker {
 
 pub(crate) struct BuiltInferenceClients {
     pub embedder: Option<Arc<dyn Embedder>>,
-    pub embedding_document_sizer: Option<Arc<dyn EmbeddingDocumentSizer>>,
+    pub embedding_tokenizer: Option<Arc<dyn TokenizerRuntime>>,
     pub reranker: Option<Arc<dyn Reranker>>,
     pub expander: Option<Arc<dyn Expander>>,
 }
@@ -98,12 +100,14 @@ impl std::fmt::Debug for InferenceClientBuildOptions {
 
 impl std::fmt::Debug for BuiltInferenceClients {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let embedding_tokenizer_kind = self
+            .embedding_tokenizer
+            .as_ref()
+            .map(|tokenizer| tokenizer.kind());
         f.debug_struct("BuiltInferenceClients")
             .field("embedder", &self.embedder.is_some())
-            .field(
-                "embedding_document_sizer",
-                &self.embedding_document_sizer.is_some(),
-            )
+            .field("embedding_tokenizer", &self.embedding_tokenizer.is_some())
+            .field("embedding_tokenizer_kind", &embedding_tokenizer_kind)
             .field("reranker", &self.reranker.is_some())
             .field("expander", &self.expander.is_some())
             .finish()
@@ -153,12 +157,10 @@ fn build_provider_bound_clients(
             .as_ref()
             .map(|binding| build_embedder_from_binding(config, binding, options.clone()))
             .transpose()?,
-        embedding_document_sizer: bindings
+        embedding_tokenizer: bindings
             .embedder
             .as_ref()
-            .map(|binding| {
-                build_embedding_document_sizer_from_binding(config, binding, options.clone())
-            })
+            .map(|binding| build_embedding_tokenizer_from_binding(config, binding, options.clone()))
             .transpose()?
             .flatten(),
         reranker: bindings
@@ -202,11 +204,11 @@ fn build_embedder_from_binding(
     }))
 }
 
-fn build_embedding_document_sizer_from_binding(
+fn build_embedding_tokenizer_from_binding(
     config: &Arc<Config>,
     binding: &EmbedderBinding,
     options: InferenceClientBuildOptions,
-) -> Result<Option<Arc<dyn EmbeddingDocumentSizer>>> {
+) -> Result<Option<Arc<dyn TokenizerRuntime>>> {
     if binding.deployment.operation != ProviderOperation::Embedding {
         return Err(KboltError::Inference(format!(
             "provider profile '{}' uses incompatible operation '{}' for embedder bindings",
@@ -217,7 +219,7 @@ fn build_embedding_document_sizer_from_binding(
     }
 
     match binding.deployment.kind {
-        GatewayProviderKind::LlamaCppServer => Ok(Some(Arc::new(LlamaCppServerDocumentSizer {
+        GatewayProviderKind::LlamaCppServer => Ok(Some(Arc::new(RemoteLlamaCppTokenizerRuntime {
             client: build_http_client(
                 config,
                 &binding.provider_name,
@@ -496,8 +498,12 @@ impl Embedder for HttpApiEmbedder {
     }
 }
 
-impl EmbeddingDocumentSizer for LlamaCppServerDocumentSizer {
-    fn count_document_tokens(&self, text: &str) -> Result<usize> {
+impl TokenizerRuntime for RemoteLlamaCppTokenizerRuntime {
+    fn kind(&self) -> TokenizerRuntimeKind {
+        TokenizerRuntimeKind::RemoteLlamaCppServer
+    }
+
+    fn count_embedding_tokens(&self, text: &str) -> Result<usize> {
         let payload = json!({
             "content": text,
             "add_special": true,
@@ -1077,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn llama_cpp_embedder_builds_document_sizer_against_tokenize_endpoint() {
+    fn llama_cpp_embedder_builds_tokenizer_runtime_against_tokenize_endpoint() {
         let (base_url, requests) = serve_once_capturing_request(200, r#"{"tokens":[1,2,3]}"#);
         let mut config = base_config();
         config.providers.insert(
@@ -1096,11 +1102,12 @@ mod tests {
         });
 
         let built = build_inference_clients(&config).expect("build clients");
-        let sizer = built
-            .embedding_document_sizer
-            .expect("document sizer should exist");
-        let token_count = sizer
-            .count_document_tokens("hello world")
+        let tokenizer = built
+            .embedding_tokenizer
+            .expect("tokenizer runtime should exist");
+        assert_eq!(tokenizer.kind(), TokenizerRuntimeKind::RemoteLlamaCppServer);
+        let token_count = tokenizer
+            .count_embedding_tokens("hello world")
             .expect("count tokens");
         assert_eq!(token_count, 3);
 
@@ -1123,7 +1130,48 @@ mod tests {
     }
 
     #[test]
-    fn openai_compatible_embedder_does_not_build_document_sizer() {
+    fn llama_cpp_tokenizer_runtime_counts_batches_through_runtime_contract() {
+        let base_url = serve_sequence(vec![
+            TestResponse {
+                status_code: 200,
+                body: r#"{"tokens":[1,2]}"#,
+                retry_after: None,
+            },
+            TestResponse {
+                status_code: 200,
+                body: r#"{"tokens":[1,2,3,4]}"#,
+                retry_after: None,
+            },
+        ]);
+        let mut config = base_config();
+        config.providers.insert(
+            "local_embed".to_string(),
+            ProviderProfileConfig::LlamaCppServer {
+                operation: ProviderOperation::Embedding,
+                base_url,
+                model: "embeddinggemma".to_string(),
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        );
+        config.roles.embedder = Some(EmbedderRoleConfig {
+            provider: "local_embed".to_string(),
+            batch_size: 64,
+        });
+
+        let built = build_inference_clients(&config).expect("build clients");
+        let tokenizer = built
+            .embedding_tokenizer
+            .expect("tokenizer runtime should exist");
+        let counts = tokenizer
+            .count_embedding_tokens_batch(&["alpha beta", "one two three four"])
+            .expect("count token batch");
+
+        assert_eq!(counts, vec![2, 4]);
+    }
+
+    #[test]
+    fn openai_compatible_embedder_does_not_build_tokenizer_runtime() {
         let body = r#"{"data":[{"index":0,"embedding":[0.1,0.2]}]}"#;
         let mut config = base_config();
         config.providers.insert(
@@ -1143,7 +1191,7 @@ mod tests {
         });
 
         let built = build_inference_clients(&config).expect("build clients");
-        assert!(built.embedding_document_sizer.is_none());
+        assert!(built.embedding_tokenizer.is_none());
     }
 
     #[test]

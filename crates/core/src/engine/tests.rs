@@ -78,19 +78,27 @@ impl crate::models::Embedder for PanicEmbedder {
 }
 
 #[derive(Default)]
-struct CharCountDocumentSizer;
+struct CharCountTokenizerRuntime;
 
-impl crate::models::EmbeddingDocumentSizer for CharCountDocumentSizer {
-    fn count_document_tokens(&self, text: &str) -> crate::Result<usize> {
+impl crate::models::TokenizerRuntime for CharCountTokenizerRuntime {
+    fn kind(&self) -> crate::models::TokenizerRuntimeKind {
+        crate::models::TokenizerRuntimeKind::Test
+    }
+
+    fn count_embedding_tokens(&self, text: &str) -> crate::Result<usize> {
         Ok(text.chars().count())
     }
 }
 
 #[derive(Default)]
-struct SelectiveFailureDocumentSizer;
+struct SelectiveFailureTokenizerRuntime;
 
-impl crate::models::EmbeddingDocumentSizer for SelectiveFailureDocumentSizer {
-    fn count_document_tokens(&self, text: &str) -> crate::Result<usize> {
+impl crate::models::TokenizerRuntime for SelectiveFailureTokenizerRuntime {
+    fn kind(&self) -> crate::models::TokenizerRuntimeKind {
+        crate::models::TokenizerRuntimeKind::Test
+    }
+
+    fn count_embedding_tokens(&self, text: &str) -> crate::Result<usize> {
         if text.contains("TOKENIZE_FAIL") {
             return Err(KboltError::Inference("simulated tokenize failure".to_string()).into());
         }
@@ -182,7 +190,7 @@ fn test_engine_with_embedder(embedder: Arc<dyn crate::models::Embedder>) -> Engi
 
 fn test_engine_with_embedding_runtime(
     embedder: Arc<dyn crate::models::Embedder>,
-    document_sizer: Arc<dyn crate::models::EmbeddingDocumentSizer>,
+    tokenizer: Arc<dyn crate::models::TokenizerRuntime>,
     chunking: ChunkingConfig,
 ) -> Engine {
     let root = tempdir().expect("create temp root");
@@ -193,7 +201,7 @@ fn test_engine_with_embedding_runtime(
     let storage = Storage::new(&cache_dir).expect("create storage");
     let mut config = base_test_config(config_dir, cache_dir);
     config.chunking = chunking;
-    Engine::from_parts_with_embedding_runtime(storage, config, Some(embedder), Some(document_sizer))
+    Engine::from_parts_with_embedding_runtime(storage, config, Some(embedder), Some(tokenizer))
 }
 
 fn test_engine_with_search_models(
@@ -3335,7 +3343,7 @@ fn update_rejects_oversized_embedding_payload_before_embedding() {
         chunking.defaults.boundary_overlap_tokens = 0;
         let engine = test_engine_with_embedding_runtime(
             Arc::new(PanicEmbedder),
-            Arc::new(CharCountDocumentSizer),
+            Arc::new(CharCountTokenizerRuntime),
             chunking,
         );
         engine.add_space("work", None).expect("add work");
@@ -3388,7 +3396,7 @@ fn update_rejects_oversized_backlog_payload_before_embedding() {
         chunking.defaults.boundary_overlap_tokens = 0;
         let engine = test_engine_with_embedding_runtime(
             Arc::new(PanicEmbedder),
-            Arc::new(CharCountDocumentSizer),
+            Arc::new(CharCountTokenizerRuntime),
             chunking,
         );
         engine.add_space("work", None).expect("add work");
@@ -3452,7 +3460,7 @@ fn update_preserves_existing_chunks_when_chunk_token_count_fails() {
         chunking.defaults.boundary_overlap_tokens = 0;
         let engine = test_engine_with_embedding_runtime(
             Arc::new(DeterministicEmbedder),
-            Arc::new(SelectiveFailureDocumentSizer),
+            Arc::new(SelectiveFailureTokenizerRuntime),
             chunking,
         );
         engine.add_space("work", None).expect("add work");
@@ -3550,7 +3558,7 @@ fn update_preserves_existing_chunks_when_preinsert_preflight_rejects_replacement
         chunking.defaults.boundary_overlap_tokens = 0;
         let engine = test_engine_with_embedding_runtime(
             Arc::new(DeterministicEmbedder),
-            Arc::new(CharCountDocumentSizer),
+            Arc::new(CharCountTokenizerRuntime),
             chunking,
         );
         engine.add_space("work", None).expect("add work");
@@ -3648,7 +3656,7 @@ fn update_replaces_existing_chunks_after_successful_preinsert_preflight() {
         chunking.defaults.boundary_overlap_tokens = 0;
         let engine = test_engine_with_embedding_runtime(
             Arc::new(DeterministicEmbedder),
-            Arc::new(CharCountDocumentSizer),
+            Arc::new(CharCountTokenizerRuntime),
             chunking,
         );
         engine.add_space("work", None).expect("add work");

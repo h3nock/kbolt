@@ -196,13 +196,17 @@ pub fn run(config_path: Option<&Path>) -> DoctorReport {
                 },
             ));
         }
-        if let Some(sizer) = built_models.embedding_document_sizer.as_ref() {
+        if let Some(tokenizer) = built_models.embedding_tokenizer.as_ref() {
             checks.push(timed_unit_check(
                 "roles.embedder.tokenize_smoke",
                 "roles.embedder",
-                Some("Verify the llama.cpp embedding server exposes `/tokenize`."),
+                Some("Verify the embedder tokenizer runtime can count tokens."),
                 || {
-                    let count = sizer.count_document_tokens("kbolt doctor tokenize smoke")?;
+                    let counts =
+                        tokenizer.count_embedding_tokens_batch(&["kbolt doctor tokenize smoke"])?;
+                    let count = counts.into_iter().next().ok_or_else(|| {
+                        KboltError::Inference("tokenize smoke returned no token count".to_string())
+                    })?;
                     if count == 0 {
                         return Err(KboltError::Inference(
                             "tokenize smoke returned zero tokens".to_string(),
