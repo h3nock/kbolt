@@ -3,10 +3,15 @@ use std::collections::{BinaryHeap, HashMap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use kbolt_types::KboltError;
 
 use crate::models::tokenizer::{TokenizerRuntime, TokenizerRuntimeKind};
+use crate::models::tokenizer_metrics::{
+    record_gguf_count, record_gguf_runtime_load, tokenizer_profile_enabled,
+    GgufTokenizerCountMetrics,
+};
 use crate::Result;
 
 const GGUF_MAGIC: &[u8; 4] = b"GGUF";
@@ -66,7 +71,7 @@ impl TokenizerRuntime for LlamaSpmGgufTokenizerRuntime {
 #[derive(Debug)]
 struct GgufTokenizer {
     token_scores: HashMap<Vec<u8>, f64>,
-    special_tokens: Vec<Vec<u8>>,
+    special_tokens: SpecialTokenMatcher,
     byte_tokens: [bool; 256],
     add_bos: bool,
     add_eos: bool,
@@ -145,9 +150,9 @@ impl GgufTokenizer {
             }
         }
 
-        Ok(Self {
+        let tokenizer = Self {
             token_scores,
-            special_tokens: sort_special_tokens(special_tokens),
+            special_tokens: SpecialTokenMatcher::from_tokens(special_tokens),
             byte_tokens,
             add_bos: metadata
                 .bos_token_id
@@ -158,11 +163,31 @@ impl GgufTokenizer {
                 .map(|_| metadata.add_eos_token)
                 .unwrap_or(false),
             add_space_prefix: metadata.add_space_prefix,
-        })
+        };
+        record_gguf_runtime_load(
+            tokenizer.token_scores.len(),
+            tokenizer.special_tokens.token_count(),
+            tokenizer
+                .byte_tokens
+                .iter()
+                .filter(|enabled| **enabled)
+                .count(),
+            tokenizer.add_bos,
+            tokenizer.add_eos,
+            tokenizer.add_space_prefix,
+        );
+        Ok(tokenizer)
     }
 
     fn count_embedding_tokens(&self, text: &str) -> Result<usize> {
-        let body = self.count_body_tokens(text.as_bytes())?;
+        let body = if tokenizer_profile_enabled() {
+            let mut metrics = GgufTokenizerCountMetrics::default();
+            let result = self.count_body_tokens_with_metrics(text.as_bytes(), &mut metrics);
+            record_gguf_count(metrics);
+            result?
+        } else {
+            self.count_body_tokens(text.as_bytes())?
+        };
         let specials = usize::from(self.add_bos) + usize::from(self.add_eos);
         Ok(body.saturating_add(specials))
     }
@@ -188,26 +213,185 @@ impl GgufTokenizer {
         Ok(count)
     }
 
+    fn count_body_tokens_with_metrics(
+        &self,
+        input: &[u8],
+        metrics: &mut GgufTokenizerCountMetrics,
+    ) -> Result<usize> {
+        let mut count = 0;
+        let mut segment_start = 0;
+        let mut cursor = 0;
+        let mut previous_was_special = true;
+        while cursor < input.len() {
+            metrics.special_scan_positions += 1;
+            if let Some(token_len) = self.match_special_with_metrics(input, cursor, metrics) {
+                count += self.count_raw_segment_with_metrics(
+                    &input[segment_start..cursor],
+                    previous_was_special,
+                    metrics,
+                )?;
+                count += 1;
+                cursor += token_len;
+                segment_start = cursor;
+                previous_was_special = true;
+            } else {
+                cursor = next_utf8_boundary(input, cursor);
+            }
+        }
+        count += self.count_raw_segment_with_metrics(
+            &input[segment_start..],
+            previous_was_special,
+            metrics,
+        )?;
+        Ok(count)
+    }
+
     fn count_raw_segment(&self, segment: &[u8], previous_was_special: bool) -> Result<usize> {
+        self.count_raw_segment_inner(segment, previous_was_special, None)
+    }
+
+    fn count_raw_segment_with_metrics(
+        &self,
+        segment: &[u8],
+        previous_was_special: bool,
+        metrics: &mut GgufTokenizerCountMetrics,
+    ) -> Result<usize> {
+        let started = Instant::now();
+        let result = self.count_raw_segment_inner(segment, previous_was_special, Some(metrics));
+        metrics.raw_segment_elapsed_ns +=
+            started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+        result
+    }
+
+    fn count_raw_segment_inner(
+        &self,
+        segment: &[u8],
+        previous_was_special: bool,
+        mut metrics: Option<&mut GgufTokenizerCountMetrics>,
+    ) -> Result<usize> {
         if segment.is_empty() {
             return Ok(0);
         }
 
+        if let Some(metrics) = metrics_mut(&mut metrics) {
+            metrics.raw_segments += 1;
+            metrics.raw_segment_bytes += segment.len() as u64;
+        }
+
         if self.add_space_prefix && previous_was_special {
+            if let Some(metrics) = metrics_mut(&mut metrics) {
+                metrics.prefixed_allocations += 1;
+            }
             let mut prefixed = Vec::with_capacity(segment.len() + 1);
             prefixed.push(b' ');
             prefixed.extend_from_slice(segment);
             SpmTokenizationSession::new(&self.token_scores, &self.byte_tokens)
-                .count_tokens(&prefixed)
+                .count_tokens(&prefixed, metrics)
         } else {
-            SpmTokenizationSession::new(&self.token_scores, &self.byte_tokens).count_tokens(segment)
+            SpmTokenizationSession::new(&self.token_scores, &self.byte_tokens)
+                .count_tokens(segment, metrics)
         }
     }
 
     fn match_special(&self, input: &[u8], start: usize) -> Option<usize> {
-        self.special_tokens
-            .iter()
-            .find_map(|token| input[start..].starts_with(token).then_some(token.len()))
+        self.special_tokens.match_at(input, start, None)
+    }
+
+    fn match_special_with_metrics(
+        &self,
+        input: &[u8],
+        start: usize,
+        metrics: &mut GgufTokenizerCountMetrics,
+    ) -> Option<usize> {
+        self.special_tokens.match_at(input, start, Some(metrics))
+    }
+}
+
+#[derive(Debug)]
+struct SpecialTokenMatcher {
+    nodes: Vec<SpecialTokenMatcherNode>,
+    token_count: usize,
+}
+
+#[derive(Debug, Default)]
+struct SpecialTokenMatcherNode {
+    terminal_len: Option<usize>,
+    children: Vec<(u8, usize)>,
+}
+
+impl SpecialTokenMatcher {
+    fn from_tokens(tokens: Vec<Vec<u8>>) -> Self {
+        let tokens = sort_special_tokens(tokens);
+        let mut matcher = Self {
+            nodes: vec![SpecialTokenMatcherNode::default()],
+            token_count: 0,
+        };
+        for token in tokens {
+            if !token.is_empty() {
+                matcher.insert(&token);
+                matcher.token_count += 1;
+            }
+        }
+        for node in &mut matcher.nodes {
+            node.children.sort_by_key(|(byte, _)| *byte);
+        }
+        matcher
+    }
+
+    fn token_count(&self) -> usize {
+        self.token_count
+    }
+
+    fn insert(&mut self, token: &[u8]) {
+        let mut node_index = 0;
+        for byte in token {
+            let next_index = self.nodes[node_index]
+                .children
+                .iter()
+                .find_map(|(child_byte, child_index)| {
+                    (*child_byte == *byte).then_some(*child_index)
+                })
+                .unwrap_or_else(|| {
+                    let child_index = self.nodes.len();
+                    self.nodes.push(SpecialTokenMatcherNode::default());
+                    self.nodes[node_index].children.push((*byte, child_index));
+                    child_index
+                });
+            node_index = next_index;
+        }
+        self.nodes[node_index].terminal_len = Some(token.len());
+    }
+
+    fn match_at(
+        &self,
+        input: &[u8],
+        start: usize,
+        mut metrics: Option<&mut GgufTokenizerCountMetrics>,
+    ) -> Option<usize> {
+        let mut node_index = 0;
+        let mut best = None;
+        for byte in &input[start..] {
+            if let Some(metrics) = metrics_mut(&mut metrics) {
+                metrics.special_token_probes += 1;
+            }
+            let node = &self.nodes[node_index];
+            let Ok(child_offset) = node
+                .children
+                .binary_search_by_key(byte, |(child_byte, _)| *child_byte)
+            else {
+                break;
+            };
+            node_index = node.children[child_offset].1;
+            if let Some(token_len) = self.nodes[node_index].terminal_len {
+                best = Some(token_len);
+            }
+        }
+        if best.is_some() {
+            if let Some(metrics) = metrics_mut(&mut metrics) {
+                metrics.special_matches += 1;
+            }
+        }
+        best
     }
 }
 
@@ -250,7 +434,11 @@ impl<'a> SpmTokenizationSession<'a> {
         }
     }
 
-    fn count_tokens(mut self, input: &[u8]) -> Result<usize> {
+    fn count_tokens(
+        mut self,
+        input: &[u8],
+        mut metrics: Option<&mut GgufTokenizerCountMetrics>,
+    ) -> Result<usize> {
         if input.is_empty() {
             return Ok(0);
         }
@@ -271,9 +459,12 @@ impl<'a> SpmTokenizationSession<'a> {
             });
             symbol_index += 1;
         }
+        if let Some(metrics) = metrics_mut(&mut metrics) {
+            metrics.spm_symbols += self.symbols.len() as u64;
+        }
 
         for index in 1..self.symbols.len() {
-            self.try_add_bigram(index - 1, index, input);
+            self.try_add_bigram(index - 1, index, input, &mut metrics);
         }
 
         while let Some(bigram) = self.work_queue.pop() {
@@ -283,6 +474,9 @@ impl<'a> SpmTokenizationSession<'a> {
                 continue;
             }
 
+            if let Some(metrics) = metrics_mut(&mut metrics) {
+                metrics.merges += 1;
+            }
             self.symbols[bigram.left].len += right.len;
             self.symbols[bigram.right].len = 0;
             self.symbols[bigram.left].next = right.next;
@@ -291,10 +485,10 @@ impl<'a> SpmTokenizationSession<'a> {
             }
 
             if let Some(prev) = left.prev {
-                self.try_add_bigram(prev, bigram.left, input);
+                self.try_add_bigram(prev, bigram.left, input, &mut metrics);
             }
             if let Some(next) = self.symbols[bigram.left].next {
-                self.try_add_bigram(bigram.left, next, input);
+                self.try_add_bigram(bigram.left, next, input, &mut metrics);
             }
         }
 
@@ -314,19 +508,35 @@ impl<'a> SpmTokenizationSession<'a> {
                         .into());
                     }
                 }
-                count += text.len();
+                let fallback_tokens = text.len();
+                if let Some(metrics) = metrics_mut(&mut metrics) {
+                    metrics.byte_fallback_tokens += fallback_tokens as u64;
+                }
+                count += fallback_tokens;
             }
             index = symbol.next;
         }
         Ok(count)
     }
 
-    fn try_add_bigram(&mut self, left: usize, right: usize, input: &[u8]) {
+    fn try_add_bigram(
+        &mut self,
+        left: usize,
+        right: usize,
+        input: &[u8],
+        metrics: &mut Option<&mut GgufTokenizerCountMetrics>,
+    ) {
         let left_symbol = self.symbols[left];
         let right_symbol = self.symbols[right];
         let size = left_symbol.len + right_symbol.len;
         let text = &input[left_symbol.start..left_symbol.start + size];
+        if let Some(metrics) = metrics_mut(metrics) {
+            metrics.bigram_probes += 1;
+        }
         if let Some(score) = self.token_scores.get(text) {
+            if let Some(metrics) = metrics_mut(metrics) {
+                metrics.bigram_hits += 1;
+            }
             self.work_queue.push(SpmBigram {
                 left,
                 right,
@@ -335,6 +545,12 @@ impl<'a> SpmTokenizationSession<'a> {
             });
         }
     }
+}
+
+fn metrics_mut<'a>(
+    metrics: &'a mut Option<&mut GgufTokenizerCountMetrics>,
+) -> Option<&'a mut GgufTokenizerCountMetrics> {
+    metrics.as_mut().map(|metrics| &mut **metrics)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -737,6 +953,19 @@ mod tests {
 
         assert_eq!(runtime.count_embedding_tokens("<bos>").unwrap(), 3);
         assert_eq!(runtime.count_embedding_tokens("<unk>").unwrap(), 3);
+    }
+
+    #[test]
+    fn special_token_matcher_prefers_longest_match() {
+        let matcher = SpecialTokenMatcher::from_tokens(vec![
+            b"<x>".to_vec(),
+            b"<x>tail".to_vec(),
+            b"<other>".to_vec(),
+        ]);
+
+        assert_eq!(matcher.match_at(b"<x>tail", 0, None), Some(7));
+        assert_eq!(matcher.match_at(b"<x>suffix", 0, None), Some(3));
+        assert_eq!(matcher.match_at(b"plain", 0, None), None);
     }
 
     #[test]
