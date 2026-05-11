@@ -15,6 +15,7 @@ mod reranker;
 mod text;
 mod tiktoken_tokenizer;
 mod tokenizer;
+mod tokenizer_metrics;
 mod variants_expander;
 
 pub(crate) use embedder::{Embedder, EmbeddingInputKind};
@@ -27,6 +28,10 @@ pub(crate) use reranker::Reranker;
 pub(crate) use tokenizer::TokenizerRuntime;
 #[cfg(test)]
 pub(crate) use tokenizer::TokenizerRuntimeKind;
+pub(crate) use tokenizer_metrics::{
+    record_tokenizer_count, reset_tokenizer_profile, write_tokenizer_profile_if_requested,
+    TokenizerCallScope,
+};
 
 use gateway::{resolve_inference_gateway_bindings, ProviderDeployment};
 use http::HttpJsonClient;

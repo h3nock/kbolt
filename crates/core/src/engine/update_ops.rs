@@ -8,6 +8,7 @@ impl Engine {
     }
 
     pub(super) fn update_unlocked(&self, options: UpdateOptions) -> Result<UpdateReport> {
+        models::reset_tokenizer_profile();
         let started = Instant::now();
         let mut report = UpdateReport {
             scanned_docs: 0,
@@ -32,6 +33,7 @@ impl Engine {
         })?;
         if targets.is_empty() {
             report.elapsed_ms = started.elapsed().as_millis() as u64;
+            models::write_tokenizer_profile_if_requested(report.elapsed_ms)?;
             return Ok(report);
         }
         let repair_scope = UpdateRepairScope::from_options_and_targets(&options, &targets);
@@ -106,6 +108,7 @@ impl Engine {
 
         report.failed_docs = failed_docs.len();
         report.elapsed_ms = started.elapsed().as_millis() as u64;
+        models::write_tokenizer_profile_if_requested(report.elapsed_ms)?;
         Ok(report)
     }
 
@@ -464,9 +467,18 @@ impl Engine {
             return Ok(pending);
         };
 
+        let runtime_kind = tokenizer.kind();
         let mut accepted = Vec::with_capacity(pending.len());
         for embedding in pending {
-            match tokenizer.count_embedding_tokens(&embedding.text) {
+            let started = Instant::now();
+            let result = tokenizer.count_embedding_tokens(&embedding.text);
+            match models::record_tokenizer_count(
+                models::TokenizerCallScope::EmbedPreflightPending,
+                runtime_kind,
+                embedding.text.len(),
+                started.elapsed(),
+                result,
+            ) {
                 Ok(token_count) if token_count <= embedding.max_document_tokens => {
                     accepted.push(embedding);
                 }
@@ -508,12 +520,21 @@ impl Engine {
             });
         };
 
+        let runtime_kind = tokenizer.kind();
         let mut preflight = PreparedEmbeddingPreflight {
             accepted: Vec::with_capacity(prepared.len()),
             rejected_chunk_indexes: Vec::new(),
         };
         for embedding in prepared {
-            match tokenizer.count_embedding_tokens(&embedding.text) {
+            let started = Instant::now();
+            let result = tokenizer.count_embedding_tokens(&embedding.text);
+            match models::record_tokenizer_count(
+                models::TokenizerCallScope::EmbedPreflightPrepared,
+                runtime_kind,
+                embedding.text.len(),
+                started.elapsed(),
+                result,
+            ) {
                 Ok(token_count) if token_count <= embedding.max_document_tokens => {
                     preflight.accepted.push(embedding);
                 }
@@ -1336,7 +1357,15 @@ struct TokenizerRuntimeCounter<'a>(&'a dyn crate::models::TokenizerRuntime);
 
 impl crate::ingest::chunk::TokenCounter for TokenizerRuntimeCounter<'_> {
     fn count(&self, text: &str) -> Result<usize> {
-        self.0.count_embedding_tokens(text)
+        let started = Instant::now();
+        let result = self.0.count_embedding_tokens(text);
+        models::record_tokenizer_count(
+            models::TokenizerCallScope::Chunking,
+            self.0.kind(),
+            text.len(),
+            started.elapsed(),
+            result,
+        )
     }
 }
 

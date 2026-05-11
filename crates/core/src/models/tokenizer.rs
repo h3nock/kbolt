@@ -9,7 +9,7 @@ use crate::models::http::{HttpJsonClient, HttpOperation};
 use crate::models::tiktoken_tokenizer::{TiktokenEncoding, TiktokenTokenizerRuntime};
 use crate::Result;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum TokenizerRuntimeKind {
     LlamaSpmGgufEmbedded,
     LlamaCppHttpTokenize,
