@@ -1654,14 +1654,20 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .usearch_index
             .write()
             .map_err(|_| CoreError::poisoned("usearch index"))?;
+        let ensure_started = std::time::Instant::now();
         ensure_usearch_dimensions(&mut index, expected_dimensions)?;
+        crate::profile::record_update_stage("usearch_ensure_dimensions", ensure_started.elapsed());
+
         let target_capacity = index.size().saturating_add(entries.len());
+        let reserve_started = std::time::Instant::now();
         index.reserve(target_capacity).map_err(|err| {
             CoreError::Internal(format!(
                 "usearch reserve failed for {target_capacity} items: {err}"
             ))
         })?;
+        crate::profile::record_update_stage("usearch_reserve", reserve_started.elapsed());
 
+        let add_started = std::time::Instant::now();
         for (key, vector) in entries {
             let key = u64::try_from(*key).map_err(|_| {
                 CoreError::Internal(format!("usearch key must be non-negative: {}", *key))
@@ -1670,8 +1676,11 @@ CREATE TABLE IF NOT EXISTS embeddings (
                 .add::<f32>(key, vector)
                 .map_err(|err| CoreError::Internal(format!("usearch add failed: {err}")))?;
         }
+        crate::profile::record_update_stage("usearch_add", add_started.elapsed());
 
+        let save_started = std::time::Instant::now();
         save_usearch_index(&index, &space_indexes.usearch_path)?;
+        crate::profile::record_update_stage("usearch_save", save_started.elapsed());
         Ok(())
     }
 
@@ -1686,6 +1695,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .write()
             .map_err(|_| CoreError::poisoned("usearch index"))?;
 
+        let delete_started = std::time::Instant::now();
         for key in keys {
             let key = u64::try_from(*key).map_err(|_| {
                 CoreError::Internal(format!("usearch key must be non-negative: {}", *key))
@@ -1694,8 +1704,11 @@ CREATE TABLE IF NOT EXISTS embeddings (
                 .remove(key)
                 .map_err(|err| CoreError::Internal(format!("usearch remove failed: {err}")))?;
         }
+        crate::profile::record_update_stage("usearch_delete", delete_started.elapsed());
 
+        let save_started = std::time::Instant::now();
         save_usearch_index(&index, &space_indexes.usearch_path)?;
+        crate::profile::record_update_stage("usearch_save", save_started.elapsed());
         Ok(())
     }
 
@@ -1756,10 +1769,12 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .usearch_index
             .write()
             .map_err(|_| CoreError::poisoned("usearch index"))?;
+        let clear_started = std::time::Instant::now();
         index
             .reset()
             .map_err(|err| CoreError::Internal(format!("usearch clear failed: {err}")))?;
         std::fs::File::create(&space_indexes.usearch_path)?;
+        crate::profile::record_update_stage("usearch_clear", clear_started.elapsed());
         Ok(())
     }
 

@@ -8,6 +8,7 @@ impl Engine {
     }
 
     pub(super) fn update_unlocked(&self, options: UpdateOptions) -> Result<UpdateReport> {
+        let _profile = crate::profile::UpdateProfileGuard::start();
         let started = Instant::now();
         let mut report = UpdateReport {
             scanned_docs: 0,
@@ -26,9 +27,11 @@ impl Engine {
         };
         let mut failed_docs = HashSet::new();
 
-        let targets = self.resolve_targets(TargetScope {
-            space: options.space.as_deref(),
-            collections: &options.collections,
+        let targets = crate::profile::timed_update_stage("resolve_targets", || {
+            self.resolve_targets(TargetScope {
+                space: options.space.as_deref(),
+                collections: &options.collections,
+            })
         })?;
         if targets.is_empty() {
             report.elapsed_ms = started.elapsed().as_millis() as u64;
@@ -36,10 +39,14 @@ impl Engine {
         }
         let repair_scope = UpdateRepairScope::from_options_and_targets(&options, &targets);
 
-        self.reconcile_dense_integrity(&targets, &repair_scope, &options)?;
+        crate::profile::timed_update_stage("dense_integrity", || {
+            self.reconcile_dense_integrity(&targets, &repair_scope, &options)
+        })?;
 
         if !options.dry_run {
-            self.replay_fts_dirty_documents(&repair_scope, &mut report, &mut failed_docs)?;
+            crate::profile::timed_update_stage("fts_dirty_replay", || {
+                self.replay_fts_dirty_documents(&repair_scope, &mut report, &mut failed_docs)
+            })?;
         }
 
         let mut fts_dirty_by_space: HashMap<String, HashSet<i64>> = HashMap::new();
@@ -58,34 +65,43 @@ impl Engine {
         }
 
         if !options.dry_run {
-            self.flush_buffered_embeddings(
-                &mut pending_embeddings,
-                &mut failed_embedding_chunk_ids,
-                &mut report,
-                &mut failed_docs,
-            )?;
+            crate::profile::timed_update_stage("embedding_flush_buffered", || {
+                self.flush_buffered_embeddings(
+                    &mut pending_embeddings,
+                    &mut failed_embedding_chunk_ids,
+                    &mut report,
+                    &mut failed_docs,
+                )
+            })?;
 
             for (space, doc_ids) in fts_dirty_by_space {
                 if doc_ids.is_empty() {
                     continue;
                 }
 
-                self.storage.commit_tantivy(&space)?;
+                crate::profile::timed_update_stage("tantivy_commit", || {
+                    self.storage.commit_tantivy(&space)
+                })?;
                 let mut ids = doc_ids.into_iter().collect::<Vec<_>>();
                 ids.sort_unstable();
-                self.storage.batch_clear_fts_dirty(&ids)?;
+                crate::profile::timed_update_stage("sqlite_clear_fts_dirty", || {
+                    self.storage.batch_clear_fts_dirty(&ids)
+                })?;
             }
 
-            self.embed_pending_chunks(
-                &repair_scope,
-                &options,
-                &mut failed_embedding_chunk_ids,
-                &mut report,
-                &mut failed_docs,
-            )?;
+            crate::profile::timed_update_stage("embedding_backlog", || {
+                self.embed_pending_chunks(
+                    &repair_scope,
+                    &options,
+                    &mut failed_embedding_chunk_ids,
+                    &mut report,
+                    &mut failed_docs,
+                )
+            })?;
 
-            let reaped =
-                self.list_reapable_documents_for_scope(self.config.reaping.days, &repair_scope)?;
+            let reaped = crate::profile::timed_update_stage("sqlite_list_reapable", || {
+                self.list_reapable_documents_for_scope(self.config.reaping.days, &repair_scope)
+            })?;
             let mut reaped_doc_ids = Vec::with_capacity(reaped.len());
             let mut chunk_ids_by_space: HashMap<String, Vec<i64>> = HashMap::new();
             for document in reaped {
@@ -98,9 +114,13 @@ impl Engine {
                 }
             }
             for (space, chunk_ids) in chunk_ids_by_space {
-                self.purge_space_chunks(&space, &chunk_ids)?;
+                crate::profile::timed_update_stage("purge_reaped_indexes", || {
+                    self.purge_space_chunks(&space, &chunk_ids)
+                })?;
             }
-            self.storage.delete_documents(&reaped_doc_ids)?;
+            crate::profile::timed_update_stage("sqlite_delete_reaped_documents", || {
+                self.storage.delete_documents(&reaped_doc_ids)
+            })?;
             report.reaped_docs = reaped_doc_ids.len();
         }
 
@@ -187,7 +207,9 @@ impl Engine {
         let mut after_chunk_id = 0_i64;
         loop {
             let backlog =
-                self.get_unembedded_chunks_for_scope(model, repair_scope, after_chunk_id, 64)?;
+                crate::profile::timed_update_stage("sqlite_get_unembedded_chunks", || {
+                    self.get_unembedded_chunks_for_scope(model, repair_scope, after_chunk_id, 64)
+                })?;
             if backlog.is_empty() {
                 break;
             }
@@ -206,6 +228,7 @@ impl Engine {
 
                 let full_path = record.collection_path.join(&record.doc_path);
                 if !bytes_by_path.contains_key(&full_path) {
+                    let read_started = Instant::now();
                     let bytes = match std::fs::read(&full_path) {
                         Ok(bytes) => Some(bytes),
                         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
@@ -222,6 +245,10 @@ impl Engine {
                             None
                         }
                     };
+                    crate::profile::record_update_stage(
+                        "embedding_backlog_read",
+                        read_started.elapsed(),
+                    );
                     bytes_by_path.insert(full_path.clone(), bytes);
                 }
 
@@ -341,7 +368,11 @@ impl Engine {
             .iter()
             .map(|embedding| embedding.text.clone())
             .collect::<Vec<_>>();
-        match embedder.embed_batch(crate::models::EmbeddingInputKind::Document, &texts) {
+        crate::profile::increment_update_count("embedding_batch_calls", 1);
+        crate::profile::increment_update_count("embedding_input_texts", texts.len() as u64);
+        match crate::profile::timed_update_stage("embedding_http", || {
+            embedder.embed_batch(crate::models::EmbeddingInputKind::Document, &texts)
+        }) {
             Ok(vectors) => {
                 if let Some(detail) = invalid_pending_embedding_batch_detail(&pending, &vectors) {
                     return self.split_pending_embedding_batch(
@@ -445,10 +476,13 @@ impl Engine {
                 .iter()
                 .map(|(chunk_id, vector)| (*chunk_id, vector.as_slice()))
                 .collect::<Vec<_>>();
+            crate::profile::increment_update_count("usearch_vectors", refs.len() as u64);
             self.storage.batch_insert_usearch(&space, &refs)?;
         }
 
-        self.storage.insert_embeddings(&embedding_rows)?;
+        crate::profile::timed_update_stage("sqlite_insert_embeddings", || {
+            self.storage.insert_embeddings(&embedding_rows)
+        })?;
         report.embedded_chunks = report.embedded_chunks.saturating_add(embedding_rows.len());
         Ok(())
     }
@@ -466,7 +500,12 @@ impl Engine {
 
         let mut accepted = Vec::with_capacity(pending.len());
         for embedding in pending {
-            match sizer.count_document_tokens(&embedding.text) {
+            match count_document_tokens_profiled(
+                sizer.as_ref(),
+                &embedding.text,
+                "tokenize_preflight",
+                "tokenize_preflight_calls",
+            ) {
                 Ok(token_count) if token_count <= embedding.max_document_tokens => {
                     accepted.push(embedding);
                 }
@@ -513,7 +552,12 @@ impl Engine {
             rejected_chunk_indexes: Vec::new(),
         };
         for embedding in prepared {
-            match sizer.count_document_tokens(&embedding.text) {
+            match count_document_tokens_profiled(
+                sizer.as_ref(),
+                &embedding.text,
+                "tokenize_preflight",
+                "tokenize_preflight_calls",
+            ) {
                 Ok(token_count) if token_count <= embedding.max_document_tokens => {
                     preflight.accepted.push(embedding);
                 }
@@ -792,7 +836,9 @@ impl Engine {
         failed_chunk_ids: &mut HashSet<i64>,
         failed_docs: &mut HashSet<UpdateDocKey>,
     ) -> Result<()> {
-        let all_documents = self.storage.list_documents(target.collection.id, false)?;
+        let all_documents = crate::profile::timed_update_stage("sqlite_list_documents", || {
+            self.storage.list_documents(target.collection.id, false)
+        })?;
         let mut docs_by_path: HashMap<String, DocumentRow> = all_documents
             .into_iter()
             .map(|doc| (doc.path.clone(), doc))
@@ -899,8 +945,10 @@ impl Engine {
             };
 
             report.scanned_docs += 1;
+            crate::profile::increment_update_count("docs_scanned", 1);
             seen_paths.insert(relative_path.clone());
 
+            let scan_started = Instant::now();
             let metadata = match entry.metadata() {
                 Ok(data) => data,
                 Err(err) => {
@@ -921,6 +969,10 @@ impl Engine {
                     report
                         .errors
                         .push(file_error(Some(entry.path().to_path_buf()), detail));
+                    crate::profile::record_update_stage(
+                        "scan_metadata_mtime",
+                        scan_started.elapsed(),
+                    );
                     continue;
                 }
             };
@@ -945,6 +997,10 @@ impl Engine {
                     report
                         .errors
                         .push(file_error(Some(entry.path().to_path_buf()), detail));
+                    crate::profile::record_update_stage(
+                        "scan_metadata_mtime",
+                        scan_started.elapsed(),
+                    );
                     continue;
                 }
             };
@@ -960,10 +1016,16 @@ impl Engine {
                         UpdateDecisionKind::SkippedMtime,
                         None,
                     );
+                    crate::profile::record_update_stage(
+                        "scan_metadata_mtime",
+                        scan_started.elapsed(),
+                    );
                     continue;
                 }
             }
+            crate::profile::record_update_stage("scan_metadata_mtime", scan_started.elapsed());
 
+            let read_hash_started = Instant::now();
             let bytes = match std::fs::read(entry.path()) {
                 Ok(data) => data,
                 Err(err) => {
@@ -984,10 +1046,12 @@ impl Engine {
                     report
                         .errors
                         .push(file_error(Some(entry.path().to_path_buf()), detail));
+                    crate::profile::record_update_stage("read_hash", read_hash_started.elapsed());
                     continue;
                 }
             };
             let hash = sha256_hex(&bytes);
+            crate::profile::record_update_stage("read_hash", read_hash_started.elapsed());
             let mut title = file_title(entry.path());
             let mut title_source = DocumentTitleSource::FilenameFallback;
 
@@ -1019,7 +1083,9 @@ impl Engine {
                     }
 
                     if !options.dry_run {
-                        self.storage.refresh_document_activity(doc.id, &modified)?;
+                        crate::profile::timed_update_stage("sqlite_refresh_document", || {
+                            self.storage.refresh_document_activity(doc.id, &modified)
+                        })?;
                     }
                     continue;
                 }
@@ -1043,7 +1109,9 @@ impl Engine {
                 continue;
             }
 
-            let extracted = match extractor.extract(entry.path(), &bytes) {
+            let extracted = match crate::profile::timed_update_stage("extract", || {
+                extractor.extract(entry.path(), &bytes)
+            }) {
                 Ok(document) => document,
                 Err(err) => {
                     let detail = format!("extract failed: {err}");
@@ -1078,35 +1146,41 @@ impl Engine {
 
             let policy = resolve_policy(&self.config.chunking, Some(extractor.profile_key()), None);
             let max_document_tokens = effective_chunk_hard_max(&policy);
-            let final_chunks = match self.embedding_document_sizer.as_ref() {
+            let chunk_started = Instant::now();
+            let final_chunks_result = match self.embedding_document_sizer.as_ref() {
                 Some(sizer) => {
-                    let sizer_counter = EmbeddingDocumentSizerCounter(sizer.as_ref());
-                    match chunk_document_with_counter(&extracted, &policy, &sizer_counter) {
-                        Ok(chunks) => chunks,
-                        Err(err) => {
-                            let detail = format!("chunking failed: {err}");
-                            failed_docs.insert(update_doc_key(
-                                &target.space,
-                                &target.collection.path,
-                                &relative_path,
-                            ));
-                            push_update_decision(
-                                report,
-                                options,
-                                target,
-                                &relative_path,
-                                UpdateDecisionKind::ExtractFailed,
-                                Some(detail.clone()),
-                            );
-                            report
-                                .errors
-                                .push(file_error(Some(entry.path().to_path_buf()), detail));
-                            continue;
-                        }
-                    }
+                    let sizer_counter = EmbeddingDocumentSizerCounter {
+                        inner: sizer.as_ref(),
+                    };
+                    chunk_document_with_counter(&extracted, &policy, &sizer_counter)
                 }
-                None => chunk_document(&extracted, &policy),
+                None => Ok(chunk_document(&extracted, &policy)),
             };
+            crate::profile::record_update_stage("chunk", chunk_started.elapsed());
+            let final_chunks = match final_chunks_result {
+                Ok(chunks) => chunks,
+                Err(err) => {
+                    let detail = format!("chunking failed: {err}");
+                    failed_docs.insert(update_doc_key(
+                        &target.space,
+                        &target.collection.path,
+                        &relative_path,
+                    ));
+                    push_update_decision(
+                        report,
+                        options,
+                        target,
+                        &relative_path,
+                        UpdateDecisionKind::ExtractFailed,
+                        Some(detail.clone()),
+                    );
+                    report
+                        .errors
+                        .push(file_error(Some(entry.path().to_path_buf()), detail));
+                    continue;
+                }
+            };
+            crate::profile::increment_update_count("chunks_created", final_chunks.len() as u64);
 
             let doc_key = update_doc_key(&target.space, &target.collection.path, &relative_path);
             let chunk_inserts = final_chunks
@@ -1124,7 +1198,7 @@ impl Engine {
             let mut prepared_embeddings = Vec::new();
             let mut rejected_chunk_indexes = Vec::new();
             if !chunk_inserts.is_empty() && !options.no_embed && self.embedder.is_some() {
-                let preflight = self.preflight_prepared_embeddings(
+                let prepared = crate::profile::timed_update_stage("embedding_prepare_text", || {
                     prepare_chunk_embeddings(
                         &final_chunks,
                         &bytes,
@@ -1132,10 +1206,10 @@ impl Engine {
                         target,
                         entry.path(),
                         max_document_tokens,
-                    ),
-                    report,
-                    failed_docs,
-                )?;
+                    )
+                });
+                let preflight =
+                    self.preflight_prepared_embeddings(prepared, report, failed_docs)?;
                 prepared_embeddings = preflight.accepted;
                 rejected_chunk_indexes = preflight.rejected_chunk_indexes;
                 if existing.is_some() && !rejected_chunk_indexes.is_empty() {
@@ -1151,24 +1225,35 @@ impl Engine {
                 }
             }
 
-            let doc_id = self.storage.upsert_document(
-                target.collection.id,
-                &relative_path,
-                &title,
-                title_source,
-                &hash,
-                &modified,
-            )?;
+            let doc_id = crate::profile::timed_update_stage("sqlite_upsert_document", || {
+                self.storage.upsert_document(
+                    target.collection.id,
+                    &relative_path,
+                    &title,
+                    title_source,
+                    &hash,
+                    &modified,
+                )
+            })?;
 
             if let Some(doc) = existing.as_ref() {
-                let old_chunk_ids = self.storage.delete_chunks_for_document(doc.id)?;
+                let old_chunk_ids = crate::profile::timed_update_stage(
+                    "sqlite_delete_chunks_for_document",
+                    || self.storage.delete_chunks_for_document(doc.id),
+                )?;
                 if !old_chunk_ids.is_empty() {
-                    self.storage.delete_tantivy(&target.space, &old_chunk_ids)?;
-                    self.storage.delete_usearch(&target.space, &old_chunk_ids)?;
+                    crate::profile::timed_update_stage("tantivy_delete", || {
+                        self.storage.delete_tantivy(&target.space, &old_chunk_ids)
+                    })?;
+                    crate::profile::timed_update_stage("usearch_delete_save", || {
+                        self.storage.delete_usearch(&target.space, &old_chunk_ids)
+                    })?;
                 }
             }
 
-            let chunk_ids = self.storage.insert_chunks(doc_id, &chunk_inserts)?;
+            let chunk_ids = crate::profile::timed_update_stage("sqlite_insert_chunks", || {
+                self.storage.insert_chunks(doc_id, &chunk_inserts)
+            })?;
             for chunk_index in rejected_chunk_indexes {
                 if let Some(chunk_id) = chunk_ids.get(chunk_index) {
                     failed_chunk_ids.insert(*chunk_id);
@@ -1220,7 +1305,10 @@ impl Engine {
                         ),
                     })
                     .collect::<Vec<_>>();
-                self.storage.index_tantivy(&target.space, &entries)?;
+                crate::profile::increment_update_count("tantivy_entries", entries.len() as u64);
+                crate::profile::timed_update_stage("tantivy_add", || {
+                    self.storage.index_tantivy(&target.space, &entries)
+                })?;
                 fts_dirty_by_space
                     .entry(target.space.clone())
                     .or_default()
@@ -1229,14 +1317,16 @@ impl Engine {
 
             docs_by_path.insert(
                 relative_path.clone(),
-                self.storage
-                    .get_document_by_path(target.collection.id, &relative_path)?
-                    .ok_or_else(|| {
-                        KboltError::Internal(format!(
-                            "document missing after upsert: collection={}, path={relative_path}",
-                            target.collection.id
-                        ))
-                    })?,
+                crate::profile::timed_update_stage("sqlite_get_document_after_write", || {
+                    self.storage
+                        .get_document_by_path(target.collection.id, &relative_path)
+                })?
+                .ok_or_else(|| {
+                    KboltError::Internal(format!(
+                        "document missing after upsert: collection={}, path={relative_path}",
+                        target.collection.id
+                    ))
+                })?,
             );
             pending_indexing.record(report);
             let (kind, detail) = pending_decision;
@@ -1263,15 +1353,19 @@ impl Engine {
                     None,
                 );
                 if !options.dry_run {
-                    self.storage.deactivate_document(doc.id)?;
+                    crate::profile::timed_update_stage("sqlite_deactivate_document", || {
+                        self.storage.deactivate_document(doc.id)
+                    })?;
                     touched_collection = true;
                 }
             }
         }
 
         if touched_collection && !options.dry_run {
-            self.storage
-                .update_collection_timestamp(target.collection.id)?;
+            crate::profile::timed_update_stage("sqlite_update_collection_timestamp", || {
+                self.storage
+                    .update_collection_timestamp(target.collection.id)
+            })?;
         }
 
         Ok(())
@@ -1332,12 +1426,32 @@ struct UpdateDocKey {
     path: String,
 }
 
-struct EmbeddingDocumentSizerCounter<'a>(&'a dyn crate::models::EmbeddingDocumentSizer);
+struct EmbeddingDocumentSizerCounter<'a> {
+    inner: &'a dyn crate::models::EmbeddingDocumentSizer,
+}
 
 impl crate::ingest::chunk::TokenCounter for EmbeddingDocumentSizerCounter<'_> {
     fn count(&self, text: &str) -> Result<usize> {
-        self.0.count_document_tokens(text)
+        count_document_tokens_profiled(
+            self.inner,
+            text,
+            "tokenize_chunking",
+            "tokenize_chunking_calls",
+        )
     }
+}
+
+fn count_document_tokens_profiled(
+    sizer: &dyn crate::models::EmbeddingDocumentSizer,
+    text: &str,
+    stage: &'static str,
+    count: &'static str,
+) -> Result<usize> {
+    let started = Instant::now();
+    let result = sizer.count_document_tokens(text);
+    crate::profile::record_update_stage(stage, started.elapsed());
+    crate::profile::increment_update_count(count, 1);
+    result
 }
 
 fn prepare_chunk_embeddings(

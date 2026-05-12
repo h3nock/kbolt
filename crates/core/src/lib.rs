@@ -10,6 +10,7 @@ pub mod ingest;
 pub mod local;
 mod lock;
 mod models;
+mod profile;
 mod schedule_backend;
 mod schedule_state_store;
 mod schedule_store;
