@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use kbolt_types::KboltError;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::config::{Config, ProviderOperation};
 use crate::local;
@@ -16,24 +16,26 @@ use crate::models::gateway::{
     InferenceGatewayBindings, ProviderDeployment, RerankerBinding,
 };
 use crate::models::http::{HttpJsonClient, HttpOperation, HttpTransportRecovery};
-use crate::models::tiktoken_tokenizer::TiktokenEncoding;
-use crate::models::tokenizer::{build_embedding_tokenizer_runtime, EmbeddingTokenizerSpec};
 use crate::models::variants_expander::{ChatVariantsExpander, VARIANTS_GRAMMAR};
-use crate::models::{Embedder, EmbeddingInputKind, Expander, Reranker, TokenizerRuntime};
+use crate::models::{Embedder, EmbeddingDocumentSizer, EmbeddingInputKind, Expander, Reranker};
 use crate::{RecoveryNoticeSink, Result};
 
 #[cfg(test)]
 use crate::models::chat::build_chat_payload;
 #[cfg(test)]
 use crate::models::http::parse_retry_after_seconds;
-#[cfg(test)]
-use crate::models::TokenizerRuntimeKind;
 
 #[derive(Debug, Clone)]
 struct HttpApiEmbedder {
     client: HttpJsonClient,
     model: String,
     batch_size: usize,
+    endpoint_suffix: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct LlamaCppServerDocumentSizer {
+    client: HttpJsonClient,
     endpoint_suffix: &'static str,
 }
 
@@ -58,7 +60,7 @@ struct OpenAiCompatibleEndpointReranker {
 
 pub(crate) struct BuiltInferenceClients {
     pub embedder: Option<Arc<dyn Embedder>>,
-    pub embedding_tokenizer: Option<Arc<dyn TokenizerRuntime>>,
+    pub embedding_document_sizer: Option<Arc<dyn EmbeddingDocumentSizer>>,
     pub reranker: Option<Arc<dyn Reranker>>,
     pub expander: Option<Arc<dyn Expander>>,
 }
@@ -96,14 +98,12 @@ impl std::fmt::Debug for InferenceClientBuildOptions {
 
 impl std::fmt::Debug for BuiltInferenceClients {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let embedding_tokenizer_kind = self
-            .embedding_tokenizer
-            .as_ref()
-            .map(|tokenizer| tokenizer.kind());
         f.debug_struct("BuiltInferenceClients")
             .field("embedder", &self.embedder.is_some())
-            .field("embedding_tokenizer", &self.embedding_tokenizer.is_some())
-            .field("embedding_tokenizer_kind", &embedding_tokenizer_kind)
+            .field(
+                "embedding_document_sizer",
+                &self.embedding_document_sizer.is_some(),
+            )
             .field("reranker", &self.reranker.is_some())
             .field("expander", &self.expander.is_some())
             .finish()
@@ -153,10 +153,12 @@ fn build_provider_bound_clients(
             .as_ref()
             .map(|binding| build_embedder_from_binding(config, binding, options.clone()))
             .transpose()?,
-        embedding_tokenizer: bindings
+        embedding_document_sizer: bindings
             .embedder
             .as_ref()
-            .map(|binding| build_embedding_tokenizer_from_binding(config, binding, options.clone()))
+            .map(|binding| {
+                build_embedding_document_sizer_from_binding(config, binding, options.clone())
+            })
             .transpose()?
             .flatten(),
         reranker: bindings
@@ -200,11 +202,11 @@ fn build_embedder_from_binding(
     }))
 }
 
-fn build_embedding_tokenizer_from_binding(
+fn build_embedding_document_sizer_from_binding(
     config: &Arc<Config>,
     binding: &EmbedderBinding,
     options: InferenceClientBuildOptions,
-) -> Result<Option<Arc<dyn TokenizerRuntime>>> {
+) -> Result<Option<Arc<dyn EmbeddingDocumentSizer>>> {
     if binding.deployment.operation != ProviderOperation::Embedding {
         return Err(KboltError::Inference(format!(
             "provider profile '{}' uses incompatible operation '{}' for embedder bindings",
@@ -214,35 +216,19 @@ fn build_embedding_tokenizer_from_binding(
         .into());
     }
 
-    let managed_model_path =
-        local::managed_embedder_model_path(&config.cache_dir, &binding.provider_name);
-    let spec = match binding.deployment.kind {
-        GatewayProviderKind::OpenAiCompatible => {
-            if let Some(encoding) =
-                TiktokenEncoding::for_official_openai_embedding_model(&binding.deployment.model)
-            {
-                EmbeddingTokenizerSpec::Tiktoken { encoding }
-            } else {
-                EmbeddingTokenizerSpec::NoLocalTokenizer
-            }
-        }
-        GatewayProviderKind::LlamaCppServer => {
-            if let Some(model_path) = managed_model_path.as_deref() {
-                EmbeddingTokenizerSpec::LlamaSpmGguf { model_path }
-            } else {
-                EmbeddingTokenizerSpec::LlamaCppHttpTokenize {
-                    client: build_http_client(
-                        config,
-                        &binding.provider_name,
-                        &binding.deployment,
-                        "embedding",
-                        options,
-                    ),
-                }
-            }
-        }
-    };
-    build_embedding_tokenizer_runtime(spec)
+    match binding.deployment.kind {
+        GatewayProviderKind::LlamaCppServer => Ok(Some(Arc::new(LlamaCppServerDocumentSizer {
+            client: build_http_client(
+                config,
+                &binding.provider_name,
+                &binding.deployment,
+                "embedding",
+                options,
+            ),
+            endpoint_suffix: llama_cpp_tokenize_endpoint_suffix(),
+        }))),
+        GatewayProviderKind::OpenAiCompatible => Ok(None),
+    }
 }
 
 fn build_reranker_from_binding(
@@ -417,6 +403,10 @@ fn openai_compatible_reranking_endpoint_suffix() -> &'static str {
     "rerank"
 }
 
+fn llama_cpp_tokenize_endpoint_suffix() -> &'static str {
+    "tokenize"
+}
+
 fn openai_expander_options(binding: &ExpanderBinding) -> ChatCompletionRequestOptions {
     ChatCompletionRequestOptions {
         output_mode: ChatCompletionOutputMode::Text,
@@ -503,6 +493,21 @@ impl Embedder for HttpApiEmbedder {
             self.batch_size,
             texts,
         )
+    }
+}
+
+impl EmbeddingDocumentSizer for LlamaCppServerDocumentSizer {
+    fn count_document_tokens(&self, text: &str) -> Result<usize> {
+        let payload = json!({
+            "content": text,
+            "add_special": true,
+        });
+        let response = self.client.post_json::<TokenizeResponseEnvelope>(
+            self.endpoint_suffix,
+            &payload,
+            HttpOperation::Tokenize,
+        )?;
+        response.token_count()
     }
 }
 
@@ -635,6 +640,13 @@ enum EmbeddingResponseEnvelope {
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
+enum TokenizeResponseEnvelope {
+    Wrapped { tokens: Vec<Value> },
+    Direct(Vec<Value>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
 enum RerankerResponse {
     Scores(Vec<f32>),
     Wrapped { scores: Vec<f32> },
@@ -735,6 +747,16 @@ impl EmbeddingResponseEnvelope {
         }
 
         Ok(std::mem::take(&mut vectors))
+    }
+}
+
+impl TokenizeResponseEnvelope {
+    fn token_count(self) -> Result<usize> {
+        let tokens = match self {
+            Self::Wrapped { tokens } => tokens,
+            Self::Direct(tokens) => tokens,
+        };
+        Ok(tokens.len())
     }
 }
 
@@ -1055,7 +1077,7 @@ mod tests {
     }
 
     #[test]
-    fn llama_cpp_embedder_builds_http_tokenize_runtime() {
+    fn llama_cpp_embedder_builds_document_sizer_against_tokenize_endpoint() {
         let (base_url, requests) = serve_once_capturing_request(200, r#"{"tokens":[1,2,3]}"#);
         let mut config = base_config();
         config.providers.insert(
@@ -1074,12 +1096,11 @@ mod tests {
         });
 
         let built = build_inference_clients(&config).expect("build clients");
-        let tokenizer = built
-            .embedding_tokenizer
-            .expect("tokenizer runtime should exist");
-        assert_eq!(tokenizer.kind(), TokenizerRuntimeKind::LlamaCppHttpTokenize);
-        let token_count = tokenizer
-            .count_embedding_tokens("hello world")
+        let sizer = built
+            .embedding_document_sizer
+            .expect("document sizer should exist");
+        let token_count = sizer
+            .count_document_tokens("hello world")
             .expect("count tokens");
         assert_eq!(token_count, 3);
 
@@ -1099,55 +1120,10 @@ mod tests {
             request.contains("\"add_special\":true"),
             "missing add_special payload: {request}"
         );
-        assert!(
-            request.contains("\"parse_special\":true"),
-            "missing parse_special payload: {request}"
-        );
     }
 
     #[test]
-    fn llama_cpp_http_tokenize_runtime_counts_batches_through_runtime_contract() {
-        let base_url = serve_sequence(vec![
-            TestResponse {
-                status_code: 200,
-                body: r#"{"tokens":[1,2]}"#,
-                retry_after: None,
-            },
-            TestResponse {
-                status_code: 200,
-                body: r#"{"tokens":[1,2,3,4]}"#,
-                retry_after: None,
-            },
-        ]);
-        let mut config = base_config();
-        config.providers.insert(
-            "local_embed".to_string(),
-            ProviderProfileConfig::LlamaCppServer {
-                operation: ProviderOperation::Embedding,
-                base_url,
-                model: "embeddinggemma".to_string(),
-                timeout_ms: 5_000,
-                max_retries: 0,
-            },
-        );
-        config.roles.embedder = Some(EmbedderRoleConfig {
-            provider: "local_embed".to_string(),
-            batch_size: 64,
-        });
-
-        let built = build_inference_clients(&config).expect("build clients");
-        let tokenizer = built
-            .embedding_tokenizer
-            .expect("tokenizer runtime should exist");
-        let counts = tokenizer
-            .count_embedding_tokens_batch(&["alpha beta", "one two three four"])
-            .expect("count token batch");
-
-        assert_eq!(counts, vec![2, 4]);
-    }
-
-    #[test]
-    fn unknown_openai_compatible_embedder_does_not_build_tokenizer_runtime() {
+    fn openai_compatible_embedder_does_not_build_document_sizer() {
         let body = r#"{"data":[{"index":0,"embedding":[0.1,0.2]}]}"#;
         let mut config = base_config();
         config.providers.insert(
@@ -1167,36 +1143,7 @@ mod tests {
         });
 
         let built = build_inference_clients(&config).expect("build clients");
-        assert!(built.embedding_tokenizer.is_none());
-    }
-
-    #[test]
-    fn official_openai_embedding_model_builds_tiktoken_runtime() {
-        let body = r#"{"data":[{"index":0,"embedding":[0.1,0.2]}]}"#;
-        let mut config = base_config();
-        config.providers.insert(
-            "remote_embed".to_string(),
-            ProviderProfileConfig::OpenAiCompatible {
-                operation: ProviderOperation::Embedding,
-                base_url: serve_once(200, body),
-                model: "text-embedding-3-large".to_string(),
-                api_key_env: None,
-                timeout_ms: 5_000,
-                max_retries: 0,
-            },
-        );
-        config.roles.embedder = Some(EmbedderRoleConfig {
-            provider: "remote_embed".to_string(),
-            batch_size: 64,
-        });
-
-        let built = build_inference_clients(&config).expect("build clients");
-        let tokenizer = built
-            .embedding_tokenizer
-            .expect("tokenizer runtime should exist");
-
-        assert_eq!(tokenizer.kind(), TokenizerRuntimeKind::Tiktoken);
-        assert_eq!(tokenizer.count_embedding_tokens("hello world").unwrap(), 2);
+        assert!(built.embedding_document_sizer.is_none());
     }
 
     #[test]
