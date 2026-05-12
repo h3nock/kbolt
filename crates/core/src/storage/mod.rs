@@ -11,7 +11,7 @@ use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, TermQuery};
 use tantivy::schema::{Field, IndexRecordOption, Value, FAST, INDEXED, STORED, TEXT};
 use tantivy::tokenizer::TokenStream;
-use tantivy::{Index, IndexWriter, TantivyDocument, Term};
+use tantivy::{Index, IndexReader, IndexWriter, TantivyDocument, Term};
 use usearch::{IndexOptions, MetricKind, ScalarKind};
 
 const DB_FILE: &str = "meta.sqlite";
@@ -184,6 +184,7 @@ struct SpaceIndexes {
     _tantivy_dir: PathBuf,
     usearch_path: PathBuf,
     tantivy_index: Index,
+    tantivy_reader: IndexReader,
     tantivy_writer: Mutex<Option<IndexWriter>>,
     usearch_index: RwLock<usearch::Index>,
     fields: TantivyFields,
@@ -279,20 +280,12 @@ CREATE TABLE IF NOT EXISTS embeddings (
             params![DEFAULT_SPACE_NAME],
         )?;
 
-        let mut stmt = conn.prepare("SELECT name FROM spaces ORDER BY name ASC")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        let space_names = rows.collect::<std::result::Result<Vec<_>, _>>()?;
-        drop(stmt);
-
         let storage = Self {
             db: Mutex::new(conn),
             cache_dir: cache_dir.to_path_buf(),
             spaces: RwLock::new(HashMap::new()),
         };
-
-        for space_name in space_names {
-            storage.open_space(&space_name)?;
-        }
+        storage.open_space(DEFAULT_SPACE_NAME)?;
 
         Ok(storage)
     }
@@ -317,6 +310,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .append(true)
             .open(&usearch_path)?;
         let tantivy_index = open_or_create_tantivy_index(&tantivy_dir)?;
+        let tantivy_reader = tantivy_index.reader()?;
         let usearch_index = open_or_create_usearch_index(&usearch_path)?;
         let fields = tantivy_fields_from_schema(&tantivy_index.schema())?;
 
@@ -330,6 +324,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
                 _tantivy_dir: tantivy_dir,
                 usearch_path,
                 tantivy_index,
+                tantivy_reader,
                 tantivy_writer: Mutex::new(None),
                 usearch_index: RwLock::new(usearch_index),
                 fields,
@@ -1593,9 +1588,8 @@ CREATE TABLE IF NOT EXISTS embeddings (
         else {
             return Ok(Vec::new());
         };
-        let reader = space_indexes.tantivy_index.reader()?;
-        reader.reload()?;
-        let searcher = reader.searcher();
+        space_indexes.tantivy_reader.reload()?;
+        let searcher = space_indexes.tantivy_reader.searcher();
         let docs = searcher.search(&parsed_query, &TopDocs::with_limit(limit))?;
 
         let mut hits = Vec::with_capacity(docs.len());
@@ -1626,6 +1620,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
             return Ok(());
         };
         writer.commit()?;
+        space_indexes.tantivy_reader.reload()?;
         Ok(())
     }
 

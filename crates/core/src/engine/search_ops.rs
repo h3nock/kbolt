@@ -108,9 +108,9 @@ impl Engine {
     ) -> Result<Vec<RankedChunk>> {
         let boosts = &self.config.ranking.bm25_boosts;
         let mut candidates = Vec::new();
-        for target in targets {
+        for space in unique_target_spaces(targets) {
             let hits = self.storage.query_bm25(
-                &target.space,
+                space,
                 query,
                 &[
                     ("title", boosts.title),
@@ -209,10 +209,8 @@ impl Engine {
         }
 
         let mut candidates = Vec::new();
-        for target in targets {
-            let hits = self
-                .storage
-                .query_dense(&target.space, query_vector, limit)?;
+        for space in unique_target_spaces(targets) {
+            let hits = self.storage.query_dense(space, query_vector, limit)?;
             for hit in hits {
                 candidates.push(hit);
             }
@@ -625,6 +623,17 @@ impl Engine {
     }
 }
 
+fn unique_target_spaces(targets: &[UpdateTarget]) -> Vec<&str> {
+    let mut seen = HashSet::new();
+    let mut spaces = Vec::new();
+    for target in targets {
+        if seen.insert(target.space.as_str()) {
+            spaces.push(target.space.as_str());
+        }
+    }
+    spaces
+}
+
 #[derive(Debug, Clone)]
 struct PendingSearchCandidate {
     chunk_id: i64,
@@ -982,6 +991,35 @@ mod tests {
             dense,
             original_rank: None,
         }
+    }
+
+    fn target(space: &str, collection_id: i64, collection_name: &str) -> UpdateTarget {
+        UpdateTarget {
+            space: space.to_string(),
+            collection: CollectionRow {
+                id: collection_id,
+                space_id: 1,
+                name: collection_name.to_string(),
+                path: std::path::PathBuf::from(collection_name),
+                description: None,
+                extensions: None,
+                created: "2026-01-01T00:00:00Z".to_string(),
+                updated: "2026-01-01T00:00:00Z".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn unique_target_spaces_preserves_first_space_order() {
+        let targets = vec![
+            target("work", 1, "notes"),
+            target("work", 2, "docs"),
+            target("archive", 3, "old"),
+            target("work", 4, "tasks"),
+            target("archive", 5, "logs"),
+        ];
+
+        assert_eq!(unique_target_spaces(&targets), vec!["work", "archive"]);
     }
 
     #[test]
