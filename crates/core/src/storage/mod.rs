@@ -21,7 +21,7 @@ const DEFAULT_SPACE_NAME: &str = "default";
 const SPACES_DIR: &str = "spaces";
 const TANTIVY_DIR_NAME: &str = "tantivy";
 const USEARCH_FILENAME: &str = "vectors.usearch";
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub struct Storage {
     db: Mutex<Connection>,
@@ -83,6 +83,7 @@ pub struct ChunkRow {
     pub length: usize,
     pub heading: Option<String>,
     pub kind: FinalChunkKind,
+    pub retrieval_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +93,7 @@ pub struct ChunkInsert {
     pub length: usize,
     pub heading: Option<String>,
     pub kind: FinalChunkKind,
+    pub retrieval_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +313,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     length   INTEGER NOT NULL,
     heading  TEXT,
     kind     TEXT NOT NULL DEFAULT 'section',
+    retrieval_prefix TEXT,
     UNIQUE(doc_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
@@ -335,6 +338,7 @@ CREATE TABLE IF NOT EXISTS document_texts (
         )?;
         ensure_documents_title_source_column(&conn)?;
         ensure_document_texts_generation_key_column(&conn)?;
+        ensure_chunks_retrieval_prefix_column(&conn)?;
         ensure_schema_version(&conn)?;
 
         conn.execute(
@@ -1266,8 +1270,8 @@ CREATE TABLE IF NOT EXISTS document_texts (
 
         let tx = conn.unchecked_transaction()?;
         let mut stmt = tx.prepare(
-            "INSERT INTO chunks (doc_id, seq, offset, length, heading, kind)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO chunks (doc_id, seq, offset, length, heading, kind, retrieval_prefix)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
 
         let mut ids = Vec::with_capacity(chunks.len());
@@ -1279,6 +1283,7 @@ CREATE TABLE IF NOT EXISTS document_texts (
                 chunk.length as i64,
                 chunk.heading,
                 chunk.kind.as_storage_kind(),
+                chunk.retrieval_prefix.as_deref(),
             ])?;
             ids.push(tx.last_insert_rowid());
         }
@@ -1310,7 +1315,7 @@ CREATE TABLE IF NOT EXISTS document_texts (
         let _doc = lookup_document_id(&conn, doc_id)?;
 
         let mut stmt = conn.prepare(
-            "SELECT id, doc_id, seq, offset, length, heading, kind
+            "SELECT id, doc_id, seq, offset, length, heading, kind, retrieval_prefix
              FROM chunks
              WHERE doc_id = ?1
              ORDER BY seq ASC",
@@ -1336,7 +1341,7 @@ CREATE TABLE IF NOT EXISTS document_texts (
 
         let placeholders = vec!["?"; requested.len()].join(", ");
         let sql = format!(
-            "SELECT id, doc_id, seq, offset, length, heading, kind
+            "SELECT id, doc_id, seq, offset, length, heading, kind, retrieval_prefix
              FROM chunks
              WHERE doc_id IN ({placeholders})
              ORDER BY doc_id ASC, seq ASC"
@@ -1367,7 +1372,7 @@ CREATE TABLE IF NOT EXISTS document_texts (
 
         let placeholders = vec!["?"; chunk_ids.len()].join(", ");
         let sql = format!(
-            "SELECT id, doc_id, seq, offset, length, heading, kind
+            "SELECT id, doc_id, seq, offset, length, heading, kind, retrieval_prefix
              FROM chunks
              WHERE id IN ({placeholders})
              ORDER BY id ASC"
@@ -1526,8 +1531,8 @@ CREATE TABLE IF NOT EXISTS document_texts (
         tx.execute("DELETE FROM chunks WHERE doc_id = ?1", params![doc_id])?;
 
         let mut stmt = tx.prepare(
-            "INSERT INTO chunks (doc_id, seq, offset, length, heading, kind)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO chunks (doc_id, seq, offset, length, heading, kind, retrieval_prefix)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
         let mut chunk_ids = Vec::with_capacity(replacement.chunks.len());
         for chunk in replacement.chunks {
@@ -1538,6 +1543,7 @@ CREATE TABLE IF NOT EXISTS document_texts (
                 chunk.length as i64,
                 chunk.heading,
                 chunk.kind.as_storage_kind(),
+                chunk.retrieval_prefix.as_deref(),
             ])?;
             chunk_ids.push(tx.last_insert_rowid());
         }
@@ -1682,15 +1688,15 @@ CREATE TABLE IF NOT EXISTS document_texts (
             .lock()
             .map_err(|_| CoreError::poisoned("database"))?;
         let result = conn.query_row(
-            "SELECT c.id, c.doc_id, c.seq, c.offset, c.length, c.heading, c.kind, dt.extractor_key, dt.text
+            "SELECT c.id, c.doc_id, c.seq, c.offset, c.length, c.heading, c.kind, c.retrieval_prefix, dt.extractor_key, dt.text
              FROM chunks c
              JOIN document_texts dt ON dt.doc_id = c.doc_id
              WHERE c.id = ?1",
             params![chunk_id],
             |row| {
                 let chunk = decode_chunk_row(row)?;
-                let extractor_key: String = row.get(7)?;
-                let document_text: String = row.get(8)?;
+                let extractor_key: String = row.get(8)?;
+                let document_text: String = row.get(9)?;
                 Ok((chunk, extractor_key, document_text))
             },
         );
@@ -2655,7 +2661,7 @@ fn lookup_document_id(conn: &Connection, doc_id: i64) -> Result<i64> {
 
 fn load_chunks_for_doc(conn: &Connection, doc_id: i64) -> Result<Vec<ChunkRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, doc_id, seq, offset, length, heading, kind
+        "SELECT id, doc_id, seq, offset, length, heading, kind, retrieval_prefix
          FROM chunks
          WHERE doc_id = ?1
          ORDER BY seq ASC",
@@ -2826,6 +2832,20 @@ fn ensure_document_texts_generation_key_column(conn: &Connection) -> Result<()> 
         "ALTER TABLE document_texts ADD COLUMN generation_key TEXT NOT NULL DEFAULT ''",
         [],
     )?;
+    Ok(())
+}
+
+fn ensure_chunks_retrieval_prefix_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(chunks)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let columns = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    if columns.iter().any(|column| column == "retrieval_prefix") {
+        return Ok(());
+    }
+
+    conn.execute("ALTER TABLE chunks ADD COLUMN retrieval_prefix TEXT", [])?;
     Ok(())
 }
 
@@ -3091,6 +3111,7 @@ fn decode_chunk_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRow> {
         length: decode_non_negative_usize(length_value, 4, "chunks.length")?,
         heading: row.get(5)?,
         kind,
+        retrieval_prefix: row.get(7)?,
     })
 }
 

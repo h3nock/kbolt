@@ -2,7 +2,7 @@ use super::*;
 use kbolt_types::{UpdateDecision, UpdateDecisionKind};
 
 const CANONICAL_TEXT_GENERATION: u32 = 1;
-const CHUNKER_GENERATION: u32 = 1;
+const CHUNKER_GENERATION: u32 = 2;
 
 impl Engine {
     pub fn update(&self, options: UpdateOptions) -> Result<UpdateReport> {
@@ -249,7 +249,10 @@ impl Engine {
                     "embedding_backlog_read",
                     read_started.elapsed(),
                 );
-                let mut text = chunk_text.text;
+                let mut text = crate::ingest::chunk::chunk_retrieval_body(
+                    chunk_text.text.as_str(),
+                    chunk_text.chunk.retrieval_prefix.as_deref(),
+                );
                 if text.trim().is_empty() {
                     text = " ".to_string();
                 }
@@ -628,7 +631,11 @@ impl Engine {
                 .chunks
                 .iter()
                 .map(|chunk| -> Result<TantivyEntry> {
-                    let chunk_body = self.storage.get_chunk_text(chunk.id)?.text;
+                    let chunk_text = self.storage.get_chunk_text(chunk.id)?;
+                    let chunk_body = crate::ingest::chunk::chunk_retrieval_body(
+                        chunk_text.text.as_str(),
+                        chunk_text.chunk.retrieval_prefix.as_deref(),
+                    );
                     Ok(TantivyEntry {
                         chunk_id: chunk.id,
                         doc_id,
@@ -1200,6 +1207,7 @@ impl Engine {
                     length: chunk.length,
                     heading: chunk.heading.clone(),
                     kind: chunk.kind,
+                    retrieval_prefix: chunk.retrieval_prefix.clone(),
                 })
                 .collect::<Vec<_>>();
             let mut prepared_embeddings = Vec::new();
@@ -1307,7 +1315,7 @@ impl Engine {
                             .map(ToString::to_string),
                         heading: chunk.heading.clone(),
                         body: retrieval_text_with_prefix(
-                            chunk.text.as_str(),
+                            chunk.retrieval_text().as_str(),
                             title_source.semantic_title(title.as_str()),
                             chunk.heading.as_deref(),
                             policy.contextual_prefix,
@@ -1607,7 +1615,7 @@ fn prepare_chunk_embeddings(
         .iter()
         .enumerate()
         .map(|(chunk_index, chunk)| {
-            let mut text = chunk.text.clone();
+            let mut text = chunk.retrieval_text();
             if text.trim().is_empty() {
                 text = " ".to_string();
             }

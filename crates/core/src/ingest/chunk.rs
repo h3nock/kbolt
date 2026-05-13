@@ -4,10 +4,12 @@ use crate::Result;
 use kbolt_types::KboltError;
 
 const TABLE_HEADER_ATTR: &str = "__kbolt_table_header";
+const TABLE_RETRIEVAL_PREFIX_ATTR: &str = "__kbolt_table_retrieval_prefix";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalChunk {
     pub text: String,
+    pub retrieval_prefix: Option<String>,
     pub offset: usize,
     pub length: usize,
     pub heading: Option<String>,
@@ -77,6 +79,27 @@ impl TryFrom<&str> for FinalChunkKind {
                 "invalid stored chunk kind: {other}"
             ))),
         }
+    }
+}
+
+impl FinalChunk {
+    pub fn retrieval_text(&self) -> String {
+        chunk_retrieval_body(self.text.as_str(), self.retrieval_prefix.as_deref())
+    }
+}
+
+pub fn chunk_retrieval_body(canonical_text: &str, retrieval_prefix: Option<&str>) -> String {
+    let Some(prefix) = retrieval_prefix
+        .map(str::trim)
+        .filter(|prefix| !prefix.is_empty())
+    else {
+        return canonical_text.to_string();
+    };
+
+    if canonical_text.is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{prefix}\n{canonical_text}")
     }
 }
 
@@ -150,13 +173,13 @@ fn chunk_document_with_counter_inner(
             continue;
         }
 
-        chunks.push(finalize_chunk(&current));
+        chunks.push(finalize_chunk(&current, table_header_mode));
         current.clear();
         current.push(block.clone());
     }
 
     if !current.is_empty() {
-        chunks.push(finalize_chunk(&current));
+        chunks.push(finalize_chunk(&current, table_header_mode));
     }
 
     Ok(chunks)
@@ -198,11 +221,14 @@ fn count_whitespace_tokens(text: &str) -> usize {
 }
 
 fn countable_chunk_text(blocks: &[ExtractedBlock]) -> String {
-    blocks
+    let body = blocks
         .iter()
         .map(|block| block.text.as_str())
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+
+    let prefix = table_header_prefix_for_body(blocks, body.as_str());
+    chunk_retrieval_body(body.as_str(), prefix)
 }
 
 fn count_finalized_chunk_tokens(
@@ -306,7 +332,10 @@ fn expand_blocks_for_hard_max(
             TableHeaderMode::SourceBlocks => {
                 attach_table_header_attr(block, active_table_header.as_deref())
             }
-            TableHeaderMode::CanonicalBlocks => block.clone(),
+            TableHeaderMode::CanonicalBlocks => attach_table_retrieval_prefix_attr(
+                block,
+                fitting_table_retrieval_prefix(active_table_header.as_deref(), hard_max, counter)?,
+            ),
         };
 
         if count_single_block_tokens(&tagged, counter)? <= hard_max {
@@ -350,6 +379,39 @@ fn attach_table_header_attr(block: &ExtractedBlock, table_header: Option<&str>) 
         }
     }
     tagged
+}
+
+fn attach_table_retrieval_prefix_attr(
+    block: &ExtractedBlock,
+    table_header: Option<&str>,
+) -> ExtractedBlock {
+    let mut tagged = block.clone();
+    if tagged.kind == BlockKind::TableRow {
+        if let Some(header) = table_header {
+            if !header.trim().is_empty() {
+                tagged
+                    .attrs
+                    .insert(TABLE_RETRIEVAL_PREFIX_ATTR.to_string(), header.to_string());
+            }
+        }
+    }
+    tagged
+}
+
+fn fitting_table_retrieval_prefix<'a>(
+    table_header: Option<&'a str>,
+    hard_max: usize,
+    counter: &dyn TokenCounter,
+) -> Result<Option<&'a str>> {
+    let Some(header) = table_header.filter(|header| !header.trim().is_empty()) else {
+        return Ok(None);
+    };
+
+    if counter.count(header)? < hard_max {
+        Ok(Some(header))
+    } else {
+        Ok(None)
+    }
 }
 
 fn is_narrative_block_kind(kind: &BlockKind) -> bool {
@@ -562,6 +624,13 @@ fn split_block_range_by_bytes(
     split.offset = block.offset.saturating_add(byte_start);
     split.length = byte_end.saturating_sub(byte_start);
     split.text = block.text[byte_start..byte_end].to_string();
+    if let Some(header) = block.attrs.get(TABLE_RETRIEVAL_PREFIX_ATTR) {
+        if canonical_table_row_body_start(block.text.as_str(), header.as_str())
+            .is_some_and(|body_start| byte_start < body_start)
+        {
+            split.attrs.remove(TABLE_RETRIEVAL_PREFIX_ATTR);
+        }
+    }
     split
 }
 
@@ -940,7 +1009,7 @@ fn token_byte_spans(text: &str) -> Vec<(usize, usize)> {
     spans
 }
 
-fn finalize_chunk(blocks: &[ExtractedBlock]) -> FinalChunk {
+fn finalize_chunk(blocks: &[ExtractedBlock], table_header_mode: TableHeaderMode) -> FinalChunk {
     let start = blocks.first().map(|block| block.offset).unwrap_or(0);
     let end = blocks
         .last()
@@ -953,11 +1022,16 @@ fn finalize_chunk(blocks: &[ExtractedBlock]) -> FinalChunk {
         .join("\n\n");
     let heading = resolve_heading(blocks);
     let kind = derive_chunk_kind(blocks);
+    let retrieval_prefix = if matches!(table_header_mode, TableHeaderMode::CanonicalBlocks) {
+        table_header_prefix_for_body(blocks, text.as_str()).map(ToString::to_string)
+    } else {
+        None
+    };
     if kind == FinalChunkKind::Table {
         let has_header = blocks
             .iter()
             .any(|block| block.kind == BlockKind::TableHeader);
-        if !has_header {
+        if matches!(table_header_mode, TableHeaderMode::SourceBlocks) && !has_header {
             if let Some(header) = blocks
                 .first()
                 .and_then(|block| block.attrs.get(TABLE_HEADER_ATTR))
@@ -970,11 +1044,46 @@ fn finalize_chunk(blocks: &[ExtractedBlock]) -> FinalChunk {
 
     FinalChunk {
         text,
+        retrieval_prefix,
         offset: start,
         length: end.saturating_sub(start),
         heading,
         kind,
     }
+}
+
+fn table_header_prefix_for_body<'a>(blocks: &'a [ExtractedBlock], body: &str) -> Option<&'a str> {
+    let kind = derive_chunk_kind(blocks);
+    if kind != FinalChunkKind::Table {
+        return None;
+    }
+
+    let has_header = blocks
+        .iter()
+        .any(|block| block.kind == BlockKind::TableHeader);
+    if has_header {
+        return None;
+    }
+
+    let header = blocks
+        .first()
+        .and_then(|block| block.attrs.get(TABLE_RETRIEVAL_PREFIX_ATTR))
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|header| !header.is_empty())?;
+
+    let body_trimmed = body.trim_start();
+    if body_trimmed == header || body_trimmed.starts_with(&format!("{header}\n")) {
+        None
+    } else {
+        Some(header)
+    }
+}
+
+fn canonical_table_row_body_start(text: &str, header: &str) -> Option<usize> {
+    let rest = text.strip_prefix(header)?;
+    rest.strip_prefix('\n')?;
+    Some(header.len() + 1)
 }
 
 fn resolve_heading(blocks: &[ExtractedBlock]) -> Option<String> {
@@ -1503,6 +1612,87 @@ mod tests {
         assert!(chunks
             .iter()
             .all(|chunk| chunk.kind == FinalChunkKind::Table));
+    }
+
+    #[test]
+    fn canonical_table_row_splits_keep_exact_text_and_prefix_continuations() {
+        let policy = ChunkPolicy {
+            target_tokens: 4,
+            soft_max_tokens: 4,
+            hard_max_tokens: 5,
+            boundary_overlap_tokens: 0,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let header = "sku price status";
+        let row = "alpha beta gamma delta epsilon zeta eta theta iota kappa";
+        let document = ExtractedDocument {
+            blocks: vec![
+                block_with(BlockKind::TableHeader, header, 0, &[]),
+                block_with(BlockKind::TableRow, row, 20, &[]),
+            ],
+            metadata: HashMap::new(),
+            title: None,
+        };
+        let canonical = crate::ingest::canonical::build_canonical_document(&document);
+
+        let chunks = chunk_canonical_document(&canonical.document, &policy);
+
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.retrieval_prefix.as_deref() == Some(header)),
+            "expected at least one split continuation with table header prefix"
+        );
+        for chunk in &chunks {
+            assert_eq!(
+                chunk.text,
+                canonical.text[chunk.offset..chunk.offset + chunk.length]
+            );
+            if chunk.retrieval_prefix.as_deref() == Some(header) {
+                assert!(!chunk.text.trim_start().starts_with(header));
+                assert!(chunk.retrieval_text().starts_with("sku price status\n"));
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_table_row_with_oversized_header_still_chunks() {
+        let policy = ChunkPolicy {
+            target_tokens: 4,
+            soft_max_tokens: 4,
+            hard_max_tokens: 5,
+            boundary_overlap_tokens: 0,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let header = "h1 h2 h3 h4 h5 h6 h7 h8";
+        let document = ExtractedDocument {
+            blocks: vec![
+                block_with(BlockKind::TableHeader, header, 0, &[]),
+                block_with(BlockKind::TableRow, "alpha beta gamma tailneedle", 30, &[]),
+            ],
+            metadata: HashMap::new(),
+            title: None,
+        };
+        let canonical = crate::ingest::canonical::build_canonical_document(&document);
+
+        let chunks = chunk_canonical_document(&canonical.document, &policy);
+
+        assert!(
+            chunks.iter().any(|chunk| chunk.text.contains("tailneedle")),
+            "expected oversized-header row body to remain chunkable"
+        );
+        assert!(
+            chunks.iter().all(|chunk| chunk.retrieval_prefix.is_none()),
+            "oversized headers should not be persisted as retrieval prefixes: {chunks:?}"
+        );
+        for chunk in &chunks {
+            assert_eq!(
+                chunk.text,
+                canonical.text[chunk.offset..chunk.offset + chunk.length]
+            );
+        }
     }
 
     #[test]

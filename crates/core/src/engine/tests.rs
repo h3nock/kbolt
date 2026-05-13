@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tempfile::tempdir;
 
 use crate::config::{
-    ChunkingConfig, Config, EmbedderRoleConfig, ProviderOperation, ProviderProfileConfig,
-    RankingConfig, ReapingConfig, RoleBindingsConfig,
+    ChunkPolicy, ChunkingConfig, Config, EmbedderRoleConfig, ProviderOperation,
+    ProviderProfileConfig, RankingConfig, ReapingConfig, RoleBindingsConfig,
 };
 use crate::engine::{retrieval_text_with_prefix, Engine};
 use crate::ingest::chunk::FinalChunkKind;
@@ -253,6 +253,21 @@ fn test_engine_with_embedder(embedder: Arc<dyn crate::models::Embedder>) -> Engi
     Engine::from_parts_with_embedder(storage, config, Some(embedder))
 }
 
+fn test_engine_with_embedder_and_chunking(
+    embedder: Arc<dyn crate::models::Embedder>,
+    chunking: ChunkingConfig,
+) -> Engine {
+    let root = tempdir().expect("create temp root");
+    let root_path = root.path().to_path_buf();
+    std::mem::forget(root);
+    let config_dir = root_path.join("config");
+    let cache_dir = root_path.join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+    let mut config = base_test_config(config_dir, cache_dir);
+    config.chunking = chunking;
+    Engine::from_parts_with_embedder(storage, config, Some(embedder))
+}
+
 fn test_engine_with_embedding_runtime(
     embedder: Arc<dyn crate::models::Embedder>,
     document_sizer: Arc<dyn crate::models::EmbeddingDocumentSizer>,
@@ -338,6 +353,21 @@ fn test_engine_with_default_space(default_space: Option<&str>) -> Engine {
     let mut config = base_test_config(config_dir, cache_dir);
     config.default_space = default_space.map(ToString::to_string);
     Engine::from_parts(storage, config)
+}
+
+fn table_split_chunking_config() -> ChunkingConfig {
+    let policy = ChunkPolicy {
+        target_tokens: 12,
+        soft_max_tokens: 12,
+        hard_max_tokens: 12,
+        boundary_overlap_tokens: 0,
+        neighbor_window: 1,
+        contextual_prefix: true,
+    };
+    ChunkingConfig {
+        defaults: policy.clone(),
+        profiles: HashMap::from([("md".to_string(), policy)]),
+    }
 }
 
 fn test_engine_with_reaping_days(days: u32) -> Engine {
@@ -5096,7 +5126,7 @@ fn update_rebuilds_unchanged_file_when_chunking_generation_changes() {
         assert!(
             document_text
                 .generation_key
-                .starts_with("canonical=v1;chunker=v1;extractor=txt:v1;"),
+                .starts_with("canonical=v1;chunker=v2;extractor=txt:v1;"),
             "generation key should include canonical and chunker versions: {}",
             document_text.generation_key
         );
@@ -5606,6 +5636,187 @@ fn update_markdown_uses_structural_chunking_and_heading_metadata() {
                 .iter()
                 .any(|chunk| chunk.heading.as_deref() == Some("Title")),
             "expected heading breadcrumb on narrative chunks"
+        );
+    });
+}
+
+#[test]
+fn update_uses_table_retrieval_prefix_for_fresh_index_and_embeddings() {
+    with_kbolt_space_env(None, || {
+        let embedder = Arc::new(RecordingEmbedder::default());
+        let engine =
+            test_engine_with_embedder_and_chunking(embedder.clone(), table_split_chunking_config());
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let markdown = r#"| headerneedle | status |
+| --- | --- |
+| alpha beta gamma delta epsilon zeta eta theta iota tailneedle |
+"#;
+        write_text_file(&collection_path.join("docs/table.md"), markdown);
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update markdown table");
+        assert_eq!(report.scanned_docs, 1);
+        assert_eq!(report.added_docs, 1);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "docs/table.md")
+            .expect("query document")
+            .expect("document exists");
+        let chunks = engine
+            .storage()
+            .get_chunks_for_document(doc.id)
+            .expect("load chunks");
+        let tail_chunk = chunks
+            .iter()
+            .find(|chunk| {
+                engine
+                    .storage()
+                    .get_chunk_text(chunk.id)
+                    .expect("hydrate chunk")
+                    .text
+                    .contains("tailneedle")
+            })
+            .expect("expected tail chunk");
+        assert!(
+            tail_chunk
+                .retrieval_prefix
+                .as_deref()
+                .is_some_and(|prefix| prefix.contains("headerneedle")),
+            "tail chunk should carry table header retrieval prefix: {tail_chunk:?}"
+        );
+
+        let header_hits = engine
+            .storage()
+            .query_bm25("work", "headerneedle", &[("body", 1.0)], 100)
+            .expect("query header term");
+        assert!(
+            header_hits.iter().any(|hit| hit.chunk_id == tail_chunk.id),
+            "expected header term to index tail chunk via retrieval prefix"
+        );
+
+        let embedded_texts = embedder.texts();
+        assert!(
+            embedded_texts
+                .iter()
+                .any(|text| text.contains("headerneedle") && text.contains("tailneedle")),
+            "expected embedding input to include table header and tail value: {embedded_texts:?}"
+        );
+    });
+}
+
+#[test]
+fn update_replay_and_backlog_use_table_retrieval_prefix() {
+    with_kbolt_space_env(None, || {
+        let embedder = Arc::new(RecordingEmbedder::default());
+        let engine =
+            test_engine_with_embedder_and_chunking(embedder.clone(), table_split_chunking_config());
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let markdown = r#"| headerneedle | status |
+| --- | --- |
+| alpha beta gamma delta epsilon zeta eta theta iota tailneedle |
+"#;
+        write_text_file(&collection_path.join("docs/table.md"), markdown);
+
+        let mut no_embed = update_options(Some("work"), &["api"]);
+        no_embed.no_embed = true;
+        engine.update(no_embed).expect("index without embeddings");
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "docs/table.md")
+            .expect("query document")
+            .expect("document exists");
+        let chunks = engine
+            .storage()
+            .get_chunks_for_document(doc.id)
+            .expect("load chunks");
+        let tail_chunk = chunks
+            .iter()
+            .find(|chunk| {
+                engine
+                    .storage()
+                    .get_chunk_text(chunk.id)
+                    .expect("hydrate chunk")
+                    .text
+                    .contains("tailneedle")
+            })
+            .expect("expected tail chunk")
+            .clone();
+
+        engine
+            .storage()
+            .delete_tantivy_by_doc("work", doc.id)
+            .expect("delete existing projection");
+        engine
+            .storage()
+            .commit_tantivy("work")
+            .expect("commit projection delete");
+        engine
+            .storage()
+            .upsert_document(
+                collection.id,
+                "docs/table.md",
+                &doc.title,
+                doc.title_source,
+                &doc.hash,
+                &doc.modified,
+            )
+            .expect("mark document fts dirty");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("replay fts and embed backlog");
+        assert_eq!(report.skipped_mtime_docs, 1);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+
+        let header_hits = engine
+            .storage()
+            .query_bm25("work", "headerneedle", &[("body", 1.0)], 100)
+            .expect("query replayed header term");
+        assert!(
+            header_hits.iter().any(|hit| hit.chunk_id == tail_chunk.id),
+            "fts replay should preserve table header retrieval prefix"
+        );
+
+        let embedded_texts = embedder.texts();
+        assert!(
+            embedded_texts
+                .iter()
+                .any(|text| text.contains("headerneedle") && text.contains("tailneedle")),
+            "embedding backlog should preserve table header retrieval prefix: {embedded_texts:?}"
         );
     });
 }

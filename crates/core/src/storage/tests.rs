@@ -625,11 +625,22 @@ fn new_creates_expected_schema_objects() {
         )
         .expect("query documents title_source column");
     assert_eq!(title_source_exists, 1, "missing documents.title_source");
+    let retrieval_prefix_exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('chunks') WHERE name = 'retrieval_prefix'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("query chunks retrieval_prefix column");
+    assert_eq!(
+        retrieval_prefix_exists, 1,
+        "missing chunks.retrieval_prefix"
+    );
 
     let schema_version = conn
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
         .expect("query schema version");
-    assert_eq!(schema_version, 2);
+    assert_eq!(schema_version, 3);
 }
 
 #[test]
@@ -1324,6 +1335,7 @@ fn list_collection_file_rows_reports_counts_and_active_filter() {
                     length: 10,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
                 super::ChunkInsert {
                     seq: 1,
@@ -1331,6 +1343,7 @@ fn list_collection_file_rows_reports_counts_and_active_filter() {
                     length: 8,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
             ],
         )
@@ -1344,6 +1357,7 @@ fn list_collection_file_rows_reports_counts_and_active_filter() {
                 length: 12,
                 heading: None,
                 kind: FinalChunkKind::Section,
+                retrieval_prefix: None,
             }],
         )
         .expect("insert chunk for doc b");
@@ -1553,6 +1567,7 @@ fn insert_and_get_chunks_for_document() {
             length: 100,
             heading: Some("# Intro".to_string()),
             kind: FinalChunkKind::Section,
+            retrieval_prefix: None,
         },
         super::ChunkInsert {
             seq: 1,
@@ -1560,6 +1575,7 @@ fn insert_and_get_chunks_for_document() {
             length: 80,
             heading: Some("# Usage".to_string()),
             kind: FinalChunkKind::Section,
+            retrieval_prefix: None,
         },
     ];
 
@@ -1638,6 +1654,7 @@ fn active_search_scope_summary_counts_active_chunks() {
                     length: 10,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
                 super::ChunkInsert {
                     seq: 1,
@@ -1645,6 +1662,7 @@ fn active_search_scope_summary_counts_active_chunks() {
                     length: 12,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
             ],
         )
@@ -1658,6 +1676,7 @@ fn active_search_scope_summary_counts_active_chunks() {
                 length: 8,
                 heading: None,
                 kind: FinalChunkKind::Section,
+                retrieval_prefix: None,
             }],
         )
         .expect("insert inactive chunk");
@@ -1834,6 +1853,7 @@ fn put_get_and_hydrate_document_text() {
                 length: "alpha café".len(),
                 heading: None,
                 kind: FinalChunkKind::Paragraph,
+                retrieval_prefix: None,
             }],
         )
         .expect("insert chunk");
@@ -1882,6 +1902,7 @@ fn replace_document_generation_writes_text_and_chunks_atomically() {
                 length: 5,
                 heading: None,
                 kind: FinalChunkKind::Paragraph,
+                retrieval_prefix: None,
             },
             super::ChunkInsert {
                 seq: 1,
@@ -1889,6 +1910,7 @@ fn replace_document_generation_writes_text_and_chunks_atomically() {
                 length: 4,
                 heading: None,
                 kind: FinalChunkKind::Paragraph,
+                retrieval_prefix: Some("ctx".to_string()),
             },
         ],
     };
@@ -1912,12 +1934,17 @@ fn replace_document_generation_writes_text_and_chunks_atomically() {
             .text,
         "alpha\n\nbeta"
     );
+    let chunk_text = storage
+        .get_chunk_text(result.chunk_ids[1])
+        .expect("hydrate chunk");
+    assert_eq!(chunk_text.text, "beta");
+    assert_eq!(chunk_text.chunk.retrieval_prefix.as_deref(), Some("ctx"));
     assert_eq!(
-        storage
-            .get_chunk_text(result.chunk_ids[1])
-            .expect("hydrate chunk")
-            .text,
-        "beta"
+        crate::ingest::chunk::chunk_retrieval_body(
+            chunk_text.text.as_str(),
+            chunk_text.chunk.retrieval_prefix.as_deref(),
+        ),
+        "ctx\nbeta"
     );
 }
 
@@ -1957,6 +1984,7 @@ fn replace_document_generation_returns_old_chunks_and_cascades_embeddings() {
                 length: 5,
                 heading: None,
                 kind: FinalChunkKind::Paragraph,
+                retrieval_prefix: None,
             }],
         })
         .expect("initial replace");
@@ -1984,6 +2012,7 @@ fn replace_document_generation_returns_old_chunks_and_cascades_embeddings() {
                 length: 5,
                 heading: None,
                 kind: FinalChunkKind::Paragraph,
+                retrieval_prefix: None,
             }],
         })
         .expect("second replace");
@@ -2036,6 +2065,7 @@ fn replace_document_generation_rejects_invalid_span_without_mutating_existing() 
                 length: 5,
                 heading: None,
                 kind: FinalChunkKind::Paragraph,
+                retrieval_prefix: None,
             }],
         })
         .expect("initial replace");
@@ -2059,6 +2089,7 @@ fn replace_document_generation_rejects_invalid_span_without_mutating_existing() 
                 length: 1,
                 heading: None,
                 kind: FinalChunkKind::Paragraph,
+                retrieval_prefix: None,
             }],
         })
         .expect_err("invalid span should fail before mutation");
@@ -2130,6 +2161,7 @@ fn get_chunk_text_rejects_invalid_canonical_span() {
                 length: 1,
                 heading: None,
                 kind: FinalChunkKind::Paragraph,
+                retrieval_prefix: None,
             }],
         )
         .expect("insert chunk");
@@ -2175,6 +2207,7 @@ fn get_chunk_text_reports_missing_document_text() {
                 length: 5,
                 heading: None,
                 kind: FinalChunkKind::Paragraph,
+                retrieval_prefix: None,
             }],
         )
         .expect("insert chunk");
@@ -2219,6 +2252,7 @@ fn delete_chunks_for_document_returns_deleted_ids() {
             length: 100,
             heading: None,
             kind: FinalChunkKind::Section,
+            retrieval_prefix: None,
         },
         super::ChunkInsert {
             seq: 1,
@@ -2226,6 +2260,7 @@ fn delete_chunks_for_document_returns_deleted_ids() {
             length: 50,
             heading: None,
             kind: FinalChunkKind::Section,
+            retrieval_prefix: None,
         },
     ];
     let inserted_ids = storage
@@ -2279,6 +2314,7 @@ fn insert_count_and_delete_embeddings_by_model() {
                     length: 100,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
                 super::ChunkInsert {
                     seq: 1,
@@ -2286,6 +2322,7 @@ fn insert_count_and_delete_embeddings_by_model() {
                     length: 50,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
             ],
         )
@@ -2380,6 +2417,7 @@ fn list_embedding_models_in_space_returns_distinct_sorted_models() {
                     length: 10,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
                 super::ChunkInsert {
                     seq: 1,
@@ -2387,6 +2425,7 @@ fn list_embedding_models_in_space_returns_distinct_sorted_models() {
                     length: 12,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
             ],
         )
@@ -2400,6 +2439,7 @@ fn list_embedding_models_in_space_returns_distinct_sorted_models() {
                 length: 7,
                 heading: None,
                 kind: FinalChunkKind::Section,
+                retrieval_prefix: None,
             }],
         )
         .expect("insert notes chunks");
@@ -2475,6 +2515,7 @@ fn get_unembedded_chunks_filters_active_and_model_specific_backlog() {
                     length: 100,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
                 super::ChunkInsert {
                     seq: 1,
@@ -2482,6 +2523,7 @@ fn get_unembedded_chunks_filters_active_and_model_specific_backlog() {
                     length: 50,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
                 super::ChunkInsert {
                     seq: 2,
@@ -2489,6 +2531,7 @@ fn get_unembedded_chunks_filters_active_and_model_specific_backlog() {
                     length: 25,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
             ],
         )
@@ -2502,6 +2545,7 @@ fn get_unembedded_chunks_filters_active_and_model_specific_backlog() {
                 length: 42,
                 heading: None,
                 kind: FinalChunkKind::Section,
+                retrieval_prefix: None,
             }],
         )
         .expect("insert inactive chunk");
@@ -2604,6 +2648,7 @@ fn get_unembedded_chunks_can_scope_backlog_to_selected_collections() {
                 length: 32,
                 heading: None,
                 kind: FinalChunkKind::Section,
+                retrieval_prefix: None,
             }],
         )
         .expect("insert work chunk");
@@ -2616,6 +2661,7 @@ fn get_unembedded_chunks_can_scope_backlog_to_selected_collections() {
                 length: 48,
                 heading: None,
                 kind: FinalChunkKind::Section,
+                retrieval_prefix: None,
             }],
         )
         .expect("insert notes chunk");
@@ -2671,6 +2717,7 @@ fn get_fts_dirty_documents_returns_context_and_chunks() {
                     length: 100,
                     heading: Some("# Intro".to_string()),
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
                 super::ChunkInsert {
                     seq: 1,
@@ -2678,6 +2725,7 @@ fn get_fts_dirty_documents_returns_context_and_chunks() {
                     length: 80,
                     heading: Some("# Usage".to_string()),
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
             ],
         )
@@ -2904,6 +2952,7 @@ fn count_chunks_scopes_by_space() {
                     length: 10,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
                 super::ChunkInsert {
                     seq: 1,
@@ -2911,6 +2960,7 @@ fn count_chunks_scopes_by_space() {
                     length: 12,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
             ],
         )
@@ -2924,6 +2974,7 @@ fn count_chunks_scopes_by_space() {
                 length: 7,
                 heading: None,
                 kind: FinalChunkKind::Section,
+                retrieval_prefix: None,
             }],
         )
         .expect("insert notes chunk");
@@ -3004,6 +3055,7 @@ fn count_embedded_chunks_scopes_by_space_and_deduplicates_models() {
                     length: 10,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
                 super::ChunkInsert {
                     seq: 1,
@@ -3011,6 +3063,7 @@ fn count_embedded_chunks_scopes_by_space_and_deduplicates_models() {
                     length: 12,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
             ],
         )
@@ -3024,6 +3077,7 @@ fn count_embedded_chunks_scopes_by_space_and_deduplicates_models() {
                 length: 7,
                 heading: None,
                 kind: FinalChunkKind::Section,
+                retrieval_prefix: None,
             }],
         )
         .expect("insert notes chunk");
@@ -3104,6 +3158,7 @@ fn per_collection_count_methods_return_expected_values() {
                     length: 10,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
                 super::ChunkInsert {
                     seq: 1,
@@ -3111,6 +3166,7 @@ fn per_collection_count_methods_return_expected_values() {
                     length: 12,
                     heading: None,
                     kind: FinalChunkKind::Section,
+                    retrieval_prefix: None,
                 },
             ],
         )
@@ -3124,6 +3180,7 @@ fn per_collection_count_methods_return_expected_values() {
                 length: 9,
                 heading: None,
                 kind: FinalChunkKind::Section,
+                retrieval_prefix: None,
             }],
         )
         .expect("insert chunks for doc b");

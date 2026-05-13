@@ -686,8 +686,12 @@ fn build_rerank_input(
     text_by_doc: &HashMap<i64, DocumentTextRow>,
 ) -> Result<String> {
     let document_text = candidate_document_text(candidate, text_by_doc)?;
-    let rerank_body =
+    let canonical_body =
         crate::storage::chunk_text_from_canonical(document_text.text.as_str(), &candidate.chunk)?;
+    let rerank_body = crate::ingest::chunk::chunk_retrieval_body(
+        canonical_body.as_str(),
+        candidate.chunk.retrieval_prefix.as_deref(),
+    );
 
     Ok(retrieval_text_with_prefix(
         rerank_body.as_str(),
@@ -985,6 +989,7 @@ mod tests {
                 length: 0,
                 heading: None,
                 kind: FinalChunkKind::Paragraph,
+                retrieval_prefix: None,
             },
             bm25: None,
             dense: None,
