@@ -16,6 +16,7 @@ httpdate.workspace = true
 ignore.workspace = true
 kbolt-types = { path = "../types", version = "0.1.2" }
 notify-debouncer-full.workspace = true
+pdf-extract.workspace = true
 pulldown-cmark.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

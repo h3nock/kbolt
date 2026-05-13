@@ -2196,6 +2196,73 @@ fn update_get_and_search_use_extracted_html_text() {
 }
 
 #[test]
+fn update_get_and_search_use_extracted_pdf_text() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        let file_path = work_path.join("papers/guide.pdf");
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent).expect("create pdf parent");
+        }
+        std::fs::write(
+            &file_path,
+            crate::ingest::pdf::simple_pdf_fixture(
+                "alpha pdftarget canonical body.\nSecond PDF line.",
+            ),
+        )
+        .expect("write pdf fixture");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update pdf");
+        assert_eq!(report.scanned_docs, 1);
+        assert_eq!(report.added_docs, 1);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+
+        let indexed = engine
+            .get_document(GetRequest {
+                locator: Locator::Path("api/papers/guide.pdf".to_string()),
+                space: Some("work".to_string()),
+                offset: None,
+                limit: None,
+            })
+            .expect("get indexed pdf text");
+        assert!(indexed.content.contains("alpha pdftarget canonical body."));
+        assert!(indexed.content.contains("Second PDF line."));
+        assert!(!indexed.content.contains("%PDF-1.4"));
+
+        let response = engine
+            .search(SearchRequest {
+                query: "pdftarget".to_string(),
+                mode: SearchMode::Keyword,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 5,
+                min_score: 0.0,
+                no_rerank: true,
+                debug: false,
+            })
+            .expect("search pdf");
+
+        assert_eq!(response.results.len(), 1);
+        assert!(response.results[0]
+            .text
+            .contains("alpha pdftarget canonical body."));
+        assert!(!response.results[0].text.contains("%PDF-1.4"));
+    });
+}
+
+#[test]
 fn search_errors_when_canonical_text_is_missing() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);

@@ -16,6 +16,7 @@ httpdate = "1.0"
 ignore = "0.4"
 ctrlc = "3.5"
 notify-debouncer-full = "0.6"
+pdf-extract = "0.10"
 pulldown-cmark = "0.13"
 rusqlite = "0.33"
 serde = { version = "1.0", features = ["derive"] }

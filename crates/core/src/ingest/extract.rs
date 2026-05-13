@@ -88,6 +88,7 @@ pub fn default_registry() -> ExtractorRegistry {
     let mut registry = ExtractorRegistry::new();
     registry.register(Arc::new(crate::ingest::html::HtmlExtractor));
     registry.register(Arc::new(crate::ingest::markdown::MarkdownExtractor));
+    registry.register(Arc::new(crate::ingest::pdf::PdfExtractor));
     registry.register(Arc::new(crate::ingest::code::CodeExtractor));
     registry.register(Arc::new(crate::ingest::plaintext::PlaintextExtractor));
     registry
@@ -214,6 +215,7 @@ mod tests {
         let html = registry.resolve_for_path(Path::new("docs/page.html"));
         let htm = registry.resolve_for_path(Path::new("docs/page.htm"));
         let md = registry.resolve_for_path(Path::new("notes/readme.md"));
+        let pdf = registry.resolve_for_path(Path::new("papers/guide.pdf"));
         let code = registry.resolve_for_path(Path::new("src/lib.rs"));
         let unknown = registry.resolve_for_path(Path::new("notes/readme.rst"));
 
@@ -227,6 +229,9 @@ mod tests {
         assert!(md
             .as_ref()
             .is_some_and(|extractor| extractor.supports().contains(&"md")));
+        assert!(pdf
+            .as_ref()
+            .is_some_and(|extractor| extractor.profile_key() == "pdf"));
         assert!(code
             .as_ref()
             .is_some_and(|extractor| extractor.profile_key() == "code"));
