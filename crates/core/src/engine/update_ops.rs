@@ -835,8 +835,12 @@ impl Engine {
             let entry = match entry {
                 Ok(item) => item,
                 Err(err) => {
-                    let error_path = walk_error_path(&err).map(Path::to_path_buf);
-                    if let Some(path) = error_path.as_deref() {
+                    let error_scope = collect_walk_error_scope(&err);
+                    let error_path = error_scope.paths.first().cloned();
+                    if error_scope.collection_incomplete || error_scope.paths.is_empty() {
+                        collection_walk_incomplete = true;
+                    }
+                    for path in &error_scope.paths {
                         let failed_path =
                             match collection_relative_path(&target.collection.path, path) {
                                 Ok(relative) => {
@@ -1381,18 +1385,52 @@ impl Engine {
     }
 }
 
-fn walk_error_path(err: &ignore::Error) -> Option<&Path> {
+#[derive(Debug, Default)]
+struct WalkErrorScope {
+    paths: Vec<std::path::PathBuf>,
+    collection_incomplete: bool,
+}
+
+fn collect_walk_error_scope(err: &ignore::Error) -> WalkErrorScope {
+    let mut scope = WalkErrorScope::default();
+    collect_walk_error_scope_into(err, &mut scope, false);
+    scope
+}
+
+fn collect_walk_error_scope_into(
+    err: &ignore::Error,
+    scope: &mut WalkErrorScope,
+    has_path_context: bool,
+) {
     match err {
-        ignore::Error::Partial(errors) => errors.iter().find_map(walk_error_path),
-        ignore::Error::WithLineNumber { err, .. } | ignore::Error::WithDepth { err, .. } => {
-            walk_error_path(err)
+        ignore::Error::Partial(errors) => {
+            if errors.is_empty() {
+                scope.collection_incomplete = true;
+            }
+            for err in errors {
+                collect_walk_error_scope_into(err, scope, has_path_context);
+            }
         }
-        ignore::Error::WithPath { path, .. } => Some(path.as_path()),
-        ignore::Error::Loop { child, .. } => Some(child.as_path()),
-        ignore::Error::Io(_)
-        | ignore::Error::Glob { .. }
+        ignore::Error::WithLineNumber { err, .. } | ignore::Error::WithDepth { err, .. } => {
+            collect_walk_error_scope_into(err, scope, has_path_context);
+        }
+        ignore::Error::WithPath { path, err } => {
+            scope.paths.push(path.clone());
+            collect_walk_error_scope_into(err, scope, true);
+        }
+        ignore::Error::Loop { child, .. } => {
+            scope.paths.push(child.clone());
+        }
+        ignore::Error::Io(_) => {
+            if !has_path_context {
+                scope.collection_incomplete = true;
+            }
+        }
+        ignore::Error::Glob { .. }
         | ignore::Error::UnrecognizedFileType(_)
-        | ignore::Error::InvalidDefinition => None,
+        | ignore::Error::InvalidDefinition => {
+            scope.collection_incomplete = true;
+        }
     }
 }
 
@@ -1413,6 +1451,82 @@ fn path_is_under_failed_walk(
                 .strip_prefix(prefix.as_str())
                 .is_some_and(|suffix| suffix.starts_with('/'))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+    use std::path::PathBuf;
+
+    #[test]
+    fn walk_error_scope_collects_every_partial_path() {
+        let err = ignore::Error::Partial(vec![
+            ignore::Error::WithPath {
+                path: PathBuf::from("/collection/blocked-a"),
+                err: Box::new(ignore::Error::Io(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "blocked",
+                ))),
+            },
+            ignore::Error::WithDepth {
+                depth: 2,
+                err: Box::new(ignore::Error::Loop {
+                    ancestor: PathBuf::from("/collection"),
+                    child: PathBuf::from("/collection/blocked-b"),
+                }),
+            },
+        ]);
+
+        let scope = collect_walk_error_scope(&err);
+
+        assert_eq!(
+            scope.paths,
+            vec![
+                PathBuf::from("/collection/blocked-a"),
+                PathBuf::from("/collection/blocked-b")
+            ]
+        );
+        assert!(!scope.collection_incomplete);
+    }
+
+    #[test]
+    fn walk_error_scope_marks_pathless_errors_incomplete() {
+        let err = ignore::Error::Partial(vec![
+            ignore::Error::WithPath {
+                path: PathBuf::from("/collection/blocked"),
+                err: Box::new(ignore::Error::Io(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "blocked",
+                ))),
+            },
+            ignore::Error::Io(io::Error::new(io::ErrorKind::Other, "unknown")),
+        ]);
+
+        let scope = collect_walk_error_scope(&err);
+
+        assert_eq!(scope.paths, vec![PathBuf::from("/collection/blocked")]);
+        assert!(scope.collection_incomplete);
+    }
+
+    #[test]
+    fn walk_error_scope_treats_ignore_rule_errors_as_incomplete() {
+        let err = ignore::Error::WithPath {
+            path: PathBuf::from("/collection/.gitignore"),
+            err: Box::new(ignore::Error::WithLineNumber {
+                line: 4,
+                err: Box::new(ignore::Error::Glob {
+                    glob: Some("[".to_string()),
+                    err: "invalid glob".to_string(),
+                }),
+            }),
+        };
+
+        let scope = collect_walk_error_scope(&err);
+
+        assert_eq!(scope.paths, vec![PathBuf::from("/collection/.gitignore")]);
+        assert!(scope.collection_incomplete);
+    }
 }
 
 #[derive(Debug)]
