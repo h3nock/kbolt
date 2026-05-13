@@ -108,7 +108,13 @@ pub fn chunk_canonical_document_with_counter(
     policy: &ChunkPolicy,
     counter: &dyn TokenCounter,
 ) -> Result<Vec<FinalChunk>> {
-    chunk_document_with_counter_inner(document, policy, counter, TableHeaderMode::CanonicalBlocks)
+    let chunks = chunk_document_with_counter_inner(
+        document,
+        policy,
+        counter,
+        TableHeaderMode::CanonicalBlocks,
+    )?;
+    hydrate_canonical_chunk_text(document, chunks)
 }
 
 fn chunk_document_with_counter_inner(
@@ -218,6 +224,39 @@ fn count_candidate_chunk_tokens(
 
 fn count_single_block_tokens(block: &ExtractedBlock, counter: &dyn TokenCounter) -> Result<usize> {
     count_finalized_chunk_tokens(std::slice::from_ref(block), counter)
+}
+
+fn hydrate_canonical_chunk_text(
+    document: &ExtractedDocument,
+    mut chunks: Vec<FinalChunk>,
+) -> Result<Vec<FinalChunk>> {
+    let canonical_text = document
+        .blocks
+        .iter()
+        .map(|block| block.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    for chunk in &mut chunks {
+        let end = chunk.offset.checked_add(chunk.length).ok_or_else(|| {
+            KboltError::Internal("canonical chunk text span overflows usize".to_string())
+        })?;
+        if end > canonical_text.len()
+            || !canonical_text.is_char_boundary(chunk.offset)
+            || !canonical_text.is_char_boundary(end)
+        {
+            return Err(KboltError::Internal(format!(
+                "canonical chunk text span {}..{} is invalid for text length {}",
+                chunk.offset,
+                end,
+                canonical_text.len()
+            ))
+            .into());
+        }
+        chunk.text = canonical_text[chunk.offset..end].to_string();
+    }
+
+    Ok(chunks)
 }
 
 fn normalized_soft_max(policy: &ChunkPolicy) -> usize {
@@ -996,9 +1035,9 @@ mod tests {
 
     use crate::config::{ChunkPolicy, ChunkingConfig};
     use crate::ingest::chunk::{
-        best_narrative_cut, can_pack_together, chunk_document, chunk_document_with_counter,
-        derive_chunk_kind, resolve_policy, score_narrative_cut, FinalChunkKind, NarrativeBoundary,
-        TokenCounter, WhitespaceTokenCounter,
+        best_narrative_cut, can_pack_together, chunk_canonical_document, chunk_document,
+        chunk_document_with_counter, derive_chunk_kind, resolve_policy, score_narrative_cut,
+        FinalChunkKind, NarrativeBoundary, TokenCounter, WhitespaceTokenCounter,
     };
     use crate::ingest::extract::{BlockKind, ExtractedBlock, ExtractedDocument};
 
@@ -1212,6 +1251,31 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].text, "alpha");
         assert_eq!(chunks[1].text, "beta");
+    }
+
+    #[test]
+    fn canonical_chunk_text_matches_stored_span_after_split_fragments_pack() {
+        let policy = ChunkPolicy {
+            target_tokens: 2,
+            soft_max_tokens: 6,
+            hard_max_tokens: 3,
+            boundary_overlap_tokens: 0,
+            neighbor_window: 1,
+            contextual_prefix: true,
+        };
+        let text = "one two three four five six";
+        let document = ExtractedDocument {
+            blocks: vec![block_with(BlockKind::Paragraph, text, 0, &[])],
+            metadata: HashMap::new(),
+            title: None,
+        };
+
+        let chunks = chunk_canonical_document(&document, &policy);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].offset, 0);
+        assert_eq!(chunks[0].length, text.len());
+        assert_eq!(chunks[0].text, text);
     }
 
     #[test]
