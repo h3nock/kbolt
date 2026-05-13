@@ -729,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_get_wrapper_reports_deleted_files_as_warnings() {
+    fn multi_get_wrapper_returns_deleted_indexed_documents_as_stale() {
         with_isolated_xdg_dirs(|| {
             let root = tempdir().expect("create collection root");
             let engine = Engine::new(None).expect("create engine");
@@ -776,12 +776,14 @@ mod tests {
                     max_bytes: 51_200,
                 })
                 .expect("run multi_get");
-            assert_eq!(response.documents.len(), 1);
+            assert_eq!(response.documents.len(), 2);
+            assert_eq!(response.documents[0].path, "api/a.md");
+            assert_eq!(response.documents[1].path, "api/b.md");
+            assert_eq!(response.documents[1].content, "beta");
+            assert!(response.documents[1].stale);
             assert!(response.omitted.is_empty());
-            assert_eq!(response.resolved_count, 1);
-            assert_eq!(response.warnings.len(), 1);
-            assert!(response.warnings[0].contains("file deleted since indexing:"));
-            assert!(response.warnings[0].contains("b.md"));
+            assert_eq!(response.resolved_count, 2);
+            assert!(response.warnings.is_empty());
         });
     }
 

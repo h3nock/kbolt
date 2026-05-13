@@ -1579,6 +1579,9 @@ fn get_document_by_path_supports_offsets_and_stale_detection() {
             })
             .expect("get stale document");
         assert!(stale.stale);
+        assert_eq!(stale.content, "line-a\nline-b\nline-c");
+        assert!(!stale.content.contains("line-d"));
+        assert_eq!(stale.total_lines, 3);
         assert_eq!(stale.returned_lines, stale.total_lines);
     });
 }
@@ -1637,7 +1640,7 @@ fn get_document_by_docid_resolves_uniquely_and_honors_optional_space_scope() {
 }
 
 #[test]
-fn get_document_errors_for_deleted_file_and_ambiguous_docid() {
+fn get_document_returns_indexed_text_for_deleted_file_and_errors_for_ambiguous_docid() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
         engine.add_space("work", None).expect("add work");
@@ -1654,24 +1657,28 @@ fn get_document_errors_for_deleted_file_and_ambiguous_docid() {
             .expect("initial update");
         std::fs::remove_file(&file_path).expect("remove file");
 
-        let deleted_err = engine
+        let deleted = engine
             .get_document(GetRequest {
                 locator: Locator::Path("api/src/lib.rs".to_string()),
                 space: Some("work".to_string()),
                 offset: None,
                 limit: None,
             })
-            .expect_err("deleted file should error");
-        match KboltError::from(deleted_err) {
-            KboltError::FileDeleted(path) => {
-                assert!(
-                    path.ends_with("src/lib.rs"),
-                    "unexpected path: {}",
-                    path.display()
-                );
-            }
-            other => panic!("unexpected error: {other}"),
-        }
+            .expect("deleted source should still return indexed text");
+        assert_eq!(deleted.content, "fn alpha() {}");
+        assert!(deleted.stale);
+
+        std::fs::create_dir(&file_path).expect("replace source file with directory");
+        let unreadable = engine
+            .get_document(GetRequest {
+                locator: Locator::Path("api/src/lib.rs".to_string()),
+                space: Some("work".to_string()),
+                offset: None,
+                limit: None,
+            })
+            .expect("unreadable source should still return indexed text");
+        assert_eq!(unreadable.content, "fn alpha() {}");
+        assert!(unreadable.stale);
 
         let work_space = engine.storage().get_space("work").expect("get work space");
         let collection = engine
@@ -1718,6 +1725,57 @@ fn get_document_errors_for_deleted_file_and_ambiguous_docid() {
             }
             other => panic!("unexpected error: {other}"),
         }
+    });
+}
+
+#[test]
+fn get_document_errors_when_canonical_text_is_missing() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        write_text_file(&work_path.join("guide.md"), "alpha canonical body\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let document = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.md")
+            .expect("query document")
+            .expect("document exists");
+        {
+            let conn = rusqlite::Connection::open(engine.config().cache_dir.join("meta.sqlite"))
+                .expect("open metadata db");
+            conn.execute(
+                "DELETE FROM document_texts WHERE doc_id = ?1",
+                [document.id],
+            )
+            .expect("delete canonical text");
+        }
+
+        let err = engine
+            .get_document(GetRequest {
+                locator: Locator::Path("api/guide.md".to_string()),
+                space: Some("work".to_string()),
+                offset: None,
+                limit: None,
+            })
+            .expect_err("missing canonical text should fail explicitly");
+        assert!(
+            err.to_string().contains("missing persisted canonical text"),
+            "unexpected error: {err}"
+        );
     });
 }
 
@@ -1809,7 +1867,7 @@ fn multi_get_respects_max_bytes_and_supports_mixed_locators() {
 }
 
 #[test]
-fn multi_get_reports_deleted_files_as_warnings() {
+fn multi_get_returns_deleted_indexed_documents_as_stale() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
         engine.add_space("work", None).expect("add work");
@@ -1841,13 +1899,14 @@ fn multi_get_reports_deleted_files_as_warnings() {
             })
             .expect("run multi_get");
 
-        assert_eq!(result.resolved_count, 1);
-        assert_eq!(result.documents.len(), 1);
+        assert_eq!(result.resolved_count, 2);
+        assert_eq!(result.documents.len(), 2);
         assert_eq!(result.documents[0].path, "api/a.md");
+        assert_eq!(result.documents[1].path, "api/b.md");
+        assert_eq!(result.documents[1].content, "beta");
+        assert!(result.documents[1].stale);
         assert!(result.omitted.is_empty());
-        assert_eq!(result.warnings.len(), 1);
-        assert!(result.warnings[0].contains("file deleted since indexing:"));
-        assert!(result.warnings[0].contains("b.md"));
+        assert!(result.warnings.is_empty());
     });
 }
 

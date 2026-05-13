@@ -535,19 +535,14 @@ impl Engine {
             }
         };
 
+        let document_text = self.storage.get_document_text(document.id)?;
         let full_path = collection_row.path.join(&document.path);
-        let bytes = match std::fs::read(&full_path) {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Err(KboltError::FileDeleted(full_path).into())
-            }
-            Err(err) => return Err(err.into()),
+        let stale = match std::fs::read(&full_path) {
+            Ok(bytes) => sha256_hex(&bytes) != document.hash,
+            Err(_) => true,
         };
 
-        let raw_content = String::from_utf8_lossy(&bytes).into_owned();
-        let stale = sha256_hex(&bytes) != document.hash;
-
-        let lines = raw_content.lines().collect::<Vec<_>>();
+        let lines = document_text.text.lines().collect::<Vec<_>>();
         let total_lines = lines.len();
         let start = offset.unwrap_or(0).min(total_lines);
         let requested = limit.unwrap_or(total_lines.saturating_sub(start));
@@ -599,13 +594,6 @@ impl Engine {
             }) {
                 Ok(document) => document,
                 Err(err) => match KboltError::from(err) {
-                    KboltError::FileDeleted(path) => {
-                        warnings.push(format!(
-                            "file deleted since indexing: {}. run `kbolt update` to refresh.",
-                            path.display()
-                        ));
-                        continue;
-                    }
                     KboltError::DocumentNotFound { path } => {
                         warnings.push(format!("document not found: {path}"));
                         continue;
