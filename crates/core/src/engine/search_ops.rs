@@ -916,17 +916,8 @@ fn finalize_search_results(
     crate::profile::timed_search_stage("final_load_texts", || {
         ensure_document_texts_loaded(storage, &final_doc_ids, text_by_doc)
     })?;
-    let mut neighbor_doc_ids = Vec::new();
-    for candidate in &candidates {
-        let document_text = candidate_document_text(candidate, text_by_doc)?;
-        if result_neighbor_window(chunking, document_text) > 0 {
-            neighbor_doc_ids.push(candidate.doc_id);
-        }
-    }
-    neighbor_doc_ids.sort_unstable();
-    neighbor_doc_ids.dedup();
     crate::profile::timed_search_stage("final_load_neighbors", || {
-        ensure_neighbor_chunks_loaded(storage, &neighbor_doc_ids, chunks_by_doc)
+        ensure_neighbor_chunks_loaded(storage, &candidates, text_by_doc, chunks_by_doc, chunking)
     })?;
 
     let mut results = Vec::new();
@@ -985,19 +976,40 @@ fn ensure_document_texts_loaded(
 
 fn ensure_neighbor_chunks_loaded(
     storage: &Storage,
-    doc_ids: &[i64],
+    candidates: &[PendingSearchCandidate],
+    text_by_doc: &HashMap<i64, DocumentTextRow>,
     chunks_by_doc: &mut HashMap<i64, Vec<ChunkRow>>,
+    chunking: &crate::config::ChunkingConfig,
 ) -> Result<()> {
-    let missing = doc_ids
-        .iter()
-        .copied()
-        .filter(|doc_id| !chunks_by_doc.contains_key(doc_id))
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
+    let mut ranges = Vec::new();
+    for candidate in candidates {
+        if chunks_by_doc.contains_key(&candidate.doc_id) {
+            continue;
+        }
+
+        let document_text = candidate_document_text(candidate, text_by_doc)?;
+        let neighbor_window = result_neighbor_window(chunking, document_text);
+        if neighbor_window == 0 {
+            continue;
+        }
+
+        let window = neighbor_window.min(i32::MAX as usize) as i32;
+        ranges.push((
+            candidate.doc_id,
+            candidate.chunk.seq.saturating_sub(window),
+            candidate.chunk.seq.saturating_add(window),
+        ));
+    }
+
+    if ranges.is_empty() {
         return Ok(());
     }
 
-    chunks_by_doc.extend(storage.get_chunks_for_documents(&missing)?);
+    crate::profile::increment_search_count("neighbor_chunk_ranges", ranges.len() as u64);
+    let loaded = storage.get_chunks_for_document_seq_ranges(&ranges)?;
+    let loaded_count = loaded.values().map(Vec::len).sum::<usize>();
+    crate::profile::increment_search_count("neighbor_chunks_loaded", loaded_count as u64);
+    chunks_by_doc.extend(loaded);
     Ok(())
 }
 

@@ -1358,6 +1358,68 @@ CREATE TABLE IF NOT EXISTS document_texts (
         Ok(chunks_by_doc)
     }
 
+    pub fn get_chunks_for_document_seq_ranges(
+        &self,
+        ranges: &[(i64, i32, i32)],
+    ) -> Result<HashMap<i64, Vec<ChunkRow>>> {
+        if ranges.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut ranges_by_doc: HashMap<i64, Vec<(i32, i32)>> = HashMap::new();
+        for (doc_id, min_seq, max_seq) in ranges {
+            if min_seq > max_seq {
+                return Err(CoreError::Internal(format!(
+                    "chunk seq range min must be <= max for doc {doc_id}: {min_seq} > {max_seq}"
+                )));
+            }
+
+            ranges_by_doc
+                .entry(*doc_id)
+                .or_default()
+                .push((*min_seq, *max_seq));
+        }
+
+        for doc_ranges in ranges_by_doc.values_mut() {
+            doc_ranges.sort_unstable();
+            let mut merged: Vec<(i32, i32)> = Vec::with_capacity(doc_ranges.len());
+            for (min_seq, max_seq) in doc_ranges.drain(..) {
+                if let Some((_, merged_max)) = merged.last_mut() {
+                    if min_seq <= merged_max.saturating_add(1) {
+                        *merged_max = (*merged_max).max(max_seq);
+                        continue;
+                    }
+                }
+                merged.push((min_seq, max_seq));
+            }
+            *doc_ranges = merged;
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, doc_id, seq, offset, length, heading, kind, retrieval_prefix
+             FROM chunks
+             WHERE doc_id = ?1 AND seq BETWEEN ?2 AND ?3
+             ORDER BY seq ASC",
+        )?;
+
+        let mut chunks_by_doc: HashMap<i64, Vec<ChunkRow>> = HashMap::new();
+        for (doc_id, doc_ranges) in ranges_by_doc {
+            chunks_by_doc.entry(doc_id).or_default();
+            for (min_seq, max_seq) in doc_ranges {
+                let rows = stmt.query_map(params![doc_id, min_seq, max_seq], decode_chunk_row)?;
+                for row in rows {
+                    chunks_by_doc.entry(doc_id).or_default().push(row?);
+                }
+            }
+        }
+
+        Ok(chunks_by_doc)
+    }
+
     pub fn get_chunks(&self, chunk_ids: &[i64]) -> Result<Vec<ChunkRow>> {
         if chunk_ids.is_empty() {
             return Ok(Vec::new());

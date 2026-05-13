@@ -1598,6 +1598,80 @@ fn insert_and_get_chunks_for_document() {
 }
 
 #[test]
+fn get_chunks_for_document_seq_ranges_loads_only_requested_windows() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let first_doc = storage
+        .upsert_document(
+            collection_id,
+            "src/first.rs",
+            "first",
+            DocumentTitleSource::Extracted,
+            "hash-first",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert first doc");
+    let second_doc = storage
+        .upsert_document(
+            collection_id,
+            "src/second.rs",
+            "second",
+            DocumentTitleSource::Extracted,
+            "hash-second",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert second doc");
+    let chunks = (0..6)
+        .map(|seq| super::ChunkInsert {
+            seq,
+            offset: (seq as usize) * 10,
+            length: 10,
+            heading: None,
+            kind: FinalChunkKind::Paragraph,
+            retrieval_prefix: None,
+        })
+        .collect::<Vec<_>>();
+    storage
+        .insert_chunks(first_doc, &chunks)
+        .expect("insert first chunks");
+    storage
+        .insert_chunks(second_doc, &chunks)
+        .expect("insert second chunks");
+
+    let chunks_by_doc = storage
+        .get_chunks_for_document_seq_ranges(&[
+            (first_doc, 1, 3),
+            (first_doc, 2, 4),
+            (second_doc, 0, 0),
+        ])
+        .expect("load chunk ranges");
+
+    let first_seqs = chunks_by_doc[&first_doc]
+        .iter()
+        .map(|chunk| chunk.seq)
+        .collect::<Vec<_>>();
+    let second_seqs = chunks_by_doc[&second_doc]
+        .iter()
+        .map(|chunk| chunk.seq)
+        .collect::<Vec<_>>();
+
+    assert_eq!(first_seqs, vec![1, 2, 3, 4]);
+    assert_eq!(second_seqs, vec![0]);
+}
+
+#[test]
 fn active_search_scope_summary_counts_active_chunks() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
