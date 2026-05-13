@@ -23,10 +23,17 @@ const TANTIVY_DIR_NAME: &str = "tantivy";
 const USEARCH_FILENAME: &str = "vectors.usearch";
 const SCHEMA_VERSION: i64 = 3;
 
+#[derive(Clone, Copy)]
+enum UsearchSaveMode {
+    Immediate,
+    Deferred,
+}
+
 pub struct Storage {
     db: Mutex<Connection>,
     cache_dir: PathBuf,
     spaces: RwLock<HashMap<String, Arc<SpaceIndexes>>>,
+    dirty_usearch_spaces: Mutex<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,6 +355,7 @@ CREATE TABLE IF NOT EXISTS document_texts (
             db: Mutex::new(conn),
             cache_dir: cache_dir.to_path_buf(),
             spaces: RwLock::new(HashMap::new()),
+            dirty_usearch_spaces: Mutex::new(HashSet::new()),
         };
         storage.open_space(DEFAULT_SPACE_NAME)?;
 
@@ -2200,6 +2208,23 @@ CREATE TABLE IF NOT EXISTS document_texts (
     }
 
     pub fn batch_insert_usearch(&self, space: &str, entries: &[(i64, &[f32])]) -> Result<()> {
+        self.batch_insert_usearch_with_save_mode(space, entries, UsearchSaveMode::Immediate)
+    }
+
+    pub(crate) fn batch_insert_usearch_deferred(
+        &self,
+        space: &str,
+        entries: &[(i64, &[f32])],
+    ) -> Result<()> {
+        self.batch_insert_usearch_with_save_mode(space, entries, UsearchSaveMode::Deferred)
+    }
+
+    fn batch_insert_usearch_with_save_mode(
+        &self,
+        space: &str,
+        entries: &[(i64, &[f32])],
+        save_mode: UsearchSaveMode,
+    ) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -2238,6 +2263,10 @@ CREATE TABLE IF NOT EXISTS document_texts (
         })?;
         crate::profile::record_update_stage("usearch_reserve", reserve_started.elapsed());
 
+        if matches!(save_mode, UsearchSaveMode::Deferred) {
+            self.mark_usearch_dirty(space)?;
+        }
+
         let add_started = std::time::Instant::now();
         for (key, vector) in entries {
             let key = u64::try_from(*key).map_err(|_| {
@@ -2249,13 +2278,28 @@ CREATE TABLE IF NOT EXISTS document_texts (
         }
         crate::profile::record_update_stage("usearch_add", add_started.elapsed());
 
-        let save_started = std::time::Instant::now();
-        save_usearch_index(&index, &space_indexes.usearch_path)?;
-        crate::profile::record_update_stage("usearch_save", save_started.elapsed());
+        if matches!(save_mode, UsearchSaveMode::Immediate) {
+            let save_started = std::time::Instant::now();
+            save_usearch_index(&index, &space_indexes.usearch_path)?;
+            crate::profile::record_update_stage("usearch_save", save_started.elapsed());
+        }
         Ok(())
     }
 
     pub fn delete_usearch(&self, space: &str, keys: &[i64]) -> Result<()> {
+        self.delete_usearch_with_save_mode(space, keys, UsearchSaveMode::Immediate)
+    }
+
+    pub(crate) fn delete_usearch_deferred(&self, space: &str, keys: &[i64]) -> Result<()> {
+        self.delete_usearch_with_save_mode(space, keys, UsearchSaveMode::Deferred)
+    }
+
+    fn delete_usearch_with_save_mode(
+        &self,
+        space: &str,
+        keys: &[i64],
+        save_mode: UsearchSaveMode,
+    ) -> Result<()> {
         if keys.is_empty() {
             return Ok(());
         }
@@ -2265,6 +2309,10 @@ CREATE TABLE IF NOT EXISTS document_texts (
             .usearch_index
             .write()
             .map_err(|_| CoreError::poisoned("usearch index"))?;
+
+        if matches!(save_mode, UsearchSaveMode::Deferred) {
+            self.mark_usearch_dirty(space)?;
+        }
 
         let delete_started = std::time::Instant::now();
         for key in keys {
@@ -2276,6 +2324,61 @@ CREATE TABLE IF NOT EXISTS document_texts (
                 .map_err(|err| CoreError::Internal(format!("usearch remove failed: {err}")))?;
         }
         crate::profile::record_update_stage("usearch_delete", delete_started.elapsed());
+
+        if matches!(save_mode, UsearchSaveMode::Immediate) {
+            let save_started = std::time::Instant::now();
+            save_usearch_index(&index, &space_indexes.usearch_path)?;
+            crate::profile::record_update_stage("usearch_save", save_started.elapsed());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn save_dirty_usearch_indexes(&self) -> Result<()> {
+        let spaces = {
+            let mut dirty = self
+                .dirty_usearch_spaces
+                .lock()
+                .map_err(|_| CoreError::poisoned("dirty usearch spaces"))?;
+            if dirty.is_empty() {
+                return Ok(());
+            }
+
+            let mut spaces = dirty.drain().collect::<Vec<_>>();
+            spaces.sort();
+            spaces
+        };
+
+        for (index, space) in spaces.iter().enumerate() {
+            if let Err(err) = self.save_usearch_for_space(space) {
+                let mut dirty = self
+                    .dirty_usearch_spaces
+                    .lock()
+                    .map_err(|_| CoreError::poisoned("dirty usearch spaces"))?;
+                for unsaved in &spaces[index..] {
+                    dirty.insert(unsaved.clone());
+                }
+                return Err(err);
+            }
+            crate::profile::increment_update_count("usearch_saved_spaces", 1);
+        }
+
+        Ok(())
+    }
+
+    fn mark_usearch_dirty(&self, space: &str) -> Result<()> {
+        self.dirty_usearch_spaces
+            .lock()
+            .map_err(|_| CoreError::poisoned("dirty usearch spaces"))?
+            .insert(space.to_string());
+        Ok(())
+    }
+
+    fn save_usearch_for_space(&self, space: &str) -> Result<()> {
+        let space_indexes = self.get_space_indexes(space)?;
+        let index = space_indexes
+            .usearch_index
+            .read()
+            .map_err(|_| CoreError::poisoned("usearch index"))?;
 
         let save_started = std::time::Instant::now();
         save_usearch_index(&index, &space_indexes.usearch_path)?;

@@ -12,6 +12,14 @@ impl Engine {
 
     pub(super) fn update_unlocked(&self, options: UpdateOptions) -> Result<UpdateReport> {
         let _profile = crate::profile::UpdateProfileGuard::start();
+        let update_result = self.run_update_unlocked(options);
+        let flush_result = crate::profile::timed_update_stage("usearch_save_dirty", || {
+            self.storage.save_dirty_usearch_indexes()
+        });
+        finish_update_with_usearch_flush(update_result, flush_result)
+    }
+
+    fn run_update_unlocked(&self, options: UpdateOptions) -> Result<UpdateReport> {
         let started = Instant::now();
         let mut report = UpdateReport {
             scanned_docs: 0,
@@ -490,7 +498,7 @@ impl Engine {
                 .map(|(chunk_id, vector)| (*chunk_id, vector.as_slice()))
                 .collect::<Vec<_>>();
             crate::profile::increment_update_count("usearch_vectors", refs.len() as u64);
-            self.storage.batch_insert_usearch(&space, &refs)?;
+            self.storage.batch_insert_usearch_deferred(&space, &refs)?;
         }
 
         crate::profile::timed_update_stage("sqlite_insert_embeddings", || {
@@ -1292,9 +1300,9 @@ impl Engine {
                     self.storage
                         .delete_tantivy(&target.space, &replacement.old_chunk_ids)
                 })?;
-                crate::profile::timed_update_stage("usearch_delete_save", || {
+                crate::profile::timed_update_stage("usearch_delete", || {
                     self.storage
-                        .delete_usearch(&target.space, &replacement.old_chunk_ids)
+                        .delete_usearch_deferred(&target.space, &replacement.old_chunk_ids)
                 })?;
             }
 
@@ -1711,6 +1719,21 @@ impl PendingDocumentIndexing {
                 }
             }
         }
+    }
+}
+
+fn finish_update_with_usearch_flush(
+    update_result: Result<UpdateReport>,
+    flush_result: Result<()>,
+) -> Result<UpdateReport> {
+    match (update_result, flush_result) {
+        (Ok(report), Ok(())) => Ok(report),
+        (Err(err), Ok(())) => Err(err),
+        (Ok(_), Err(err)) => Err(err),
+        (Err(update_err), Err(flush_err)) => Err(KboltError::Internal(format!(
+            "update failed: {update_err}; additionally failed to save dirty vector indexes: {flush_err}"
+        ))
+        .into()),
     }
 }
 

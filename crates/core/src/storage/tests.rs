@@ -453,6 +453,49 @@ fn delete_usearch_removes_keys() {
 }
 
 #[test]
+fn deferred_usearch_writes_persist_after_explicit_save() {
+    let tmp = tempdir().expect("create tempdir");
+    let cache_dir = tmp.path().join("cache");
+    let storage = Storage::new(&cache_dir).expect("create storage");
+    storage.create_space("work", None).expect("create space");
+
+    storage
+        .batch_insert_usearch_deferred("work", &[(11, &[1.0, 0.0]), (22, &[0.0, 1.0])])
+        .expect("deferred insert");
+    storage
+        .save_dirty_usearch_indexes()
+        .expect("save dirty usearch");
+
+    let reopened = Storage::new(&cache_dir).expect("reopen storage");
+    reopened.open_space("work").expect("open work");
+    let hits = reopened
+        .query_dense("work", &[0.0, 1.0], 1)
+        .expect("query reopened usearch");
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].chunk_id, 22);
+
+    storage
+        .delete_usearch_deferred("work", &[22])
+        .expect("deferred delete");
+    storage
+        .save_dirty_usearch_indexes()
+        .expect("save dirty delete");
+
+    let reopened = Storage::new(&cache_dir).expect("reopen storage after delete");
+    reopened.open_space("work").expect("open work after delete");
+    assert_eq!(
+        reopened.count_usearch("work").expect("count after delete"),
+        1
+    );
+    let hits = reopened
+        .query_dense("work", &[1.0, 0.0], 1)
+        .expect("query remaining vector");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].chunk_id, 11);
+}
+
+#[test]
 fn clear_usearch_resets_index() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
