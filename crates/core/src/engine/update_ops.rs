@@ -555,58 +555,6 @@ impl Engine {
         Ok(accepted)
     }
 
-    fn preflight_prepared_embeddings(
-        &self,
-        prepared: Vec<PreparedChunkEmbedding>,
-        report: &mut UpdateReport,
-        failed_docs: &mut HashSet<UpdateDocKey>,
-    ) -> Result<PreparedEmbeddingPreflight> {
-        let Some(sizer) = self.embedding_document_sizer.as_ref() else {
-            return Ok(PreparedEmbeddingPreflight {
-                accepted: prepared,
-                rejected_chunk_indexes: Vec::new(),
-            });
-        };
-
-        let mut preflight = PreparedEmbeddingPreflight {
-            accepted: Vec::with_capacity(prepared.len()),
-            rejected_chunk_indexes: Vec::new(),
-        };
-        for embedding in prepared {
-            match count_document_tokens_profiled(
-                sizer.as_ref(),
-                &embedding.text,
-                "tokenize_preflight",
-                "tokenize_preflight_calls",
-            ) {
-                Ok(token_count) if token_count <= embedding.max_document_tokens => {
-                    preflight.accepted.push(embedding);
-                }
-                Ok(token_count) => {
-                    report.errors.push(file_error(
-                        Some(embedding.path.clone()),
-                        format!(
-                            "embed preflight failed: payload has {token_count} tokens, exceeding hard_max_tokens {}",
-                            embedding.max_document_tokens
-                        ),
-                    ));
-                    failed_docs.insert(embedding.doc_key);
-                    preflight.rejected_chunk_indexes.push(embedding.chunk_index);
-                }
-                Err(err) => {
-                    report.errors.push(file_error(
-                        Some(embedding.path.clone()),
-                        format!("embed preflight token count failed: {err}"),
-                    ));
-                    failed_docs.insert(embedding.doc_key);
-                    preflight.rejected_chunk_indexes.push(embedding.chunk_index);
-                }
-            }
-        }
-
-        Ok(preflight)
-    }
-
     fn document_has_current_canonical_text(
         &self,
         doc_id: i64,
@@ -1246,32 +1194,17 @@ impl Engine {
                 })
                 .collect::<Vec<_>>();
             let mut prepared_embeddings = Vec::new();
-            let mut rejected_chunk_indexes = Vec::new();
             if !chunk_inserts.is_empty() && !options.no_embed && self.embedder.is_some() {
-                let prepared = crate::profile::timed_update_stage("embedding_prepare_text", || {
-                    prepare_chunk_embeddings(
-                        &final_chunks,
-                        &doc_key,
-                        target,
-                        entry.path(),
-                        max_document_tokens,
-                    )
-                });
-                let preflight =
-                    self.preflight_prepared_embeddings(prepared, report, failed_docs)?;
-                prepared_embeddings = preflight.accepted;
-                rejected_chunk_indexes = preflight.rejected_chunk_indexes;
-                if existing.is_some() && !rejected_chunk_indexes.is_empty() {
-                    push_update_decision(
-                        report,
-                        options,
-                        target,
-                        &relative_path,
-                        UpdateDecisionKind::ExtractFailed,
-                        Some("embed preflight failed".to_string()),
-                    );
-                    continue;
-                }
+                prepared_embeddings =
+                    crate::profile::timed_update_stage("embedding_prepare_text", || {
+                        prepare_chunk_embeddings(
+                            &final_chunks,
+                            &doc_key,
+                            target,
+                            entry.path(),
+                            max_document_tokens,
+                        )
+                    });
             }
 
             let replacement =
@@ -1310,11 +1243,6 @@ impl Engine {
                 .entry(target.space.clone())
                 .or_default()
                 .insert(doc_id);
-            for chunk_index in rejected_chunk_indexes {
-                if let Some(chunk_id) = chunk_ids.get(chunk_index) {
-                    failed_chunk_ids.insert(*chunk_id);
-                }
-            }
 
             if !chunk_ids.is_empty() {
                 if !options.no_embed && self.embedder.is_some() {
@@ -1580,12 +1508,6 @@ struct PreparedChunkEmbedding {
     path: std::path::PathBuf,
     text: String,
     max_document_tokens: usize,
-}
-
-#[derive(Debug, Default)]
-struct PreparedEmbeddingPreflight {
-    accepted: Vec<PreparedChunkEmbedding>,
-    rejected_chunk_indexes: Vec<usize>,
 }
 
 #[derive(Debug)]

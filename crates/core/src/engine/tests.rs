@@ -4327,7 +4327,7 @@ fn update_embeds_chunks_when_embedder_is_configured() {
 }
 
 #[test]
-fn update_preflights_fresh_embedding_payload_once_before_embedding() {
+fn update_reuses_fresh_chunk_token_bounds_before_embedding() {
     with_kbolt_space_env(None, || {
         let sizer = Arc::new(CountingCharDocumentSizer::default());
         let engine = test_engine_with_embedding_runtime(
@@ -4357,8 +4357,8 @@ fn update_preflights_fresh_embedding_payload_once_before_embedding() {
         );
         assert_eq!(
             sizer.call_count(),
-            2,
-            "fresh chunk should be counted once for chunking and once for preinsert preflight"
+            1,
+            "fresh chunk should be counted by chunking without duplicate preinsert preflight"
         );
     });
 }
