@@ -1796,6 +1796,41 @@ CREATE TABLE IF NOT EXISTS document_texts (
         Ok(exists != 0)
     }
 
+    pub fn get_document_text_generation_keys(
+        &self,
+        doc_ids: &[i64],
+    ) -> Result<HashMap<i64, String>> {
+        if doc_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut requested = doc_ids.to_vec();
+        requested.sort_unstable();
+        requested.dedup();
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let placeholders = vec!["?"; requested.len()].join(", ");
+        let sql = format!(
+            "SELECT doc_id, generation_key
+             FROM document_texts
+             WHERE doc_id IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(requested.iter()), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut generation_by_doc = HashMap::new();
+        for row in rows {
+            let (doc_id, generation_key) = row?;
+            generation_by_doc.insert(doc_id, generation_key);
+        }
+
+        Ok(generation_by_doc)
+    }
+
     pub fn get_chunk_text(&self, chunk_id: i64) -> Result<ChunkTextRow> {
         let conn = self
             .db

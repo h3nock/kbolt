@@ -555,15 +555,6 @@ impl Engine {
         Ok(accepted)
     }
 
-    fn document_has_current_canonical_text(
-        &self,
-        doc_id: i64,
-        generation_key: &str,
-    ) -> Result<bool> {
-        self.storage
-            .has_current_document_text(doc_id, generation_key)
-    }
-
     fn replay_fts_dirty_documents(
         &self,
         repair_scope: &UpdateRepairScope,
@@ -804,6 +795,12 @@ impl Engine {
         let all_documents = crate::profile::timed_update_stage("sqlite_list_documents", || {
             self.storage.list_documents(target.collection.id, false)
         })?;
+        let document_ids = all_documents.iter().map(|doc| doc.id).collect::<Vec<_>>();
+        let document_text_generations =
+            crate::profile::timed_update_stage("sqlite_list_document_text_generations", || {
+                self.storage
+                    .get_document_text_generation_keys(&document_ids)
+            })?;
         let mut docs_by_path: HashMap<String, DocumentRow> = all_documents
             .into_iter()
             .map(|doc| (doc.path.clone(), doc))
@@ -993,8 +990,11 @@ impl Engine {
             };
 
             if let Some(existing) = docs_by_path.get(&relative_path) {
-                let has_current_canonical_text =
-                    self.document_has_current_canonical_text(existing.id, generation_key.as_str())?;
+                let has_current_canonical_text = document_has_current_canonical_text(
+                    &document_text_generations,
+                    existing.id,
+                    generation_key.as_str(),
+                );
                 if existing.active && existing.modified == modified && has_current_canonical_text {
                     report.skipped_mtime_docs += 1;
                     push_update_decision(
@@ -1048,8 +1048,11 @@ impl Engine {
             let pending_decision;
             let pending_indexing;
             if let Some(doc) = existing.as_ref() {
-                let has_current_canonical_text =
-                    self.document_has_current_canonical_text(doc.id, generation_key.as_str())?;
+                let has_current_canonical_text = document_has_current_canonical_text(
+                    &document_text_generations,
+                    doc.id,
+                    generation_key.as_str(),
+                );
                 if doc.hash == hash && has_current_canonical_text {
                     if doc.active {
                         report.skipped_hash_docs += 1;
@@ -1642,6 +1645,16 @@ impl PendingDocumentIndexing {
             }
         }
     }
+}
+
+fn document_has_current_canonical_text(
+    document_text_generations: &HashMap<i64, String>,
+    doc_id: i64,
+    generation_key: &str,
+) -> bool {
+    document_text_generations
+        .get(&doc_id)
+        .is_some_and(|stored| stored == generation_key)
 }
 
 fn finish_update_with_usearch_flush(

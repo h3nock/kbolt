@@ -1965,6 +1965,13 @@ fn put_get_and_hydrate_document_text() {
     assert!(!storage
         .has_current_document_text(doc_id, "generation-2")
         .expect("check stale document text"));
+    let generation_keys = storage
+        .get_document_text_generation_keys(&[doc_id])
+        .expect("load document text generation keys");
+    assert_eq!(
+        generation_keys.get(&doc_id).map(String::as_str),
+        Some("generation-1")
+    );
 
     let chunk_ids = storage
         .insert_chunks(
