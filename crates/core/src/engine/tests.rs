@@ -5083,6 +5083,71 @@ fn update_rebuilds_unchanged_file_when_chunking_generation_changes() {
 }
 
 #[test]
+fn update_skips_unchanged_file_when_only_neighbor_window_changes() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine();
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("guide.txt");
+        write_text_file(&file_path, "one two three\n\nfour five six\n");
+
+        let first = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+        assert_eq!(first.added_docs, 1);
+        assert_eq!(first.failed_docs, 0);
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.txt")
+            .expect("query document")
+            .expect("document exists");
+        let document_text = engine
+            .storage()
+            .get_document_text(doc.id)
+            .expect("load document text");
+        assert!(
+            !document_text.generation_key.contains("neighbors:"),
+            "neighbor window is search-time context, not canonical/chunk generation: {}",
+            document_text.generation_key
+        );
+
+        let config_dir = engine.config().config_dir.clone();
+        let cache_dir = engine.config().cache_dir.clone();
+        drop(engine);
+
+        let storage = Storage::new(&cache_dir).expect("reopen storage");
+        let mut config = base_test_config(config_dir, cache_dir);
+        config.chunking.defaults.neighbor_window = 0;
+        let engine = Engine::from_parts(storage, config);
+
+        let second = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update after neighbor window change");
+        assert_eq!(second.scanned_docs, 1);
+        assert_eq!(second.skipped_mtime_docs, 1);
+        assert_eq!(second.skipped_hash_docs, 0);
+        assert_eq!(second.updated_docs, 0);
+        assert_eq!(second.failed_docs, 0);
+        assert!(
+            second.errors.is_empty(),
+            "unexpected errors: {:?}",
+            second.errors
+        );
+    });
+}
+
+#[test]
 fn update_replaces_existing_chunks_after_successful_preinsert_preflight() {
     with_kbolt_space_env(None, || {
         let mut chunking = ChunkingConfig::default();

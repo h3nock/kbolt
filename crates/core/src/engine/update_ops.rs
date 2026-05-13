@@ -1747,12 +1747,11 @@ fn ingestion_generation_key(
     policy: &crate::config::ChunkPolicy,
 ) -> String {
     format!(
-        "canonical=v{CANONICAL_TEXT_GENERATION};chunker=v{CHUNKER_GENERATION};extractor={extractor_key}:v{extractor_version};chunk=target:{}:soft:{}:hard:{}:overlap:{}:neighbors:{}:prefix:{}",
+        "canonical=v{CANONICAL_TEXT_GENERATION};chunker=v{CHUNKER_GENERATION};extractor={extractor_key}:v{extractor_version};chunk=target:{}:soft:{}:hard:{}:overlap:{}:prefix:{}",
         policy.target_tokens,
         policy.soft_max_tokens,
         policy.hard_max_tokens,
         policy.boundary_overlap_tokens,
-        policy.neighbor_window,
         policy.contextual_prefix
     )
 }
