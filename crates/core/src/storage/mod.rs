@@ -108,6 +108,27 @@ pub struct ChunkTextRow {
     pub text: String,
 }
 
+pub struct DocumentGenerationReplace<'a> {
+    pub collection_id: i64,
+    pub path: &'a str,
+    pub title: &'a str,
+    pub title_source: DocumentTitleSource,
+    pub hash: &'a str,
+    pub modified: &'a str,
+    pub extractor_key: &'a str,
+    pub source_hash: &'a str,
+    pub text_hash: &'a str,
+    pub text: &'a str,
+    pub chunks: &'a [ChunkInsert],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentGenerationReplaceResult {
+    pub doc_id: i64,
+    pub old_chunk_ids: Vec<i64>,
+    pub chunk_ids: Vec<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbedRecord {
     pub chunk_id: i64,
@@ -1307,6 +1328,102 @@ CREATE TABLE IF NOT EXISTS document_texts (
         let rows = stmt.query_map(params_from_iter(chunk_ids.iter()), decode_chunk_row)?;
         let chunks = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(chunks)
+    }
+
+    pub fn replace_document_generation(
+        &self,
+        replacement: DocumentGenerationReplace<'_>,
+    ) -> Result<DocumentGenerationReplaceResult> {
+        for chunk in replacement.chunks {
+            validate_text_span(
+                replacement.text,
+                chunk.offset,
+                chunk.length,
+                &format!("chunk seq {}", chunk.seq),
+            )?;
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let _collection_name = lookup_collection_name(&conn, replacement.collection_id)?;
+
+        let tx = conn.unchecked_transaction()?;
+        let doc_id: i64 = tx.query_row(
+            "INSERT INTO documents (collection_id, path, title, title_source, hash, modified, active, deactivated_at, fts_dirty)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, NULL, 1)
+             ON CONFLICT(collection_id, path) DO UPDATE SET
+                 title = excluded.title,
+                 title_source = excluded.title_source,
+                 hash = excluded.hash,
+                 modified = excluded.modified,
+                 active = 1,
+                 deactivated_at = NULL,
+                 fts_dirty = 1
+             RETURNING id",
+            params![
+                replacement.collection_id,
+                replacement.path,
+                replacement.title,
+                replacement.title_source.as_sql(),
+                replacement.hash,
+                replacement.modified
+            ],
+            |row| row.get(0),
+        )?;
+
+        let old_chunk_ids = {
+            let mut stmt =
+                tx.prepare("SELECT id FROM chunks WHERE doc_id = ?1 ORDER BY seq ASC")?;
+            let rows = stmt.query_map(params![doc_id], |row| row.get::<_, i64>(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        tx.execute(
+            "INSERT INTO document_texts (doc_id, extractor_key, source_hash, text_hash, text, created)
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+             ON CONFLICT(doc_id) DO UPDATE SET
+                 extractor_key = excluded.extractor_key,
+                 source_hash = excluded.source_hash,
+                 text_hash = excluded.text_hash,
+                 text = excluded.text,
+                 created = excluded.created",
+            params![
+                doc_id,
+                replacement.extractor_key,
+                replacement.source_hash,
+                replacement.text_hash,
+                replacement.text
+            ],
+        )?;
+
+        tx.execute("DELETE FROM chunks WHERE doc_id = ?1", params![doc_id])?;
+
+        let mut stmt = tx.prepare(
+            "INSERT INTO chunks (doc_id, seq, offset, length, heading, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        let mut chunk_ids = Vec::with_capacity(replacement.chunks.len());
+        for chunk in replacement.chunks {
+            stmt.execute(params![
+                doc_id,
+                chunk.seq,
+                chunk.offset as i64,
+                chunk.length as i64,
+                chunk.heading,
+                chunk.kind.as_storage_kind(),
+            ])?;
+            chunk_ids.push(tx.last_insert_rowid());
+        }
+        drop(stmt);
+
+        tx.commit()?;
+        Ok(DocumentGenerationReplaceResult {
+            doc_id,
+            old_chunk_ids,
+            chunk_ids,
+        })
     }
 
     pub fn put_document_text(
@@ -2671,26 +2788,36 @@ fn decode_non_negative_usize(
 }
 
 fn canonical_chunk_text(document_text: &str, chunk: &ChunkRow) -> Result<String> {
-    let end = chunk.offset.checked_add(chunk.length).ok_or_else(|| {
-        CoreError::Internal(format!("chunk {} text span overflows usize", chunk.id))
-    })?;
+    let label = format!("chunk {}", chunk.id);
+    let end = validate_text_span(document_text, chunk.offset, chunk.length, &label)?;
+
+    Ok(document_text[chunk.offset..end].to_string())
+}
+
+fn validate_text_span(
+    document_text: &str,
+    offset: usize,
+    length: usize,
+    label: &str,
+) -> Result<usize> {
+    let end = offset
+        .checked_add(length)
+        .ok_or_else(|| CoreError::Internal(format!("{label} text span overflows usize")))?;
     if end > document_text.len() {
         return Err(CoreError::Internal(format!(
-            "chunk {} text span {}..{} exceeds document text length {}",
-            chunk.id,
-            chunk.offset,
+            "{label} text span {}..{} exceeds document text length {}",
+            offset,
             end,
             document_text.len()
         )));
     }
-    if !document_text.is_char_boundary(chunk.offset) || !document_text.is_char_boundary(end) {
+    if !document_text.is_char_boundary(offset) || !document_text.is_char_boundary(end) {
         return Err(CoreError::Internal(format!(
-            "chunk {} text span {}..{} is not on UTF-8 boundaries",
-            chunk.id, chunk.offset, end
+            "{label} text span {offset}..{end} is not on UTF-8 boundaries"
         )));
     }
 
-    Ok(document_text[chunk.offset..end].to_string())
+    Ok(end)
 }
 
 fn missing_document_text_error(doc_id: i64) -> CoreError {

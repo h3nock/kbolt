@@ -1658,6 +1658,240 @@ fn put_get_and_hydrate_document_text() {
 }
 
 #[test]
+fn replace_document_generation_writes_text_and_chunks_atomically() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    let replacement = super::DocumentGenerationReplace {
+        collection_id,
+        path: "src/lib.rs",
+        title: "lib",
+        title_source: DocumentTitleSource::Extracted,
+        hash: "hash-1",
+        modified: "2026-03-01T10:00:00Z",
+        extractor_key: "code",
+        source_hash: "hash-1",
+        text_hash: "text-hash-1",
+        text: "alpha\n\nbeta",
+        chunks: &[
+            super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 5,
+                heading: None,
+                kind: FinalChunkKind::Paragraph,
+            },
+            super::ChunkInsert {
+                seq: 1,
+                offset: 7,
+                length: 4,
+                heading: None,
+                kind: FinalChunkKind::Paragraph,
+            },
+        ],
+    };
+
+    let result = storage
+        .replace_document_generation(replacement)
+        .expect("replace generation");
+    assert!(result.old_chunk_ids.is_empty());
+    assert_eq!(result.chunk_ids.len(), 2);
+
+    let doc = storage
+        .get_document_by_path(collection_id, "src/lib.rs")
+        .expect("get document")
+        .expect("document exists");
+    assert_eq!(doc.id, result.doc_id);
+    assert!(doc.fts_dirty);
+    assert_eq!(
+        storage
+            .get_document_text(result.doc_id)
+            .expect("get document text")
+            .text,
+        "alpha\n\nbeta"
+    );
+    assert_eq!(
+        storage
+            .get_chunk_text(result.chunk_ids[1])
+            .expect("hydrate chunk")
+            .text,
+        "beta"
+    );
+}
+
+#[test]
+fn replace_document_generation_returns_old_chunks_and_cascades_embeddings() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    let first = storage
+        .replace_document_generation(super::DocumentGenerationReplace {
+            collection_id,
+            path: "src/lib.rs",
+            title: "lib",
+            title_source: DocumentTitleSource::Extracted,
+            hash: "hash-1",
+            modified: "2026-03-01T10:00:00Z",
+            extractor_key: "code",
+            source_hash: "hash-1",
+            text_hash: "text-hash-1",
+            text: "alpha",
+            chunks: &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 5,
+                heading: None,
+                kind: FinalChunkKind::Paragraph,
+            }],
+        })
+        .expect("initial replace");
+    storage
+        .insert_embeddings(&[(first.chunk_ids[0], "embed-model")])
+        .expect("insert old embedding");
+    assert_eq!(storage.count_embeddings().expect("count embeddings"), 1);
+
+    let second = storage
+        .replace_document_generation(super::DocumentGenerationReplace {
+            collection_id,
+            path: "src/lib.rs",
+            title: "lib v2",
+            title_source: DocumentTitleSource::Extracted,
+            hash: "hash-2",
+            modified: "2026-03-01T11:00:00Z",
+            extractor_key: "code",
+            source_hash: "hash-2",
+            text_hash: "text-hash-2",
+            text: "gamma",
+            chunks: &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 5,
+                heading: None,
+                kind: FinalChunkKind::Paragraph,
+            }],
+        })
+        .expect("second replace");
+
+    assert_eq!(second.doc_id, first.doc_id);
+    assert_eq!(second.old_chunk_ids, first.chunk_ids);
+    assert_eq!(storage.count_embeddings().expect("count embeddings"), 0);
+    assert_eq!(
+        storage
+            .get_document_text(second.doc_id)
+            .expect("get updated text")
+            .text,
+        "gamma"
+    );
+}
+
+#[test]
+fn replace_document_generation_rejects_invalid_span_without_mutating_existing() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    let first = storage
+        .replace_document_generation(super::DocumentGenerationReplace {
+            collection_id,
+            path: "src/lib.rs",
+            title: "lib",
+            title_source: DocumentTitleSource::Extracted,
+            hash: "hash-1",
+            modified: "2026-03-01T10:00:00Z",
+            extractor_key: "code",
+            source_hash: "hash-1",
+            text_hash: "text-hash-1",
+            text: "alpha",
+            chunks: &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 5,
+                heading: None,
+                kind: FinalChunkKind::Paragraph,
+            }],
+        })
+        .expect("initial replace");
+
+    let err = storage
+        .replace_document_generation(super::DocumentGenerationReplace {
+            collection_id,
+            path: "src/lib.rs",
+            title: "lib broken",
+            title_source: DocumentTitleSource::Extracted,
+            hash: "hash-2",
+            modified: "2026-03-01T11:00:00Z",
+            extractor_key: "code",
+            source_hash: "hash-2",
+            text_hash: "text-hash-2",
+            text: "éclair",
+            chunks: &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 1,
+                heading: None,
+                kind: FinalChunkKind::Paragraph,
+            }],
+        })
+        .expect_err("invalid span should fail before mutation");
+    assert!(err.to_string().contains("not on UTF-8 boundaries"));
+
+    let doc = storage
+        .get_document_by_path(collection_id, "src/lib.rs")
+        .expect("get document")
+        .expect("document exists");
+    assert_eq!(doc.hash, "hash-1");
+    assert_eq!(
+        storage
+            .get_document_text(first.doc_id)
+            .expect("get existing text")
+            .text,
+        "alpha"
+    );
+    assert_eq!(
+        storage
+            .get_chunks_for_document(first.doc_id)
+            .expect("get existing chunks")
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn get_chunk_text_rejects_invalid_canonical_span() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
