@@ -519,7 +519,14 @@ fn new_creates_expected_schema_objects() {
     let db_path = cache_dir.join("meta.sqlite");
     let conn = Connection::open(db_path).expect("open sqlite");
 
-    let tables = ["spaces", "collections", "documents", "chunks", "embeddings"];
+    let tables = [
+        "spaces",
+        "collections",
+        "documents",
+        "chunks",
+        "embeddings",
+        "document_texts",
+    ];
     for table in tables {
         let exists = conn
             .query_row(
@@ -555,10 +562,15 @@ fn new_creates_expected_schema_objects() {
         )
         .expect("query documents title_source column");
     assert_eq!(title_source_exists, 1, "missing documents.title_source");
+
+    let schema_version = conn
+        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+        .expect("query schema version");
+    assert_eq!(schema_version, 1);
 }
 
 #[test]
-fn new_migrates_existing_documents_table_with_title_source() {
+fn new_rejects_non_empty_legacy_schema_without_canonical_text() {
     let tmp = tempdir().expect("create tempdir");
     let cache_dir = tmp.path().join("cache");
     std::fs::create_dir_all(&cache_dir).expect("create cache dir");
@@ -639,12 +651,99 @@ CREATE TABLE embeddings (
     .expect("insert legacy document");
     drop(conn);
 
-    let storage = Storage::new(&cache_dir).expect("migrate storage");
-    let doc = storage
-        .get_document_by_path(1, "guide.md")
-        .expect("load document")
-        .expect("document exists");
-    assert_eq!(doc.title_source, DocumentTitleSource::Extracted);
+    let err = match Storage::new(&cache_dir) {
+        Ok(_) => panic!("non-empty legacy schema should fail"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("older text-storage format"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn new_initializes_empty_legacy_schema_with_canonical_text_table() {
+    let tmp = tempdir().expect("create tempdir");
+    let cache_dir = tmp.path().join("cache");
+    std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+    let db_path = cache_dir.join("meta.sqlite");
+    let conn = Connection::open(&db_path).expect("open sqlite");
+    conn.execute_batch(
+        r#"
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE spaces (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
+CREATE TABLE collections (
+    id          INTEGER PRIMARY KEY,
+    space_id    INTEGER NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    description TEXT,
+    extensions  TEXT,
+    created     TEXT NOT NULL,
+    updated     TEXT NOT NULL,
+    UNIQUE(space_id, name)
+);
+
+CREATE TABLE documents (
+    id              INTEGER PRIMARY KEY,
+    collection_id   INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+    path            TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    hash            TEXT NOT NULL,
+    modified        TEXT NOT NULL,
+    active          INTEGER NOT NULL DEFAULT 1,
+    deactivated_at  TEXT,
+    fts_dirty       INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(collection_id, path)
+);
+
+CREATE TABLE chunks (
+    id       INTEGER PRIMARY KEY,
+    doc_id   INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    seq      INTEGER NOT NULL,
+    offset   INTEGER NOT NULL,
+    length   INTEGER NOT NULL,
+    heading  TEXT,
+    kind     TEXT NOT NULL DEFAULT 'section',
+    UNIQUE(doc_id, seq)
+);
+
+CREATE TABLE embeddings (
+    chunk_id    INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+    model       TEXT NOT NULL,
+    embedded_at TEXT NOT NULL,
+    PRIMARY KEY (chunk_id, model)
+);
+"#,
+    )
+    .expect("create empty legacy schema");
+    drop(conn);
+
+    Storage::new(&cache_dir).expect("initialize empty legacy schema");
+    let conn = Connection::open(db_path).expect("open sqlite after init");
+    let document_texts_exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = 'document_texts'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("query document_texts table");
+    assert_eq!(document_texts_exists, 1);
+    let title_source_exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('documents') WHERE name = 'title_source'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("query documents title_source column");
+    assert_eq!(title_source_exists, 1);
 }
 
 #[test]

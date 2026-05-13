@@ -19,6 +19,7 @@ const DEFAULT_SPACE_NAME: &str = "default";
 const SPACES_DIR: &str = "spaces";
 const TANTIVY_DIR_NAME: &str = "tantivy";
 const USEARCH_FILENAME: &str = "vectors.usearch";
+const SCHEMA_VERSION: i64 = 1;
 
 pub struct Storage {
     db: Mutex<Connection>,
@@ -212,6 +213,7 @@ impl Storage {
         std::fs::create_dir_all(cache_dir)?;
         let db_path = cache_dir.join(DB_FILE);
         let conn = Connection::open(db_path)?;
+        reject_incompatible_legacy_index(&conn)?;
         conn.execute_batch(
             r#"
 PRAGMA foreign_keys = ON;
@@ -271,9 +273,19 @@ CREATE TABLE IF NOT EXISTS embeddings (
     embedded_at TEXT NOT NULL,
     PRIMARY KEY (chunk_id, model)
 );
+
+CREATE TABLE IF NOT EXISTS document_texts (
+    doc_id            INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+    extractor_key     TEXT NOT NULL,
+    source_hash       TEXT NOT NULL,
+    text_hash         TEXT NOT NULL,
+    text              TEXT NOT NULL,
+    created           TEXT NOT NULL
+);
 "#,
         )?;
         ensure_documents_title_source_column(&conn)?;
+        ensure_schema_version(&conn)?;
 
         conn.execute(
             "INSERT OR IGNORE INTO spaces (name, description) VALUES (?1, NULL)",
@@ -2228,6 +2240,47 @@ fn with_tantivy_writer<T>(
         .as_mut()
         .ok_or_else(|| CoreError::Internal("failed to initialize tantivy writer".to_string()))?;
     f(writer)
+}
+
+fn reject_incompatible_legacy_index(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "documents")? || table_exists(conn, "document_texts")? {
+        return Ok(());
+    }
+
+    let document_count = query_count(conn, "SELECT COUNT(*) FROM documents", [])?;
+    if document_count == 0 {
+        return Ok(());
+    }
+
+    Err(KboltError::Config(
+        "cache index uses an older text-storage format; rebuild the kbolt cache before using this branch".to_string(),
+    )
+    .into())
+}
+
+fn ensure_schema_version(conn: &Connection) -> Result<()> {
+    let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if current > SCHEMA_VERSION {
+        return Err(KboltError::Config(format!(
+            "cache index schema version {current} is newer than supported version {SCHEMA_VERSION}"
+        ))
+        .into());
+    }
+
+    if current < SCHEMA_VERSION {
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
+
+    Ok(())
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let exists = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+        [table],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(exists != 0)
 }
 
 fn ensure_documents_title_source_column(conn: &Connection) -> Result<()> {
