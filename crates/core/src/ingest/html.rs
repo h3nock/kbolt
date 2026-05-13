@@ -18,7 +18,7 @@ impl Extractor for HtmlExtractor {
     }
 
     fn version(&self) -> u32 {
-        2
+        3
     }
 
     fn extract(&self, _path: &Path, bytes: &[u8]) -> Result<ExtractedDocument> {
@@ -67,7 +67,7 @@ impl ExtractionState {
 
     fn walk_element(&mut self, element: ElementRef<'_>) -> bool {
         let name = element_name(element);
-        if should_skip_element(name) {
+        if should_skip_element(element) {
             return false;
         }
 
@@ -90,7 +90,7 @@ impl ExtractionState {
                         continue;
                     };
                     let child_name = element_name(child_element);
-                    if should_skip_element(child_name) {
+                    if should_skip_element(child_element) {
                         continue;
                     }
                     if is_text_boundary_element(child_name) {
@@ -167,7 +167,19 @@ fn element_name(element: ElementRef<'_>) -> &str {
     element.value().name()
 }
 
-fn should_skip_element(name: &str) -> bool {
+fn should_skip_element(element: ElementRef<'_>) -> bool {
+    if should_skip_element_name(element_name(element)) {
+        return true;
+    }
+
+    element.value().attr("hidden").is_some()
+        || element
+            .value()
+            .attr("aria-hidden")
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+fn should_skip_element_name(name: &str) -> bool {
     matches!(
         name,
         "head" | "script" | "style" | "template" | "noscript" | "svg" | "canvas" | "math"
@@ -251,7 +263,7 @@ fn collect_preserved_text(element: ElementRef<'_>) -> String {
 }
 
 fn collect_text_from_element(element: ElementRef<'_>, collector: &mut TextCollector) {
-    if should_skip_element(element_name(element)) {
+    if should_skip_element(element) {
         return;
     }
 
@@ -260,7 +272,18 @@ fn collect_text_from_element(element: ElementRef<'_>, collector: &mut TextCollec
             Node::Text(text) => collector.push(text),
             Node::Element(_) => {
                 if let Some(child_element) = ElementRef::wrap(child) {
-                    if is_text_boundary_element(element_name(child_element)) {
+                    let child_name = element_name(child_element);
+                    if should_skip_element(child_element) {
+                        continue;
+                    }
+
+                    if is_text_boundary_element(child_name) {
+                        collector.push_boundary();
+                    } else if block_kind_for(child_name).is_some()
+                        || is_structural_container(child_name)
+                    {
+                        collector.push_boundary();
+                        collect_text_from_element(child_element, collector);
                         collector.push_boundary();
                     } else {
                         collect_text_from_element(child_element, collector);
@@ -504,6 +527,55 @@ Lead text.
         assert!(!canonical.contains("alphabeta"));
         assert!(!canonical.contains("TermDefinition"));
         assert!(!canonical.contains("leftright"));
+    }
+
+    #[test]
+    fn preserves_boundaries_for_nested_block_children() {
+        let extractor = HtmlExtractor;
+        let doc = extractor
+            .extract(
+                Path::new("docs/nested.html"),
+                br#"<body>
+<blockquote><p>Alpha quote</p><p>Beta quotetarget</p></blockquote>
+<ul><li><p>Parent item</p><p>Child paragraph listtarget</p></li></ul>
+</body>"#,
+            )
+            .expect("extract html");
+
+        let canonical = doc
+            .blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(canonical.contains("Alpha quote Beta quotetarget"));
+        assert!(canonical.contains("Parent item Child paragraph listtarget"));
+        assert!(!canonical.contains("quoteBeta"));
+        assert!(!canonical.contains("itemChild"));
+    }
+
+    #[test]
+    fn skips_hidden_html_elements() {
+        let extractor = HtmlExtractor;
+        let doc = extractor
+            .extract(
+                Path::new("docs/hidden.html"),
+                br#"<body>
+<p>Visible target</p>
+<div hidden>secret hiddenword</div>
+<section aria-hidden="true"><p>aria hiddenword</p></section>
+</body>"#,
+            )
+            .expect("extract html");
+
+        let canonical = doc
+            .blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(canonical.contains("Visible target"));
+        assert!(!canonical.contains("hiddenword"));
     }
 
     #[test]

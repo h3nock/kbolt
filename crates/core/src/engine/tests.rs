@@ -2173,6 +2173,7 @@ fn update_get_and_search_use_extracted_html_text() {
     <h1>Visible Guide</h1>
     <p>alpha <strong>htmltarget</strong> canonical body.</p>
     <table><tr><td>tabletarget visible cell</td></tr></table>
+    <div hidden>secret hiddenword</div>
   </body>
 </html>"#,
         );
@@ -2213,6 +2214,7 @@ fn update_get_and_search_use_extracted_html_text() {
         assert!(indexed.content.contains("tabletarget visible cell"));
         assert!(!indexed.content.contains("<p>"));
         assert!(!indexed.content.contains("ignored_script_token"));
+        assert!(!indexed.content.contains("hiddenword"));
 
         let response = engine
             .search(SearchRequest {
@@ -2233,6 +2235,21 @@ fn update_get_and_search_use_extracted_html_text() {
             .contains("alpha htmltarget canonical body."));
         assert!(!response.results[0].text.contains("<strong>"));
         assert!(!response.results[0].text.contains("ignored_script_token"));
+        assert!(!response.results[0].text.contains("hiddenword"));
+
+        let hidden_response = engine
+            .search(SearchRequest {
+                query: "hiddenword".to_string(),
+                mode: SearchMode::Keyword,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 5,
+                min_score: 0.0,
+                no_rerank: true,
+                debug: false,
+            })
+            .expect("search hidden html");
+        assert!(hidden_response.results.is_empty());
     });
 }
 
