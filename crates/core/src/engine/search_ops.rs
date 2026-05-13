@@ -563,11 +563,15 @@ impl Engine {
             let representative_indices =
                 select_rerank_representatives(&candidates, rerank_count, protected_original_docs);
             let mut rerank_doc_ids = Vec::new();
+            for &idx in &representative_indices {
+                rerank_doc_ids.push(candidates[idx].doc_id);
+            }
+            ensure_document_texts_loaded(&self.storage, &rerank_doc_ids, &mut text_by_doc)?;
+
             let mut rerank_inputs = Vec::new();
             for &idx in &representative_indices {
                 let candidate = &candidates[idx];
-                let rerank_input = build_rerank_input(candidate, &self.storage, &mut text_by_doc)?;
-                rerank_doc_ids.push(candidate.doc_id);
+                let rerank_input = build_rerank_input(candidate, &text_by_doc)?;
                 rerank_inputs.push(rerank_input);
             }
             let raw_scores = match self.reranker.as_ref() {
@@ -656,10 +660,9 @@ struct PendingSearchCandidate {
 
 fn build_rerank_input(
     candidate: &PendingSearchCandidate,
-    storage: &Storage,
-    text_by_doc: &mut HashMap<i64, DocumentTextRow>,
+    text_by_doc: &HashMap<i64, DocumentTextRow>,
 ) -> Result<String> {
-    let document_text = candidate_document_text(storage, candidate, text_by_doc)?;
+    let document_text = candidate_document_text(candidate, text_by_doc)?;
     let rerank_body =
         crate::storage::chunk_text_from_canonical(document_text.text.as_str(), &candidate.chunk)?;
 
@@ -811,18 +814,21 @@ fn finalize_search_results(
     limit: usize,
 ) -> Result<Vec<SearchResult>> {
     candidates.sort_by(|left, right| right.final_score.total_cmp(&left.final_score));
+    let candidates = candidates.into_iter().take(limit).collect::<Vec<_>>();
+    let final_doc_ids = candidates
+        .iter()
+        .map(|candidate| candidate.doc_id)
+        .collect::<Vec<_>>();
+    ensure_document_texts_loaded(storage, &final_doc_ids, text_by_doc)?;
+    ensure_neighbor_chunks_loaded(storage, &final_doc_ids, chunks_by_doc, neighbor_window)?;
 
     let mut results = Vec::new();
     for candidate in candidates {
-        if results.len() >= limit {
-            break;
-        }
-
-        let document_text = candidate_document_text(storage, &candidate, text_by_doc)?;
+        let document_text = candidate_document_text(&candidate, text_by_doc)?;
         let text = search_text_with_canonical_neighbors(
             document_text.text.as_str(),
             &candidate.chunk,
-            candidate_neighbors(storage, &candidate, chunks_by_doc, neighbor_window)?,
+            candidate_neighbors(&candidate, chunks_by_doc, neighbor_window),
             neighbor_window,
         )?;
 
@@ -851,38 +857,63 @@ fn finalize_search_results(
     Ok(results)
 }
 
-fn candidate_neighbors<'a>(
+fn ensure_document_texts_loaded(
     storage: &Storage,
-    candidate: &PendingSearchCandidate,
-    chunks_by_doc: &'a mut HashMap<i64, Vec<ChunkRow>>,
+    doc_ids: &[i64],
+    text_by_doc: &mut HashMap<i64, DocumentTextRow>,
+) -> Result<()> {
+    let missing = doc_ids
+        .iter()
+        .copied()
+        .filter(|doc_id| !text_by_doc.contains_key(doc_id))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    text_by_doc.extend(storage.get_document_texts(&missing)?);
+    Ok(())
+}
+
+fn ensure_neighbor_chunks_loaded(
+    storage: &Storage,
+    doc_ids: &[i64],
+    chunks_by_doc: &mut HashMap<i64, Vec<ChunkRow>>,
     neighbor_window: usize,
-) -> Result<Option<&'a Vec<ChunkRow>>> {
+) -> Result<()> {
     if neighbor_window == 0 {
-        return Ok(None);
+        return Ok(());
     }
 
-    if !chunks_by_doc.contains_key(&candidate.doc_id) {
-        chunks_by_doc.insert(
-            candidate.doc_id,
-            storage.get_chunks_for_document(candidate.doc_id)?,
-        );
+    let missing = doc_ids
+        .iter()
+        .copied()
+        .filter(|doc_id| !chunks_by_doc.contains_key(doc_id))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
     }
 
-    Ok(chunks_by_doc.get(&candidate.doc_id))
+    chunks_by_doc.extend(storage.get_chunks_for_documents(&missing)?);
+    Ok(())
+}
+
+fn candidate_neighbors<'a>(
+    candidate: &PendingSearchCandidate,
+    chunks_by_doc: &'a HashMap<i64, Vec<ChunkRow>>,
+    neighbor_window: usize,
+) -> Option<&'a Vec<ChunkRow>> {
+    if neighbor_window == 0 {
+        return None;
+    }
+
+    chunks_by_doc.get(&candidate.doc_id)
 }
 
 fn candidate_document_text<'a>(
-    storage: &Storage,
     candidate: &PendingSearchCandidate,
-    text_by_doc: &'a mut HashMap<i64, DocumentTextRow>,
+    text_by_doc: &'a HashMap<i64, DocumentTextRow>,
 ) -> Result<&'a DocumentTextRow> {
-    if !text_by_doc.contains_key(&candidate.doc_id) {
-        text_by_doc.insert(
-            candidate.doc_id,
-            storage.get_document_text(candidate.doc_id)?,
-        );
-    }
-
     text_by_doc.get(&candidate.doc_id).ok_or_else(|| {
         KboltError::Internal(format!(
             "document text cache missing for {}",

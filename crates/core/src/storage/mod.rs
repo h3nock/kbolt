@@ -1316,6 +1316,41 @@ CREATE TABLE IF NOT EXISTS document_texts (
         Ok(chunks)
     }
 
+    pub fn get_chunks_for_documents(&self, doc_ids: &[i64]) -> Result<HashMap<i64, Vec<ChunkRow>>> {
+        if doc_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut requested = doc_ids.to_vec();
+        requested.sort_unstable();
+        requested.dedup();
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let placeholders = vec!["?"; requested.len()].join(", ");
+        let sql = format!(
+            "SELECT id, doc_id, seq, offset, length, heading, kind
+             FROM chunks
+             WHERE doc_id IN ({placeholders})
+             ORDER BY doc_id ASC, seq ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(requested.iter()), decode_chunk_row)?;
+        let mut chunks_by_doc: HashMap<i64, Vec<ChunkRow>> = HashMap::new();
+        for doc_id in requested {
+            chunks_by_doc.insert(doc_id, Vec::new());
+        }
+        for row in rows {
+            let chunk = row?;
+            chunks_by_doc.entry(chunk.doc_id).or_default().push(chunk);
+        }
+
+        Ok(chunks_by_doc)
+    }
+
     pub fn get_chunks(&self, chunk_ids: &[i64]) -> Result<Vec<ChunkRow>> {
         if chunk_ids.is_empty() {
             return Ok(Vec::new());
@@ -1529,6 +1564,44 @@ CREATE TABLE IF NOT EXISTS document_texts (
             Err(Error::QueryReturnedNoRows) => Err(missing_document_text_error(doc_id)),
             Err(err) => Err(err.into()),
         }
+    }
+
+    pub fn get_document_texts(&self, doc_ids: &[i64]) -> Result<HashMap<i64, DocumentTextRow>> {
+        if doc_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut requested = doc_ids.to_vec();
+        requested.sort_unstable();
+        requested.dedup();
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let placeholders = vec!["?"; requested.len()].join(", ");
+        let sql = format!(
+            "SELECT doc_id, extractor_key, source_hash, text_hash, text, created
+             FROM document_texts
+             WHERE doc_id IN ({placeholders})
+             ORDER BY doc_id ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(requested.iter()), decode_document_text_row)?;
+        let mut text_by_doc = HashMap::new();
+        for row in rows {
+            let row = row?;
+            text_by_doc.insert(row.doc_id, row);
+        }
+
+        for doc_id in requested {
+            if !text_by_doc.contains_key(&doc_id) {
+                return Err(missing_document_text_error(doc_id));
+            }
+        }
+
+        Ok(text_by_doc)
     }
 
     pub fn has_document_text(&self, doc_id: i64) -> Result<bool> {
