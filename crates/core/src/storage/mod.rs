@@ -138,12 +138,10 @@ pub struct DocumentGenerationReplaceResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbedRecord {
-    pub chunk_id: i64,
+    pub chunk: ChunkRow,
     pub doc_path: String,
     pub collection_path: PathBuf,
     pub space_name: String,
-    pub offset: usize,
-    pub length: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1829,7 +1827,8 @@ CREATE TABLE IF NOT EXISTS document_texts (
             .map_err(|_| CoreError::Internal("limit too large for sqlite".to_string()))?;
 
         let sql = format!(
-            "SELECT c.id, d.path, col.path, s.name, c.offset, c.length
+            "SELECT c.id, c.doc_id, c.seq, c.offset, c.length, c.heading, c.kind, c.retrieval_prefix,
+                    d.path, col.path, s.name
              FROM chunks c
              JOIN documents d ON d.id = c.doc_id
              JOIN collections col ON col.id = d.collection_id
@@ -1846,15 +1845,11 @@ CREATE TABLE IF NOT EXISTS document_texts (
         params.extend(scope_params);
         params.push(SqlValue::Integer(sql_limit));
         let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
-            let offset_value: i64 = row.get(4)?;
-            let length_value: i64 = row.get(5)?;
             Ok(EmbedRecord {
-                chunk_id: row.get(0)?,
-                doc_path: row.get(1)?,
-                collection_path: PathBuf::from(row.get::<_, String>(2)?),
-                space_name: row.get(3)?,
-                offset: decode_non_negative_usize(offset_value, 4, "chunks.offset")?,
-                length: decode_non_negative_usize(length_value, 5, "chunks.length")?,
+                chunk: decode_chunk_row(row)?,
+                doc_path: row.get(8)?,
+                collection_path: PathBuf::from(row.get::<_, String>(9)?),
+                space_name: row.get(10)?,
             })
         })?;
 

@@ -2564,29 +2564,29 @@ fn get_unembedded_chunks_filters_active_and_model_specific_backlog() {
         .get_unembedded_chunks("model-a", 0, 10)
         .expect("query backlog");
     assert_eq!(backlog.len(), 2);
-    assert_eq!(backlog[0].chunk_id, active_chunk_ids[1]);
+    assert_eq!(backlog[0].chunk.id, active_chunk_ids[1]);
     assert_eq!(backlog[0].doc_path, "src/active.rs");
     assert_eq!(
         backlog[0].collection_path,
         std::path::PathBuf::from("/tmp/api")
     );
     assert_eq!(backlog[0].space_name, "work");
-    assert_eq!(backlog[0].offset, 100);
-    assert_eq!(backlog[0].length, 50);
-    assert_eq!(backlog[1].chunk_id, active_chunk_ids[2]);
-    assert_ne!(backlog[0].chunk_id, inactive_chunk_ids[0]);
+    assert_eq!(backlog[0].chunk.offset, 100);
+    assert_eq!(backlog[0].chunk.length, 50);
+    assert_eq!(backlog[1].chunk.id, active_chunk_ids[2]);
+    assert_ne!(backlog[0].chunk.id, inactive_chunk_ids[0]);
 
     let limited = storage
         .get_unembedded_chunks("model-a", 0, 1)
         .expect("query limited backlog");
     assert_eq!(limited.len(), 1);
-    assert_eq!(limited[0].chunk_id, active_chunk_ids[1]);
+    assert_eq!(limited[0].chunk.id, active_chunk_ids[1]);
 
     let next_page = storage
-        .get_unembedded_chunks("model-a", limited[0].chunk_id, 10)
+        .get_unembedded_chunks("model-a", limited[0].chunk.id, 10)
         .expect("query paged backlog");
     assert_eq!(next_page.len(), 1);
-    assert_eq!(next_page[0].chunk_id, active_chunk_ids[2]);
+    assert_eq!(next_page[0].chunk.id, active_chunk_ids[2]);
 }
 
 #[test]
@@ -2670,14 +2670,14 @@ fn get_unembedded_chunks_can_scope_backlog_to_selected_collections() {
         .get_unembedded_chunks_in_collections("model-a", &[work_collection_id], 0, 10)
         .expect("query work-only backlog");
     assert_eq!(work_only.len(), 1);
-    assert_eq!(work_only[0].chunk_id, work_chunk_ids[0]);
+    assert_eq!(work_only[0].chunk.id, work_chunk_ids[0]);
     assert_eq!(work_only[0].space_name, "work");
 
     let notes_only = storage
         .get_unembedded_chunks_in_space("model-a", notes_space_id, 0, 10)
         .expect("query notes-only backlog");
     assert_eq!(notes_only.len(), 1);
-    assert_eq!(notes_only[0].chunk_id, notes_chunk_ids[0]);
+    assert_eq!(notes_only[0].chunk.id, notes_chunk_ids[0]);
     assert_eq!(notes_only[0].space_name, "notes");
 }
 

@@ -219,19 +219,43 @@ impl Engine {
 
             after_chunk_id = backlog
                 .last()
-                .map(|record| record.chunk_id)
+                .map(|record| record.chunk.id)
                 .expect("non-empty backlog should have a last chunk id");
 
             let mut pending = Vec::new();
+            let mut document_text_cache = HashMap::new();
             for record in backlog {
-                if failed_chunk_ids.contains(&record.chunk_id) {
+                if failed_chunk_ids.contains(&record.chunk.id) {
                     continue;
                 }
 
                 let full_path = record.collection_path.join(&record.doc_path);
                 let read_started = Instant::now();
-                let chunk_text = match self.storage.get_chunk_text(record.chunk_id) {
-                    Ok(chunk_text) => chunk_text,
+                let document_text = match document_text_cache.entry(record.chunk.doc_id) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        match self.storage.get_document_text(record.chunk.doc_id) {
+                            Ok(document_text) => entry.insert(document_text),
+                            Err(err) => {
+                                report.errors.push(file_error(
+                                    Some(full_path.clone()),
+                                    format!("embed canonical text load failed: {err}"),
+                                ));
+                                failed_docs.insert(update_doc_key(
+                                    &record.space_name,
+                                    &record.collection_path,
+                                    &record.doc_path,
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                };
+                let chunk_canonical_text = match crate::storage::chunk_text_from_canonical(
+                    document_text.text.as_str(),
+                    &record.chunk,
+                ) {
+                    Ok(text) => text,
                     Err(err) => {
                         report.errors.push(file_error(
                             Some(full_path.clone()),
@@ -250,21 +274,21 @@ impl Engine {
                     read_started.elapsed(),
                 );
                 let mut text = crate::ingest::chunk::chunk_retrieval_body(
-                    chunk_text.text.as_str(),
-                    chunk_text.chunk.retrieval_prefix.as_deref(),
+                    chunk_canonical_text.as_str(),
+                    record.chunk.retrieval_prefix.as_deref(),
                 );
                 if text.trim().is_empty() {
                     text = " ".to_string();
                 }
                 let policy = resolve_policy(
                     &self.config.chunking,
-                    Some(chunk_text.extractor_key.as_str()),
+                    Some(document_text.extractor_key.as_str()),
                     None,
                 );
                 let max_document_tokens = effective_chunk_hard_max(&policy);
 
                 pending.push(PendingChunkEmbedding {
-                    chunk_id: record.chunk_id,
+                    chunk_id: record.chunk.id,
                     doc_key: update_doc_key(
                         &record.space_name,
                         &record.collection_path,
