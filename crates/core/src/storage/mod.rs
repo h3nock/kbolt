@@ -1515,7 +1515,7 @@ CREATE TABLE IF NOT EXISTS document_texts (
             }
             Err(err) => return Err(err.into()),
         };
-        let text = canonical_chunk_text(&document_text, &chunk)?;
+        let text = chunk_text_from_canonical(&document_text, &chunk)?;
         Ok(ChunkTextRow {
             chunk,
             extractor_key,
@@ -2806,7 +2806,7 @@ fn decode_non_negative_usize(
     Ok(value as usize)
 }
 
-fn canonical_chunk_text(document_text: &str, chunk: &ChunkRow) -> Result<String> {
+pub(crate) fn chunk_text_from_canonical(document_text: &str, chunk: &ChunkRow) -> Result<String> {
     let label = format!("chunk {}", chunk.id);
     let end = validate_text_span(document_text, chunk.offset, chunk.length, &label)?;
 

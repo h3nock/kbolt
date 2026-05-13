@@ -1,23 +1,18 @@
 use crate::storage::ChunkRow;
+use crate::Result;
 
-pub(super) fn chunk_text_from_bytes(bytes: &[u8], offset: usize, length: usize) -> String {
-    let start = offset.min(bytes.len());
-    let end = offset.saturating_add(length).min(bytes.len());
-    String::from_utf8_lossy(&bytes[start..end]).into_owned()
-}
-
-pub(super) fn search_text_with_neighbors(
-    bytes: &[u8],
+pub(super) fn search_text_with_canonical_neighbors(
+    document_text: &str,
     primary: &ChunkRow,
     doc_chunks: Option<&Vec<ChunkRow>>,
     neighbor_window: usize,
-) -> String {
+) -> Result<String> {
     if neighbor_window == 0 {
-        return chunk_text_from_bytes(bytes, primary.offset, primary.length);
+        return crate::storage::chunk_text_from_canonical(document_text, primary);
     }
 
     let Some(chunks) = doc_chunks else {
-        return chunk_text_from_bytes(bytes, primary.offset, primary.length);
+        return crate::storage::chunk_text_from_canonical(document_text, primary);
     };
 
     let window = neighbor_window.min(i32::MAX as usize) as i32;
@@ -29,16 +24,16 @@ pub(super) fn search_text_with_neighbors(
             continue;
         }
 
-        let snippet = chunk_text_from_bytes(bytes, chunk.offset, chunk.length);
+        let snippet = crate::storage::chunk_text_from_canonical(document_text, chunk)?;
         if !snippet.is_empty() {
             snippets.push(snippet);
         }
     }
 
     if snippets.is_empty() {
-        chunk_text_from_bytes(bytes, primary.offset, primary.length)
+        crate::storage::chunk_text_from_canonical(document_text, primary)
     } else {
-        snippets.join("\n\n")
+        Ok(snippets.join("\n\n"))
     }
 }
 

@@ -1968,10 +1968,12 @@ fn search_keyword_includes_neighbor_chunks_for_context() {
             .collect::<Vec<_>>()
             .join(" ");
         let markdown = format!("# Title\n\n{left}\n\n{middle}\n\n{right}\n");
-        write_text_file(&work_path.join("docs/guide.md"), &markdown);
+        let file_path = work_path.join("docs/guide.md");
+        write_text_file(&file_path, &markdown);
         engine
             .update(update_options(Some("work"), &["api"]))
             .expect("initial update");
+        write_text_file(&file_path, "mutated source should not be used\n");
 
         let response = engine
             .search(SearchRequest {
@@ -1996,6 +1998,101 @@ fn search_keyword_includes_neighbor_chunks_for_context() {
         assert!(
             first.text.contains("rightctx"),
             "neighbor window should include next chunk"
+        );
+        assert!(
+            !first.text.contains("mutated source"),
+            "neighbor snippet should be hydrated from canonical text"
+        );
+    });
+}
+
+#[test]
+fn search_keyword_hydrates_result_text_when_source_file_is_missing() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        let file_path = work_path.join("guide.md");
+        write_text_file(&file_path, "alpha canonical result\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+        std::fs::remove_file(&file_path).expect("remove source file after indexing");
+
+        let response = engine
+            .search(SearchRequest {
+                query: "alpha".to_string(),
+                mode: SearchMode::Keyword,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 5,
+                min_score: 0.0,
+                no_rerank: true,
+                debug: false,
+            })
+            .expect("search should hydrate from canonical text");
+
+        assert_eq!(response.results.len(), 1);
+        assert!(response.results[0].text.contains("alpha canonical result"));
+    });
+}
+
+#[test]
+fn search_errors_when_canonical_text_is_missing() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        write_text_file(&work_path.join("guide.md"), "alpha canonical body\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let document = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.md")
+            .expect("query document")
+            .expect("document exists");
+        {
+            let conn = rusqlite::Connection::open(engine.config().cache_dir.join("meta.sqlite"))
+                .expect("open metadata db");
+            conn.execute(
+                "DELETE FROM document_texts WHERE doc_id = ?1",
+                [document.id],
+            )
+            .expect("delete canonical text");
+        }
+
+        let err = engine
+            .search(SearchRequest {
+                query: "alpha".to_string(),
+                mode: SearchMode::Keyword,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 5,
+                min_score: 0.0,
+                no_rerank: true,
+                debug: false,
+            })
+            .expect_err("missing canonical text should fail explicitly");
+        assert!(
+            err.to_string().contains("missing persisted canonical text"),
+            "unexpected error: {err}"
         );
     });
 }
@@ -2466,6 +2563,106 @@ fn search_rerank_sends_one_representative_per_document() {
                 .expect("debug signals")
                 .reranker
         );
+    });
+}
+
+#[test]
+fn search_rerank_uses_canonical_body_with_prefix_and_result_text_without_prefix() {
+    use std::sync::Mutex;
+
+    struct RecordingReranker {
+        calls: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl crate::models::Reranker for RecordingReranker {
+        fn rerank(&self, _query: &str, docs: &[String]) -> crate::Result<Vec<f32>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(docs.iter().cloned().collect());
+            Ok(vec![1.0; docs.len()])
+        }
+    }
+
+    with_kbolt_space_env(None, || {
+        let recording_reranker = Arc::new(RecordingReranker {
+            calls: Mutex::new(Vec::new()),
+        });
+        let engine_root = tempdir().expect("create engine temp root");
+        let config_dir = engine_root.path().join("config");
+        let cache_dir = engine_root.path().join("cache");
+        let storage = Storage::new(&cache_dir).expect("create storage");
+        let mut config = base_test_config(config_dir, cache_dir);
+        config.chunking.defaults.contextual_prefix = false;
+        let engine = Engine::from_parts_with_models(
+            storage,
+            config,
+            Some(Arc::new(DeterministicEmbedder)),
+            Some(recording_reranker.clone()),
+            None,
+        );
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        let file_path = work_path.join("guide.md");
+        write_text_file(
+            &file_path,
+            "# Setup\n\nalpha canonical rerank body appears here\n",
+        );
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+        std::fs::remove_file(&file_path).expect("remove source file after indexing");
+
+        let response = engine
+            .search(SearchRequest {
+                query: "alpha canonical rerank".to_string(),
+                mode: SearchMode::Auto,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 5,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: true,
+            })
+            .expect("search with rerank should hydrate canonical text");
+
+        let calls = recording_reranker.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].len(), 1);
+        let rerank_input = &calls[0][0];
+        assert!(
+            rerank_input.contains("title: Setup"),
+            "rerank input should include explicit title prefix: {rerank_input:?}"
+        );
+        assert!(
+            rerank_input.contains("heading: Setup"),
+            "rerank input should include explicit heading prefix: {rerank_input:?}"
+        );
+        assert!(rerank_input.contains("alpha canonical rerank body"));
+
+        assert_eq!(response.results.len(), 1);
+        assert!(response.results[0]
+            .text
+            .contains("alpha canonical rerank body"));
+        assert!(
+            !response.results[0].text.contains("title:"),
+            "result snippet should not include indexing/rerank prefix"
+        );
+        assert!(
+            !response.results[0].text.contains("heading:"),
+            "result snippet should not include indexing/rerank prefix"
+        );
+        assert!(response.results[0]
+            .signals
+            .as_ref()
+            .expect("debug signals")
+            .reranker
+            .is_some());
     });
 }
 

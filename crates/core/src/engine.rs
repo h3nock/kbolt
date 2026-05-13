@@ -15,7 +15,7 @@ use crate::lock::{LockMode, OperationLock};
 use crate::models;
 use crate::storage::Storage;
 use crate::storage::{
-    ChunkInsert, ChunkRow, CollectionRow, DocumentGenerationReplace, DocumentRow,
+    ChunkInsert, ChunkRow, CollectionRow, DocumentGenerationReplace, DocumentRow, DocumentTextRow,
     DocumentTitleSource, SpaceResolution, TantivyEntry,
 };
 use crate::Result;
@@ -50,7 +50,7 @@ use path_utils::{
 };
 use scoring::{dense_distance_to_score, max_option};
 pub(crate) use text_helpers::retrieval_text_with_prefix;
-use text_helpers::{chunk_text_from_bytes, search_text_with_neighbors};
+use text_helpers::search_text_with_canonical_neighbors;
 
 pub struct Engine {
     storage: Storage,
@@ -84,7 +84,6 @@ struct TargetScope<'a> {
 struct SearchCollectionMeta {
     space: String,
     collection: String,
-    path: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -715,7 +714,6 @@ impl Engine {
                 SearchCollectionMeta {
                     space: target.space.clone(),
                     collection: target.collection.name.clone(),
-                    path: target.collection.path.clone(),
                 },
             );
         }

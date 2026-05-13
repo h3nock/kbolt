@@ -493,7 +493,6 @@ impl Engine {
             };
 
             candidates.push(PendingSearchCandidate {
-                chunk_id: ranked.chunk_id,
                 doc_id: chunk.doc_id,
                 docid: short_docid(&document.hash),
                 path: format!("{}/{}", collection.collection, document.path),
@@ -503,7 +502,6 @@ impl Engine {
                 collection: collection.collection.clone(),
                 heading: chunk.heading.clone(),
                 chunk: chunk.clone(),
-                full_path: collection.path.join(&document.path),
                 bm25: ranked.bm25,
                 dense: ranked.dense,
                 fusion: ranked.fusion,
@@ -513,9 +511,8 @@ impl Engine {
             });
         }
 
-        let mut bytes_by_doc: HashMap<i64, Vec<u8>> = HashMap::new();
+        let mut text_by_doc: HashMap<i64, DocumentTextRow> = HashMap::new();
         let neighbor_window = self.config.chunking.defaults.neighbor_window;
-        let contextual_prefix = self.config.chunking.defaults.contextual_prefix;
 
         let mut chunks_by_doc: HashMap<i64, Vec<ChunkRow>> = HashMap::new();
 
@@ -535,28 +532,11 @@ impl Engine {
                 select_rerank_representatives(&candidates, rerank_count, protected_original_docs);
             let mut rerank_doc_ids = Vec::new();
             let mut rerank_inputs = Vec::new();
-            let mut invalid_chunk_ids = HashSet::new();
             for &idx in &representative_indices {
                 let candidate = &candidates[idx];
-                match build_rerank_input(
-                    candidate,
-                    &self.storage,
-                    &mut bytes_by_doc,
-                    &mut chunks_by_doc,
-                    neighbor_window,
-                    contextual_prefix,
-                )? {
-                    Some(rerank_input) => {
-                        rerank_doc_ids.push(candidate.doc_id);
-                        rerank_inputs.push(rerank_input);
-                    }
-                    None => {
-                        invalid_chunk_ids.insert(candidate.chunk_id);
-                    }
-                }
-            }
-            if !invalid_chunk_ids.is_empty() {
-                candidates.retain(|candidate| !invalid_chunk_ids.contains(&candidate.chunk_id));
+                let rerank_input = build_rerank_input(candidate, &self.storage, &mut text_by_doc)?;
+                rerank_doc_ids.push(candidate.doc_id);
+                rerank_inputs.push(rerank_input);
             }
             let raw_scores = match self.reranker.as_ref() {
                 Some(reranker) => match reranker.rerank(query, &rerank_inputs) {
@@ -589,7 +569,7 @@ impl Engine {
                 return finalize_search_results(
                     candidates,
                     &self.storage,
-                    &mut bytes_by_doc,
+                    &mut text_by_doc,
                     &mut chunks_by_doc,
                     neighbor_window,
                     debug,
@@ -614,7 +594,7 @@ impl Engine {
         finalize_search_results(
             candidates,
             &self.storage,
-            &mut bytes_by_doc,
+            &mut text_by_doc,
             &mut chunks_by_doc,
             neighbor_window,
             debug,
@@ -636,7 +616,6 @@ fn unique_target_spaces(targets: &[UpdateTarget]) -> Vec<&str> {
 
 #[derive(Debug, Clone)]
 struct PendingSearchCandidate {
-    chunk_id: i64,
     doc_id: i64,
     docid: String,
     path: String,
@@ -646,7 +625,6 @@ struct PendingSearchCandidate {
     collection: String,
     heading: Option<String>,
     chunk: ChunkRow,
-    full_path: std::path::PathBuf,
     bm25: Option<f32>,
     dense: Option<f32>,
     fusion: f32,
@@ -658,34 +636,20 @@ struct PendingSearchCandidate {
 fn build_rerank_input(
     candidate: &PendingSearchCandidate,
     storage: &Storage,
-    bytes_by_doc: &mut HashMap<i64, Vec<u8>>,
-    chunks_by_doc: &mut HashMap<i64, Vec<ChunkRow>>,
-    neighbor_window: usize,
-    contextual_prefix: bool,
-) -> Result<Option<String>> {
-    let Some(bytes) = load_candidate_bytes(candidate, bytes_by_doc)? else {
-        return Ok(None);
-    };
-    let primary_text = chunk_text_from_bytes(bytes, candidate.chunk.offset, candidate.chunk.length);
-    let rerank_body = if primary_text.trim().is_empty() {
-        search_text_with_neighbors(
-            bytes,
-            &candidate.chunk,
-            candidate_neighbors(storage, candidate, chunks_by_doc, neighbor_window)?,
-            neighbor_window,
-        )
-    } else {
-        primary_text
-    };
+    text_by_doc: &mut HashMap<i64, DocumentTextRow>,
+) -> Result<String> {
+    let document_text = candidate_document_text(storage, candidate, text_by_doc)?;
+    let rerank_body =
+        crate::storage::chunk_text_from_canonical(document_text.text.as_str(), &candidate.chunk)?;
 
-    Ok(Some(retrieval_text_with_prefix(
+    Ok(retrieval_text_with_prefix(
         rerank_body.as_str(),
         candidate
             .title_source
             .semantic_title(candidate.title.as_str()),
         candidate.heading.as_deref(),
-        contextual_prefix,
-    )))
+        true,
+    ))
 }
 
 /// Selects one representative candidate per unique document for reranking.
@@ -819,7 +783,7 @@ fn apply_reranker_scores(
 fn finalize_search_results(
     mut candidates: Vec<PendingSearchCandidate>,
     storage: &Storage,
-    bytes_by_doc: &mut HashMap<i64, Vec<u8>>,
+    text_by_doc: &mut HashMap<i64, DocumentTextRow>,
     chunks_by_doc: &mut HashMap<i64, Vec<ChunkRow>>,
     neighbor_window: usize,
     debug: bool,
@@ -833,15 +797,13 @@ fn finalize_search_results(
             break;
         }
 
-        let Some(bytes) = load_candidate_bytes(&candidate, bytes_by_doc)? else {
-            continue;
-        };
-        let text = search_text_with_neighbors(
-            bytes,
+        let document_text = candidate_document_text(storage, &candidate, text_by_doc)?;
+        let text = search_text_with_canonical_neighbors(
+            document_text.text.as_str(),
             &candidate.chunk,
             candidate_neighbors(storage, &candidate, chunks_by_doc, neighbor_window)?,
             neighbor_window,
-        );
+        )?;
 
         results.push(SearchResult {
             docid: candidate.docid,
@@ -888,21 +850,25 @@ fn candidate_neighbors<'a>(
     Ok(chunks_by_doc.get(&candidate.doc_id))
 }
 
-fn load_candidate_bytes<'a>(
+fn candidate_document_text<'a>(
+    storage: &Storage,
     candidate: &PendingSearchCandidate,
-    bytes_by_doc: &'a mut HashMap<i64, Vec<u8>>,
-) -> Result<Option<&'a [u8]>> {
-    if !bytes_by_doc.contains_key(&candidate.doc_id) {
-        match std::fs::read(&candidate.full_path) {
-            Ok(bytes) => {
-                bytes_by_doc.insert(candidate.doc_id, bytes);
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err.into()),
-        }
+    text_by_doc: &'a mut HashMap<i64, DocumentTextRow>,
+) -> Result<&'a DocumentTextRow> {
+    if !text_by_doc.contains_key(&candidate.doc_id) {
+        text_by_doc.insert(
+            candidate.doc_id,
+            storage.get_document_text(candidate.doc_id)?,
+        );
     }
 
-    Ok(bytes_by_doc.get(&candidate.doc_id).map(Vec::as_slice))
+    text_by_doc.get(&candidate.doc_id).ok_or_else(|| {
+        KboltError::Internal(format!(
+            "document text cache missing for {}",
+            candidate.doc_id
+        ))
+        .into()
+    })
 }
 
 #[cfg(test)]
@@ -916,7 +882,6 @@ mod tests {
 
     fn candidate(doc_id: i64, chunk_id: i64, fusion: f32) -> PendingSearchCandidate {
         PendingSearchCandidate {
-            chunk_id,
             doc_id,
             docid: format!("#{doc_id}"),
             path: format!("doc-{doc_id}.md"),
@@ -934,7 +899,6 @@ mod tests {
                 heading: None,
                 kind: FinalChunkKind::Paragraph,
             },
-            full_path: std::path::PathBuf::from(format!("doc-{doc_id}.md")),
             bm25: None,
             dense: None,
             fusion,
