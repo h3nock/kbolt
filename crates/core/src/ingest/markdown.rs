@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::Path;
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -15,6 +16,10 @@ impl Extractor for MarkdownExtractor {
 
     fn profile_key(&self) -> &'static str {
         "md"
+    }
+
+    fn version(&self) -> u32 {
+        2
     }
 
     fn extract(&self, _path: &Path, bytes: &[u8]) -> Result<ExtractedDocument> {
@@ -45,12 +50,19 @@ impl Extractor for MarkdownExtractor {
                         continue;
                     };
                     let open = open_blocks.remove(index);
+                    let exclude_end = range.end.min(source.len());
+                    for parent in &mut open_blocks {
+                        if parent.start <= open.start {
+                            parent.excluded_ranges.push(open.start..exclude_end);
+                        }
+                    }
+
                     let span_end = trim_trailing_newlines(source, open.start, range.end);
                     if span_end <= open.start {
                         continue;
                     }
 
-                    let text = source[open.start..span_end].to_string();
+                    let text = block_text(source, open.start, span_end, &open.excluded_ranges);
                     if text.trim().is_empty() {
                         continue;
                     }
@@ -78,6 +90,8 @@ impl Extractor for MarkdownExtractor {
             }
         }
 
+        blocks.sort_by_key(|block| block.offset);
+
         Ok(ExtractedDocument {
             blocks,
             metadata: HashMap::new(),
@@ -93,6 +107,7 @@ struct OpenBlock {
     start: usize,
     heading_path: Vec<String>,
     attrs: HashMap<String, String>,
+    excluded_ranges: Vec<Range<usize>>,
 }
 
 impl OpenBlock {
@@ -168,6 +183,7 @@ fn open_block_for_tag(
         start,
         heading_path: heading_path.to_vec(),
         attrs,
+        excluded_ranges: Vec::new(),
     })
 }
 
@@ -217,6 +233,36 @@ fn trim_trailing_newlines(source: &str, start: usize, end: usize) -> usize {
         cursor -= 1;
     }
     cursor
+}
+
+fn block_text(source: &str, start: usize, end: usize, excluded_ranges: &[Range<usize>]) -> String {
+    if excluded_ranges.is_empty() {
+        return source[start..end].to_string();
+    }
+
+    let mut ranges = excluded_ranges
+        .iter()
+        .filter_map(|range| {
+            let range_start = range.start.max(start).min(end);
+            let range_end = range.end.max(start).min(end);
+            (range_start < range_end).then_some(range_start..range_end)
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|range| range.start);
+
+    let mut text = String::new();
+    let mut cursor = start;
+    for range in ranges {
+        if range.start > cursor {
+            text.push_str(&source[cursor..range.start]);
+        }
+        cursor = cursor.max(range.end);
+    }
+    if cursor < end {
+        text.push_str(&source[cursor..end]);
+    }
+
+    text.trim_end_matches([' ', '\t', '\n', '\r']).to_string()
 }
 
 #[cfg(test)]
@@ -288,6 +334,34 @@ fn main() {}
             .find(|block| block.kind == BlockKind::CodeFence)
             .expect("code fence block");
         assert_eq!(code.attrs.get("language").map(String::as_str), Some("rust"));
+    }
+
+    #[test]
+    fn nested_list_items_do_not_duplicate_child_text() {
+        let extractor = MarkdownExtractor;
+        let doc = extractor
+            .extract(
+                Path::new("docs/list.md"),
+                br#"- parent listtarget
+  - child nestedtarget
+"#,
+            )
+            .expect("extract markdown");
+
+        let list_items = doc
+            .blocks
+            .iter()
+            .filter(|block| block.kind == BlockKind::ListItem)
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            list_items,
+            vec!["- parent listtarget", "- child nestedtarget"]
+        );
+
+        let canonical = list_items.join("\n\n");
+        assert_eq!(canonical.matches("nestedtarget").count(), 1);
+        assert!(!canonical.contains("listtarget\n  - child"));
     }
 
     #[test]
