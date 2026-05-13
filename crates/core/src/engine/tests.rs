@@ -2674,6 +2674,72 @@ fn search_auto_mode_uses_hybrid_signals_when_embedder_is_configured() {
 }
 
 #[test]
+fn search_auto_without_reranker_does_not_hydrate_extra_rerank_candidates() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine();
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        write_text_file(
+            &work_path.join("top.md"),
+            "anchor anchor anchor anchor anchor top result\n",
+        );
+        write_text_file(&work_path.join("extra.md"), "anchor extra candidate\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let extra_doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "extra.md")
+            .expect("query extra document")
+            .expect("extra document exists");
+        {
+            let conn = rusqlite::Connection::open(engine.config().cache_dir.join("meta.sqlite"))
+                .expect("open metadata db");
+            conn.execute(
+                "DELETE FROM document_texts WHERE doc_id = ?1",
+                [extra_doc.id],
+            )
+            .expect("delete extra canonical text");
+        }
+
+        let response = engine
+            .search(SearchRequest {
+                query: "anchor".to_string(),
+                mode: SearchMode::Auto,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 1,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: true,
+            })
+            .expect("auto search should not hydrate non-result rerank candidates without reranker");
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].path, "api/top.md");
+        assert!(
+            response.pipeline.notices.iter().any(|notice| {
+                notice.step == kbolt_types::SearchPipelineStep::Rerank
+                    && notice.reason == kbolt_types::SearchPipelineUnavailableReason::NotConfigured
+            }),
+            "expected rerank-not-configured notice: {:?}",
+            response.pipeline.notices
+        );
+    });
+}
+
+#[test]
 fn search_auto_mode_honors_no_rerank_flag() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_embedder(Arc::new(DeterministicEmbedder));

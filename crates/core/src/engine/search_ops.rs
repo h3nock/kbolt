@@ -547,6 +547,23 @@ impl Engine {
         let mut chunks_by_doc: HashMap<i64, Vec<ChunkRow>> = HashMap::new();
 
         if apply_rerank && !candidates.is_empty() {
+            let Some(reranker) = self.reranker.as_ref() else {
+                pipeline.rerank = false;
+                add_search_pipeline_notice(
+                    pipeline,
+                    SearchPipelineStep::Rerank,
+                    SearchPipelineUnavailableReason::NotConfigured,
+                );
+                return finalize_search_results(
+                    candidates,
+                    &self.storage,
+                    &mut text_by_doc,
+                    &mut chunks_by_doc,
+                    &self.config.chunking,
+                    debug,
+                    limit,
+                );
+            };
             let rerank_count = rerank_candidate_count(
                 limit,
                 candidates.len(),
@@ -572,32 +589,21 @@ impl Engine {
                 let rerank_input = build_rerank_input(candidate, &text_by_doc)?;
                 rerank_inputs.push(rerank_input);
             }
-            let raw_scores = match self.reranker.as_ref() {
-                Some(reranker) => match reranker.rerank(query, &rerank_inputs) {
-                    Ok(scores) => {
-                        pipeline.rerank = true;
-                        Some(scores)
-                    }
-                    Err(err) if is_model_not_available_error(&err) => {
-                        pipeline.rerank = false;
-                        add_search_pipeline_notice(
-                            pipeline,
-                            SearchPipelineStep::Rerank,
-                            SearchPipelineUnavailableReason::ModelNotAvailable,
-                        );
-                        None
-                    }
-                    Err(err) => return Err(err),
-                },
-                None => {
+            let raw_scores = match reranker.rerank(query, &rerank_inputs) {
+                Ok(scores) => {
+                    pipeline.rerank = true;
+                    Some(scores)
+                }
+                Err(err) if is_model_not_available_error(&err) => {
                     pipeline.rerank = false;
                     add_search_pipeline_notice(
                         pipeline,
                         SearchPipelineStep::Rerank,
-                        SearchPipelineUnavailableReason::NotConfigured,
+                        SearchPipelineUnavailableReason::ModelNotAvailable,
                     );
                     None
                 }
+                Err(err) => return Err(err),
             };
             let Some(raw_scores) = raw_scores else {
                 return finalize_search_results(
