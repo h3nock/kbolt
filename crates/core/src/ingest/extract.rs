@@ -86,6 +86,7 @@ impl ExtractorRegistry {
 
 pub fn default_registry() -> ExtractorRegistry {
     let mut registry = ExtractorRegistry::new();
+    registry.register(Arc::new(crate::ingest::html::HtmlExtractor));
     registry.register(Arc::new(crate::ingest::markdown::MarkdownExtractor));
     registry.register(Arc::new(crate::ingest::code::CodeExtractor));
     registry.register(Arc::new(crate::ingest::plaintext::PlaintextExtractor));
@@ -210,11 +211,19 @@ mod tests {
         let registry = default_registry();
 
         let txt = registry.resolve_for_path(Path::new("notes/readme.txt"));
+        let html = registry.resolve_for_path(Path::new("docs/page.html"));
+        let htm = registry.resolve_for_path(Path::new("docs/page.htm"));
         let md = registry.resolve_for_path(Path::new("notes/readme.md"));
         let code = registry.resolve_for_path(Path::new("src/lib.rs"));
         let unknown = registry.resolve_for_path(Path::new("notes/readme.rst"));
 
         assert!(txt.is_some());
+        assert!(html
+            .as_ref()
+            .is_some_and(|extractor| extractor.profile_key() == "html"));
+        assert!(htm
+            .as_ref()
+            .is_some_and(|extractor| extractor.profile_key() == "html"));
         assert!(md
             .as_ref()
             .is_some_and(|extractor| extractor.supports().contains(&"md")));

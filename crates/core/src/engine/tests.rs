@@ -2110,6 +2110,92 @@ fn search_keyword_hydrates_result_text_when_source_file_is_missing() {
 }
 
 #[test]
+fn update_get_and_search_use_extracted_html_text() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        let file_path = work_path.join("docs/page.html");
+        write_text_file(
+            &file_path,
+            r#"<!doctype html>
+<html>
+  <head>
+    <title>Guide Title</title>
+    <script>ignored_script_token</script>
+    <style>.noise { color: red; }</style>
+  </head>
+  <body>
+    <h1>Visible Guide</h1>
+    <p>alpha <strong>htmltarget</strong> canonical body.</p>
+  </body>
+</html>"#,
+        );
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update html");
+        assert_eq!(report.scanned_docs, 1);
+        assert_eq!(report.added_docs, 1);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let document = engine
+            .storage()
+            .get_document_by_path(collection.id, "docs/page.html")
+            .expect("query document")
+            .expect("document exists");
+        assert_eq!(document.title, "Guide Title");
+
+        let indexed = engine
+            .get_document(GetRequest {
+                locator: Locator::Path("api/docs/page.html".to_string()),
+                space: Some("work".to_string()),
+                offset: None,
+                limit: None,
+            })
+            .expect("get indexed html text");
+        assert!(indexed.content.contains("Visible Guide"));
+        assert!(indexed.content.contains("alpha htmltarget canonical body."));
+        assert!(!indexed.content.contains("<p>"));
+        assert!(!indexed.content.contains("ignored_script_token"));
+
+        let response = engine
+            .search(SearchRequest {
+                query: "htmltarget".to_string(),
+                mode: SearchMode::Keyword,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 5,
+                min_score: 0.0,
+                no_rerank: true,
+                debug: false,
+            })
+            .expect("search html");
+
+        assert_eq!(response.results.len(), 1);
+        assert!(response.results[0]
+            .text
+            .contains("alpha htmltarget canonical body."));
+        assert!(!response.results[0].text.contains("<strong>"));
+        assert!(!response.results[0].text.contains("ignored_script_token"));
+    });
+}
+
+#[test]
 fn search_errors_when_canonical_text_is_missing() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
