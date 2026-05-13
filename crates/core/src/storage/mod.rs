@@ -841,7 +841,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
             .map_err(|_| CoreError::poisoned("database"))?;
         let _collection_name = lookup_collection_name(&conn, collection_id)?;
 
-        conn.execute(
+        let id = conn.query_row(
             "INSERT INTO documents (collection_id, path, title, title_source, hash, modified, active, deactivated_at, fts_dirty)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, NULL, 1)
              ON CONFLICT(collection_id, path) DO UPDATE SET
@@ -851,7 +851,8 @@ CREATE TABLE IF NOT EXISTS embeddings (
                  modified = excluded.modified,
                  active = 1,
                  deactivated_at = NULL,
-                 fts_dirty = 1",
+                 fts_dirty = 1
+             RETURNING id",
             params![
                 collection_id,
                 path,
@@ -860,11 +861,6 @@ CREATE TABLE IF NOT EXISTS embeddings (
                 hash,
                 modified
             ],
-        )?;
-
-        let id: i64 = conn.query_row(
-            "SELECT id FROM documents WHERE collection_id = ?1 AND path = ?2",
-            params![collection_id, path],
             |row| row.get(0),
         )?;
         Ok(id)
