@@ -220,55 +220,19 @@ impl Engine {
                 .expect("non-empty backlog should have a last chunk id");
 
             let mut pending = Vec::new();
-            let mut bytes_by_path: HashMap<std::path::PathBuf, Option<Vec<u8>>> = HashMap::new();
             for record in backlog {
                 if failed_chunk_ids.contains(&record.chunk_id) {
                     continue;
                 }
 
                 let full_path = record.collection_path.join(&record.doc_path);
-                if !bytes_by_path.contains_key(&full_path) {
-                    let read_started = Instant::now();
-                    let bytes = match std::fs::read(&full_path) {
-                        Ok(bytes) => Some(bytes),
-                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-                        Err(err) => {
-                            report.errors.push(file_error(
-                                Some(full_path.clone()),
-                                format!("embed read failed: {err}"),
-                            ));
-                            failed_docs.insert(update_doc_key(
-                                &record.space_name,
-                                &record.collection_path,
-                                &record.doc_path,
-                            ));
-                            None
-                        }
-                    };
-                    crate::profile::record_update_stage(
-                        "embedding_backlog_read",
-                        read_started.elapsed(),
-                    );
-                    bytes_by_path.insert(full_path.clone(), bytes);
-                }
-
-                let Some(bytes) = bytes_by_path
-                    .get(&full_path)
-                    .and_then(|bytes| bytes.as_deref())
-                else {
-                    continue;
-                };
-
-                let mut text = chunk_text_from_bytes(&bytes, record.offset, record.length);
-                if text.trim().is_empty() {
-                    text = " ".to_string();
-                }
-                let max_document_tokens = match self.chunk_policy_for_path(&full_path) {
-                    Ok(policy) => effective_chunk_hard_max(&policy),
+                let read_started = Instant::now();
+                let chunk_text = match self.storage.get_chunk_text(record.chunk_id) {
+                    Ok(chunk_text) => chunk_text,
                     Err(err) => {
                         report.errors.push(file_error(
                             Some(full_path.clone()),
-                            format!("embed preflight policy resolution failed: {err}"),
+                            format!("embed canonical text load failed: {err}"),
                         ));
                         failed_docs.insert(update_doc_key(
                             &record.space_name,
@@ -278,6 +242,20 @@ impl Engine {
                         continue;
                     }
                 };
+                crate::profile::record_update_stage(
+                    "embedding_backlog_read",
+                    read_started.elapsed(),
+                );
+                let mut text = chunk_text.text;
+                if text.trim().is_empty() {
+                    text = " ".to_string();
+                }
+                let policy = resolve_policy(
+                    &self.config.chunking,
+                    Some(chunk_text.extractor_key.as_str()),
+                    None,
+                );
+                let max_document_tokens = effective_chunk_hard_max(&policy);
 
                 pending.push(PendingChunkEmbedding {
                     chunk_id: record.chunk_id,
@@ -591,18 +569,8 @@ impl Engine {
         Ok(preflight)
     }
 
-    fn chunk_policy_for_path(&self, path: &Path) -> Result<crate::config::ChunkPolicy> {
-        let extractor = default_registry().resolve_for_path(path).ok_or_else(|| {
-            KboltError::InvalidInput(format!(
-                "no extractor available for embedding preflight path {}",
-                path.display()
-            ))
-        })?;
-        Ok(resolve_policy(
-            &self.config.chunking,
-            Some(extractor.profile_key()),
-            None,
-        ))
+    fn document_has_canonical_text(&self, doc_id: i64) -> Result<bool> {
+        self.storage.has_document_text(doc_id)
     }
 
     fn replay_fts_dirty_documents(
@@ -622,14 +590,13 @@ impl Engine {
             let doc_id = record.doc_id;
 
             if record.chunks.is_empty() {
+                self.storage.delete_tantivy_by_doc(&space_name, doc_id)?;
                 cleared_by_space.entry(space_name).or_default().push(doc_id);
                 continue;
             }
 
-            let full_path = record.collection_path.join(&record.doc_path);
-            let bytes = match std::fs::read(&full_path) {
-                Ok(bytes) => bytes,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            let document_text = match self.storage.get_document_text(doc_id) {
+                Ok(row) => row,
                 Err(err) => {
                     failed_docs.insert(update_doc_key(
                         &space_name,
@@ -637,30 +604,24 @@ impl Engine {
                         &record.doc_path,
                     ));
                     report.errors.push(file_error(
-                        Some(full_path),
-                        format!("fts replay read failed: {err}"),
+                        Some(record.collection_path.join(&record.doc_path)),
+                        format!("fts replay canonical text load failed: {err}"),
                     ));
                     continue;
                 }
             };
-            if sha256_hex(&bytes) != record.doc_hash {
-                continue;
-            }
+            let policy = resolve_policy(
+                &self.config.chunking,
+                Some(document_text.extractor_key.as_str()),
+                None,
+            );
 
-            self.storage.delete_tantivy_by_doc(&space_name, doc_id)?;
-
-            let file_body = String::from_utf8_lossy(&bytes).into_owned();
             let entries = record
                 .chunks
                 .iter()
-                .map(|chunk| {
-                    let chunk_body = chunk_text_from_bytes(&bytes, chunk.offset, chunk.length);
-                    let source_body = if chunk_body.is_empty() {
-                        file_body.as_str()
-                    } else {
-                        chunk_body.as_str()
-                    };
-                    TantivyEntry {
+                .map(|chunk| -> Result<TantivyEntry> {
+                    let chunk_body = self.storage.get_chunk_text(chunk.id)?.text;
+                    Ok(TantivyEntry {
                         chunk_id: chunk.id,
                         doc_id,
                         filepath: record.doc_path.clone(),
@@ -670,17 +631,18 @@ impl Engine {
                             .map(ToString::to_string),
                         heading: chunk.heading.clone(),
                         body: retrieval_text_with_prefix(
-                            source_body,
+                            chunk_body.as_str(),
                             record
                                 .doc_title_source
                                 .semantic_title(record.doc_title.as_str()),
                             chunk.heading.as_deref(),
-                            self.config.chunking.defaults.contextual_prefix,
+                            policy.contextual_prefix,
                         ),
-                    }
+                    })
                 })
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>>>()?;
 
+            self.storage.delete_tantivy_by_doc(&space_name, doc_id)?;
             self.storage.index_tantivy(&space_name, &entries)?;
             cleared_by_space.entry(space_name).or_default().push(doc_id);
         }
@@ -1011,7 +973,8 @@ impl Engine {
             };
 
             if let Some(existing) = docs_by_path.get(&relative_path) {
-                if existing.active && existing.modified == modified {
+                let has_canonical_text = self.document_has_canonical_text(existing.id)?;
+                if existing.active && existing.modified == modified && has_canonical_text {
                     report.skipped_mtime_docs += 1;
                     push_update_decision(
                         report,
@@ -1064,7 +1027,8 @@ impl Engine {
             let pending_decision;
             let pending_indexing;
             if let Some(doc) = existing.as_ref() {
-                if doc.hash == hash {
+                let has_canonical_text = self.document_has_canonical_text(doc.id)?;
+                if doc.hash == hash && has_canonical_text {
                     if doc.active {
                         report.skipped_hash_docs += 1;
                         push_update_decision(
@@ -1149,6 +1113,10 @@ impl Engine {
                 title_source = DocumentTitleSource::Extracted;
             }
 
+            let canonical = crate::profile::timed_update_stage("canonical_text", || {
+                build_canonical_document(&extracted)
+            });
+            let text_hash = sha256_hex(canonical.text.as_bytes());
             let policy = resolve_policy(&self.config.chunking, Some(extractor.profile_key()), None);
             let max_document_tokens = effective_chunk_hard_max(&policy);
             let chunk_started = Instant::now();
@@ -1157,9 +1125,13 @@ impl Engine {
                     let sizer_counter = EmbeddingDocumentSizerCounter {
                         inner: sizer.as_ref(),
                     };
-                    chunk_document_with_counter(&extracted, &policy, &sizer_counter)
+                    chunk_canonical_document_with_counter(
+                        &canonical.document,
+                        &policy,
+                        &sizer_counter,
+                    )
                 }
-                None => Ok(chunk_document(&extracted, &policy)),
+                None => Ok(chunk_canonical_document(&canonical.document, &policy)),
             };
             crate::profile::record_update_stage("chunk", chunk_started.elapsed());
             let final_chunks = match final_chunks_result {
@@ -1199,14 +1171,12 @@ impl Engine {
                     kind: chunk.kind,
                 })
                 .collect::<Vec<_>>();
-            let body = String::from_utf8_lossy(&bytes).into_owned();
             let mut prepared_embeddings = Vec::new();
             let mut rejected_chunk_indexes = Vec::new();
             if !chunk_inserts.is_empty() && !options.no_embed && self.embedder.is_some() {
                 let prepared = crate::profile::timed_update_stage("embedding_prepare_text", || {
                     prepare_chunk_embeddings(
                         &final_chunks,
-                        &bytes,
                         &doc_key,
                         target,
                         entry.path(),
@@ -1230,35 +1200,41 @@ impl Engine {
                 }
             }
 
-            let doc_id = crate::profile::timed_update_stage("sqlite_upsert_document", || {
-                self.storage.upsert_document(
-                    target.collection.id,
-                    &relative_path,
-                    &title,
-                    title_source,
-                    &hash,
-                    &modified,
-                )
-            })?;
+            let replacement =
+                crate::profile::timed_update_stage("sqlite_replace_document_generation", || {
+                    self.storage
+                        .replace_document_generation(DocumentGenerationReplace {
+                            collection_id: target.collection.id,
+                            path: &relative_path,
+                            title: &title,
+                            title_source,
+                            hash: &hash,
+                            modified: &modified,
+                            extractor_key: extractor.profile_key(),
+                            source_hash: &hash,
+                            text_hash: &text_hash,
+                            text: canonical.text.as_str(),
+                            chunks: &chunk_inserts,
+                        })
+                })?;
+            let doc_id = replacement.doc_id;
+            let chunk_ids = replacement.chunk_ids;
 
-            if let Some(doc) = existing.as_ref() {
-                let old_chunk_ids = crate::profile::timed_update_stage(
-                    "sqlite_delete_chunks_for_document",
-                    || self.storage.delete_chunks_for_document(doc.id),
-                )?;
-                if !old_chunk_ids.is_empty() {
-                    crate::profile::timed_update_stage("tantivy_delete", || {
-                        self.storage.delete_tantivy(&target.space, &old_chunk_ids)
-                    })?;
-                    crate::profile::timed_update_stage("usearch_delete_save", || {
-                        self.storage.delete_usearch(&target.space, &old_chunk_ids)
-                    })?;
-                }
+            if !replacement.old_chunk_ids.is_empty() {
+                crate::profile::timed_update_stage("tantivy_delete", || {
+                    self.storage
+                        .delete_tantivy(&target.space, &replacement.old_chunk_ids)
+                })?;
+                crate::profile::timed_update_stage("usearch_delete_save", || {
+                    self.storage
+                        .delete_usearch(&target.space, &replacement.old_chunk_ids)
+                })?;
             }
 
-            let chunk_ids = crate::profile::timed_update_stage("sqlite_insert_chunks", || {
-                self.storage.insert_chunks(doc_id, &chunk_inserts)
-            })?;
+            fts_dirty_by_space
+                .entry(target.space.clone())
+                .or_default()
+                .insert(doc_id);
             for chunk_index in rejected_chunk_indexes {
                 if let Some(chunk_id) = chunk_ids.get(chunk_index) {
                     failed_chunk_ids.insert(*chunk_id);
@@ -1299,11 +1275,7 @@ impl Engine {
                             .map(ToString::to_string),
                         heading: chunk.heading.clone(),
                         body: retrieval_text_with_prefix(
-                            if chunk.text.is_empty() {
-                                body.as_str()
-                            } else {
-                                chunk.text.as_str()
-                            },
+                            chunk.text.as_str(),
                             title_source.semantic_title(title.as_str()),
                             chunk.heading.as_deref(),
                             policy.contextual_prefix,
@@ -1314,10 +1286,6 @@ impl Engine {
                 crate::profile::timed_update_stage("tantivy_add", || {
                     self.storage.index_tantivy(&target.space, &entries)
                 })?;
-                fts_dirty_by_space
-                    .entry(target.space.clone())
-                    .or_default()
-                    .insert(doc_id);
             }
 
             docs_by_path.insert(
@@ -1461,7 +1429,6 @@ fn count_document_tokens_profiled(
 
 fn prepare_chunk_embeddings(
     final_chunks: &[crate::ingest::chunk::FinalChunk],
-    bytes: &[u8],
     doc_key: &UpdateDocKey,
     target: &UpdateTarget,
     path: &Path,
@@ -1471,7 +1438,7 @@ fn prepare_chunk_embeddings(
         .iter()
         .enumerate()
         .map(|(chunk_index, chunk)| {
-            let mut text = chunk_text_from_bytes(bytes, chunk.offset, chunk.length);
+            let mut text = chunk.text.clone();
             if text.trim().is_empty() {
                 text = " ".to_string();
             }

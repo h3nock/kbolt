@@ -42,6 +42,45 @@ impl crate::models::Embedder for DeterministicEmbedder {
 }
 
 #[derive(Default)]
+struct RecordingEmbedder {
+    calls: Mutex<Vec<Vec<String>>>,
+}
+
+impl RecordingEmbedder {
+    fn texts(&self) -> Vec<String> {
+        self.calls
+            .lock()
+            .expect("lock recording embedder")
+            .iter()
+            .flatten()
+            .cloned()
+            .collect()
+    }
+}
+
+impl crate::models::Embedder for RecordingEmbedder {
+    fn embed_batch(
+        &self,
+        _kind: crate::models::EmbeddingInputKind,
+        texts: &[String],
+    ) -> crate::Result<Vec<Vec<f32>>> {
+        self.calls
+            .lock()
+            .expect("lock recording embedder")
+            .push(texts.to_vec());
+        Ok(texts
+            .iter()
+            .map(|text| {
+                vec![
+                    text.split_whitespace().count().max(1) as f32,
+                    text.len() as f32,
+                ]
+            })
+            .collect())
+    }
+}
+
+#[derive(Default)]
 struct SelectiveFailureEmbedder;
 
 impl crate::models::Embedder for SelectiveFailureEmbedder {
@@ -62,19 +101,6 @@ impl crate::models::Embedder for SelectiveFailureEmbedder {
                 vec![token_count, byte_count]
             })
             .collect())
-    }
-}
-
-#[derive(Default)]
-struct PanicEmbedder;
-
-impl crate::models::Embedder for PanicEmbedder {
-    fn embed_batch(
-        &self,
-        _kind: crate::models::EmbeddingInputKind,
-        _texts: &[String],
-    ) -> crate::Result<Vec<Vec<f32>>> {
-        panic!("embedder should not be called when preflight rejects the batch");
     }
 }
 
@@ -105,6 +131,30 @@ impl CountingCharDocumentSizer {
 impl crate::models::EmbeddingDocumentSizer for CountingCharDocumentSizer {
     fn count_document_tokens(&self, text: &str) -> crate::Result<usize> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(text.chars().count())
+    }
+}
+
+#[derive(Default)]
+struct SecondCallOversizeDocumentSizer {
+    calls: AtomicUsize,
+    reject_after_first: std::sync::atomic::AtomicBool,
+}
+
+impl SecondCallOversizeDocumentSizer {
+    fn reject_after_first_call(&self) {
+        self.calls.store(0, Ordering::SeqCst);
+        self.reject_after_first.store(true, Ordering::SeqCst);
+    }
+}
+
+impl crate::models::EmbeddingDocumentSizer for SecondCallOversizeDocumentSizer {
+    fn count_document_tokens(&self, text: &str) -> crate::Result<usize> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.reject_after_first.load(Ordering::SeqCst) && call > 1 {
+            return Ok(10_000);
+        }
+
         Ok(text.chars().count())
     }
 }
@@ -2777,6 +2827,217 @@ fn update_indexes_new_document_and_skips_unchanged_mtime() {
 }
 
 #[test]
+fn update_rebuilds_matching_file_when_canonical_text_is_missing() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("src/lib.rs");
+        write_text_file(&file_path, "fn alpha() {}\n");
+
+        let first = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("first update");
+        assert_eq!(first.added_docs, 1);
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let document = engine
+            .storage()
+            .get_document_by_path(collection.id, "src/lib.rs")
+            .expect("query document")
+            .expect("document exists");
+        {
+            let conn = rusqlite::Connection::open(engine.config().cache_dir.join("meta.sqlite"))
+                .expect("open metadata db");
+            conn.execute(
+                "DELETE FROM document_texts WHERE doc_id = ?1",
+                [document.id],
+            )
+            .expect("delete canonical text");
+        }
+        assert!(!engine
+            .storage()
+            .has_document_text(document.id)
+            .expect("canonical text should be absent"));
+
+        let second = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("second update");
+        assert_eq!(second.scanned_docs, 1);
+        assert_eq!(second.skipped_mtime_docs, 0);
+        assert_eq!(second.skipped_hash_docs, 0);
+        assert_eq!(second.updated_docs, 1);
+        assert!(
+            second.errors.is_empty(),
+            "unexpected errors: {:?}",
+            second.errors
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .get_document_text(document.id)
+                .expect("canonical text restored")
+                .text,
+            "fn alpha() {}\n"
+        );
+    });
+}
+
+#[test]
+fn update_clears_fts_dirty_for_empty_canonical_document() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        write_text_file(&collection_path.join("empty.txt"), "");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update empty document");
+        assert_eq!(report.scanned_docs, 1);
+        assert_eq!(report.added_docs, 1);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+
+        let dirty = engine
+            .storage()
+            .get_fts_dirty_documents()
+            .expect("load dirty docs");
+        assert!(dirty.is_empty(), "empty document should not remain dirty");
+    });
+}
+
+#[test]
+fn update_replacing_nonempty_document_with_empty_text_removes_old_sidecars() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_embedder(Arc::new(DeterministicEmbedder));
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("guide.md");
+        write_text_file(&file_path, "oldtoken body\n");
+
+        let first = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+        assert_eq!(first.added_docs, 1);
+        assert_eq!(first.embedded_chunks, 1);
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let original_doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.md")
+            .expect("query original document")
+            .expect("document exists");
+        assert_eq!(
+            engine
+                .storage()
+                .query_bm25("work", "oldtoken", &[("body", 1.0)], 10)
+                .expect("query old projection")
+                .len(),
+            1
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(space.id))
+                .expect("count embedded chunks"),
+            1
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_usearch("work")
+                .expect("count usearch vectors"),
+            1
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        write_text_file(&file_path, "");
+
+        let second = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("replace with empty document");
+        assert_eq!(second.scanned_docs, 1);
+        assert_eq!(second.updated_docs, 1);
+        assert!(
+            second.errors.is_empty(),
+            "unexpected errors: {:?}",
+            second.errors
+        );
+
+        let updated_doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.md")
+            .expect("query updated document")
+            .expect("document exists");
+        assert_eq!(updated_doc.id, original_doc.id);
+        assert_eq!(
+            engine
+                .storage()
+                .get_document_text(updated_doc.id)
+                .expect("load updated canonical text")
+                .text,
+            ""
+        );
+        assert!(engine
+            .storage()
+            .get_chunks_for_document(updated_doc.id)
+            .expect("load updated chunks")
+            .is_empty());
+        assert!(engine
+            .storage()
+            .query_bm25("work", "oldtoken", &[("body", 1.0)], 10)
+            .expect("query removed old projection")
+            .is_empty());
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(space.id))
+                .expect("count embedded chunks"),
+            0
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_usearch("work")
+                .expect("count usearch vectors"),
+            0
+        );
+        assert!(engine
+            .storage()
+            .get_fts_dirty_documents()
+            .expect("load dirty docs")
+            .is_empty());
+    });
+}
+
+#[test]
 fn update_replays_fts_dirty_documents_before_mtime_fast_path() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
@@ -3433,7 +3694,236 @@ fn update_isolates_buffered_embedding_failures() {
 }
 
 #[test]
-fn update_rejects_oversized_embedding_payload_before_embedding() {
+fn update_embeds_backlog_from_canonical_text_when_source_bytes_change() {
+    with_kbolt_space_env(None, || {
+        let embedder = Arc::new(RecordingEmbedder::default());
+        let engine = test_engine_with_embedder(embedder.clone());
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("guide.md");
+        write_text_file(&file_path, "alpha stored\n");
+
+        let mut no_embed = update_options(Some("work"), &["api"]);
+        no_embed.no_embed = true;
+        engine.update(no_embed).expect("index without embeddings");
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let document = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.md")
+            .expect("query document")
+            .expect("document exists");
+
+        write_text_file(&file_path, "omega source\n");
+        let modified = super::modified_token(
+            &std::fs::metadata(&file_path).expect("read mutated source metadata"),
+        )
+        .expect("format mutated mtime");
+        engine
+            .storage()
+            .refresh_document_activity(document.id, &modified)
+            .expect("force scan mtime fast path");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("embed backlog from canonical text");
+        assert_eq!(report.skipped_mtime_docs, 1);
+        assert_eq!(report.embedded_chunks, 1);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+
+        let embedded_texts = embedder.texts();
+        assert!(
+            embedded_texts
+                .iter()
+                .any(|text| text.contains("alpha stored")),
+            "expected stored canonical text in embedding input: {embedded_texts:?}"
+        );
+        assert!(
+            embedded_texts
+                .iter()
+                .all(|text| !text.contains("omega source")),
+            "embedding backlog should not read mutated source bytes: {embedded_texts:?}"
+        );
+    });
+}
+
+#[test]
+fn update_replays_fts_dirty_from_canonical_text_when_source_bytes_change() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("guide.md");
+        write_text_file(&file_path, "alpha replay\n");
+
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let document = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.md")
+            .expect("query document")
+            .expect("document exists");
+
+        engine
+            .storage()
+            .delete_tantivy_by_doc("work", document.id)
+            .expect("delete existing projection");
+        engine
+            .storage()
+            .commit_tantivy("work")
+            .expect("commit projection delete");
+        assert!(engine
+            .storage()
+            .query_bm25("work", "alpha", &[("body", 1.0)], 10)
+            .expect("query deleted projection")
+            .is_empty());
+
+        engine
+            .storage()
+            .upsert_document(
+                collection.id,
+                "guide.md",
+                &document.title,
+                document.title_source,
+                &document.hash,
+                &document.modified,
+            )
+            .expect("mark document fts dirty");
+        write_text_file(&file_path, "omega source\n");
+        let modified = super::modified_token(
+            &std::fs::metadata(&file_path).expect("read mutated source metadata"),
+        )
+        .expect("format mutated mtime");
+        engine
+            .storage()
+            .refresh_document_activity(document.id, &modified)
+            .expect("force scan mtime fast path");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("replay fts dirty from canonical text");
+        assert_eq!(report.skipped_mtime_docs, 1);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+
+        let alpha_hits = engine
+            .storage()
+            .query_bm25("work", "alpha", &[("body", 1.0)], 10)
+            .expect("query replayed canonical projection");
+        assert_eq!(alpha_hits.len(), 1);
+        assert!(
+            engine
+                .storage()
+                .query_bm25("work", "omega", &[("body", 1.0)], 10)
+                .expect("query mutated source text")
+                .is_empty(),
+            "fts replay should not index mutated source bytes"
+        );
+    });
+}
+
+#[test]
+fn update_fts_replay_does_not_buffer_delete_when_canonical_span_is_invalid() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        write_text_file(&collection_path.join("guide.md"), "alpha retained\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let document = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.md")
+            .expect("query document")
+            .expect("document exists");
+
+        engine
+            .storage()
+            .upsert_document(
+                collection.id,
+                "guide.md",
+                &document.title,
+                document.title_source,
+                &document.hash,
+                &document.modified,
+            )
+            .expect("mark document fts dirty");
+        {
+            let conn = rusqlite::Connection::open(engine.config().cache_dir.join("meta.sqlite"))
+                .expect("open metadata db");
+            conn.execute(
+                "UPDATE document_texts SET text = '' WHERE doc_id = ?1",
+                [document.id],
+            )
+            .expect("corrupt canonical text span");
+        }
+
+        let err = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect_err("invalid canonical span should fail replay");
+        assert!(
+            err.to_string().contains("text span"),
+            "unexpected error: {err}"
+        );
+
+        engine
+            .storage()
+            .commit_tantivy("work")
+            .expect("commit any pending writer mutations");
+        let hits = engine
+            .storage()
+            .query_bm25("work", "alpha", &[("body", 1.0)], 10)
+            .expect("query retained projection");
+        assert_eq!(
+            hits.len(),
+            1,
+            "failed replay must not leave a pending delete for the old projection"
+        );
+    });
+}
+
+#[test]
+fn update_embeds_canonical_payload_without_raw_spacing_false_rejection() {
     with_kbolt_space_env(None, || {
         let mut chunking = ChunkingConfig::default();
         chunking.defaults.target_tokens = 12;
@@ -3441,7 +3931,7 @@ fn update_rejects_oversized_embedding_payload_before_embedding() {
         chunking.defaults.hard_max_tokens = 12;
         chunking.defaults.boundary_overlap_tokens = 0;
         let engine = test_engine_with_embedding_runtime(
-            Arc::new(PanicEmbedder),
+            Arc::new(DeterministicEmbedder),
             Arc::new(CharCountDocumentSizer),
             chunking,
         );
@@ -3456,15 +3946,14 @@ fn update_rejects_oversized_embedding_payload_before_embedding() {
 
         let report = engine
             .update(update_options(Some("work"), &["api"]))
-            .expect("update with preflight rejection");
+            .expect("update with canonical payload");
 
         assert_eq!(report.scanned_docs, 1);
         assert_eq!(report.added_docs, 1);
-        assert_eq!(report.failed_docs, 1);
-        assert_eq!(report.embedded_chunks, 0);
-        assert_eq!(report.errors.len(), 1);
+        assert_eq!(report.failed_docs, 0);
+        assert_eq!(report.embedded_chunks, 1);
         assert!(
-            report.errors[0].error.contains("embed preflight failed"),
+            report.errors.is_empty(),
             "unexpected error: {:?}",
             report.errors
         );
@@ -3475,18 +3964,35 @@ fn update_rejects_oversized_embedding_payload_before_embedding() {
                 .storage()
                 .count_embedded_chunks(Some(work_space.id))
                 .expect("count embedded chunks"),
-            0
+            1
+        );
+        let collection = engine
+            .storage()
+            .get_collection(work_space.id, "api")
+            .expect("get api collection");
+        let document = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.md")
+            .expect("query document")
+            .expect("document exists");
+        assert_eq!(
+            engine
+                .storage()
+                .get_document_text(document.id)
+                .expect("load canonical text")
+                .text,
+            "alpha\n\nbeta"
         );
         let files = engine
             .list_files(Some("work"), "api", None)
             .expect("list files");
         assert_eq!(files.len(), 1);
-        assert!(!files[0].embedded, "file should remain unembedded");
+        assert!(files[0].embedded, "file should be embedded");
     });
 }
 
 #[test]
-fn update_rejects_oversized_backlog_payload_before_embedding() {
+fn update_embeds_backlog_from_canonical_payload_without_raw_spacing_false_rejection() {
     with_kbolt_space_env(None, || {
         let mut chunking = ChunkingConfig::default();
         chunking.defaults.target_tokens = 12;
@@ -3494,7 +4000,7 @@ fn update_rejects_oversized_backlog_payload_before_embedding() {
         chunking.defaults.hard_max_tokens = 12;
         chunking.defaults.boundary_overlap_tokens = 0;
         let engine = test_engine_with_embedding_runtime(
-            Arc::new(PanicEmbedder),
+            Arc::new(DeterministicEmbedder),
             Arc::new(CharCountDocumentSizer),
             chunking,
         );
@@ -3519,14 +4025,13 @@ fn update_rejects_oversized_backlog_payload_before_embedding() {
 
         let report = engine
             .update(update_options(Some("work"), &["api"]))
-            .expect("update backlog with preflight rejection");
+            .expect("update backlog with canonical payload");
 
         assert_eq!(report.skipped_mtime_docs, 1);
-        assert_eq!(report.failed_docs, 1);
-        assert_eq!(report.embedded_chunks, 0);
-        assert_eq!(report.errors.len(), 1);
+        assert_eq!(report.failed_docs, 0);
+        assert_eq!(report.embedded_chunks, 1);
         assert!(
-            report.errors[0].error.contains("embed preflight failed"),
+            report.errors.is_empty(),
             "unexpected error: {:?}",
             report.errors
         );
@@ -3537,14 +4042,14 @@ fn update_rejects_oversized_backlog_payload_before_embedding() {
                 .storage()
                 .count_embedded_chunks(Some(work_space.id))
                 .expect("count embedded chunks"),
-            0
+            1
         );
         assert_eq!(
             engine
                 .storage()
                 .count_usearch("work")
                 .expect("count usearch vectors"),
-            0
+            1
         );
     });
 }
@@ -3651,6 +4156,116 @@ fn update_preserves_existing_chunks_when_chunk_token_count_fails() {
 fn update_preserves_existing_chunks_when_preinsert_preflight_rejects_replacement() {
     with_kbolt_space_env(None, || {
         let mut chunking = ChunkingConfig::default();
+        chunking.defaults.target_tokens = 32;
+        chunking.defaults.soft_max_tokens = 32;
+        chunking.defaults.hard_max_tokens = 32;
+        chunking.defaults.boundary_overlap_tokens = 0;
+        let sizer = Arc::new(SecondCallOversizeDocumentSizer::default());
+        let engine = test_engine_with_embedding_runtime(
+            Arc::new(DeterministicEmbedder),
+            sizer.clone(),
+            chunking,
+        );
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("guide.md");
+        write_text_file(&file_path, "oldtoken body\n");
+
+        let first = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+        assert_eq!(first.added_docs, 1);
+        assert_eq!(first.failed_docs, 0);
+        assert!(
+            first.errors.is_empty(),
+            "unexpected errors: {:?}",
+            first.errors
+        );
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let original_doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.md")
+            .expect("query original document")
+            .expect("document exists");
+        let original_text = engine
+            .storage()
+            .get_document_text(original_doc.id)
+            .expect("load original canonical text");
+        let original_chunks = engine
+            .storage()
+            .get_chunks_for_document(original_doc.id)
+            .expect("load original chunks");
+        let original_chunk_ids = original_chunks
+            .iter()
+            .map(|chunk| chunk.id)
+            .collect::<Vec<_>>();
+
+        sizer.reject_after_first_call();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        write_text_file(&file_path, "newtoken body\n");
+
+        let second = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update with preflight rejection");
+        assert_eq!(second.scanned_docs, 1);
+        assert_eq!(second.updated_docs, 0);
+        assert_eq!(second.failed_docs, 1);
+        assert_eq!(second.errors.len(), 1);
+        assert!(
+            second.errors[0].error.contains("embed preflight failed"),
+            "unexpected errors: {:?}",
+            second.errors
+        );
+
+        let preserved_doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.md")
+            .expect("query preserved document")
+            .expect("document should still exist");
+        assert_eq!(preserved_doc.id, original_doc.id);
+        assert_eq!(preserved_doc.hash, original_doc.hash);
+        assert_eq!(preserved_doc.modified, original_doc.modified);
+        assert_eq!(
+            engine
+                .storage()
+                .get_document_text(preserved_doc.id)
+                .expect("load preserved canonical text")
+                .text,
+            original_text.text
+        );
+
+        let preserved_chunk_ids = engine
+            .storage()
+            .get_chunks_for_document(preserved_doc.id)
+            .expect("load preserved chunks")
+            .iter()
+            .map(|chunk| chunk.id)
+            .collect::<Vec<_>>();
+        assert_eq!(preserved_chunk_ids, original_chunk_ids);
+
+        let hits = engine
+            .storage()
+            .query_bm25("work", "oldtoken", &[("body", 1.0)], 10)
+            .expect("query preserved bm25");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk_id, original_chunk_ids[0]);
+    });
+}
+
+#[test]
+fn update_replaces_existing_chunks_from_canonical_text_when_raw_spacing_changes() {
+    with_kbolt_space_env(None, || {
+        let mut chunking = ChunkingConfig::default();
         chunking.defaults.target_tokens = 12;
         chunking.defaults.soft_max_tokens = 12;
         chunking.defaults.hard_max_tokens = 12;
@@ -3691,56 +4306,52 @@ fn update_preserves_existing_chunks_when_preinsert_preflight_rejects_replacement
             .get_document_by_path(collection.id, "guide.md")
             .expect("query original document")
             .expect("document exists");
-        let original_chunks = engine
-            .storage()
-            .get_chunks_for_document(original_doc.id)
-            .expect("load original chunks");
-        let original_chunk_ids = original_chunks
-            .iter()
-            .map(|chunk| chunk.id)
-            .collect::<Vec<_>>();
-
         std::thread::sleep(std::time::Duration::from_millis(2));
         write_text_file(&file_path, "alpha\n\n\n\n\nbeta\n");
 
         let second = engine
             .update(update_options(Some("work"), &["api"]))
-            .expect("update with preflight rejection");
+            .expect("update with canonical replacement");
         assert_eq!(second.scanned_docs, 1);
-        assert_eq!(second.updated_docs, 0);
-        assert_eq!(second.failed_docs, 1);
-        assert_eq!(second.errors.len(), 1);
+        assert_eq!(second.updated_docs, 1);
+        assert_eq!(second.failed_docs, 0);
         assert!(
-            second.errors[0].error.contains("embed preflight failed"),
+            second.errors.is_empty(),
             "unexpected errors: {:?}",
             second.errors
         );
 
-        let preserved_doc = engine
+        let updated_doc = engine
             .storage()
             .get_document_by_path(collection.id, "guide.md")
-            .expect("query preserved document")
+            .expect("query updated document")
             .expect("document should still exist");
-        assert_eq!(preserved_doc.id, original_doc.id);
-        assert_eq!(preserved_doc.hash, original_doc.hash);
-        assert_eq!(preserved_doc.modified, original_doc.modified);
+        assert_eq!(updated_doc.id, original_doc.id);
+        assert_ne!(updated_doc.hash, original_doc.hash);
+        assert_ne!(updated_doc.modified, original_doc.modified);
 
-        let preserved_chunks = engine
+        let document_text = engine
             .storage()
-            .get_chunks_for_document(preserved_doc.id)
-            .expect("load preserved chunks");
-        let preserved_chunk_ids = preserved_chunks
+            .get_document_text(updated_doc.id)
+            .expect("load canonical text");
+        assert_eq!(document_text.text, "alpha\n\nbeta");
+
+        let updated_chunks = engine
+            .storage()
+            .get_chunks_for_document(updated_doc.id)
+            .expect("load updated chunks");
+        let updated_chunk_ids = updated_chunks
             .iter()
             .map(|chunk| chunk.id)
             .collect::<Vec<_>>();
-        assert_eq!(preserved_chunk_ids, original_chunk_ids);
+        assert!(!updated_chunk_ids.is_empty());
 
         assert_eq!(
             engine
                 .storage()
                 .count_embedded_chunks(Some(space.id))
-                .expect("count embedded chunks after rejected replacement"),
-            original_chunks.len()
+                .expect("count embedded chunks after canonical replacement"),
+            updated_chunks.len()
         );
     });
 }

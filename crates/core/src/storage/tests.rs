@@ -1626,9 +1626,15 @@ fn put_get_and_hydrate_document_text() {
         .expect("insert doc");
 
     let canonical_text = "alpha café\n\nbeta";
+    assert!(!storage
+        .has_document_text(doc_id)
+        .expect("check missing document text"));
     storage
         .put_document_text(doc_id, "txt", "hash-1", "text-hash-1", canonical_text)
         .expect("put document text");
+    assert!(storage
+        .has_document_text(doc_id)
+        .expect("check stored document text"));
     let stored = storage
         .get_document_text(doc_id)
         .expect("get document text");
@@ -1653,6 +1659,7 @@ fn put_get_and_hydrate_document_text() {
     let chunk_text = storage
         .get_chunk_text(chunk_ids[0])
         .expect("hydrate chunk text");
+    assert_eq!(chunk_text.extractor_key, "txt");
     assert_eq!(chunk_text.text, "alpha café");
     assert_eq!(chunk_text.chunk.id, chunk_ids[0]);
 }

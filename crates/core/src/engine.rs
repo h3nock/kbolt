@@ -6,14 +6,17 @@ use std::time::Instant;
 use crate::config;
 use crate::config::Config;
 use crate::error::CoreError;
-use crate::ingest::chunk::{chunk_document, chunk_document_with_counter, resolve_policy};
+use crate::ingest::canonical::build_canonical_document;
+use crate::ingest::chunk::{
+    chunk_canonical_document, chunk_canonical_document_with_counter, resolve_policy,
+};
 use crate::ingest::extract::default_registry;
 use crate::lock::{LockMode, OperationLock};
 use crate::models;
 use crate::storage::Storage;
 use crate::storage::{
-    ChunkInsert, ChunkRow, CollectionRow, DocumentRow, DocumentTitleSource, SpaceResolution,
-    TantivyEntry,
+    ChunkInsert, ChunkRow, CollectionRow, DocumentGenerationReplace, DocumentRow,
+    DocumentTitleSource, SpaceResolution, TantivyEntry,
 };
 use crate::Result;
 use kbolt_types::{

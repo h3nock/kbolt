@@ -105,6 +105,7 @@ pub struct DocumentTextRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkTextRow {
     pub chunk: ChunkRow,
+    pub extractor_key: String,
     pub text: String,
 }
 
@@ -1475,24 +1476,38 @@ CREATE TABLE IF NOT EXISTS document_texts (
         }
     }
 
+    pub fn has_document_text(&self, doc_id: i64) -> Result<bool> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let exists: i64 = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM document_texts WHERE doc_id = ?1)",
+            params![doc_id],
+            |row| row.get(0),
+        )?;
+        Ok(exists != 0)
+    }
+
     pub fn get_chunk_text(&self, chunk_id: i64) -> Result<ChunkTextRow> {
         let conn = self
             .db
             .lock()
             .map_err(|_| CoreError::poisoned("database"))?;
         let result = conn.query_row(
-            "SELECT c.id, c.doc_id, c.seq, c.offset, c.length, c.heading, c.kind, dt.text
+            "SELECT c.id, c.doc_id, c.seq, c.offset, c.length, c.heading, c.kind, dt.extractor_key, dt.text
              FROM chunks c
              JOIN document_texts dt ON dt.doc_id = c.doc_id
              WHERE c.id = ?1",
             params![chunk_id],
             |row| {
                 let chunk = decode_chunk_row(row)?;
-                let document_text: String = row.get(7)?;
-                Ok((chunk, document_text))
+                let extractor_key: String = row.get(7)?;
+                let document_text: String = row.get(8)?;
+                Ok((chunk, extractor_key, document_text))
             },
         );
-        let (chunk, document_text) = match result {
+        let (chunk, extractor_key, document_text) = match result {
             Ok(row) => row,
             Err(Error::QueryReturnedNoRows) => {
                 let doc_id = lookup_chunk_doc_id(&conn, chunk_id)?;
@@ -1501,7 +1516,11 @@ CREATE TABLE IF NOT EXISTS document_texts (
             Err(err) => return Err(err.into()),
         };
         let text = canonical_chunk_text(&document_text, &chunk)?;
-        Ok(ChunkTextRow { chunk, text })
+        Ok(ChunkTextRow {
+            chunk,
+            extractor_key,
+            text,
+        })
     }
 
     pub fn insert_embeddings(&self, entries: &[(i64, &str)]) -> Result<()> {
