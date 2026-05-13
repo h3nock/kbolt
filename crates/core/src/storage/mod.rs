@@ -2737,7 +2737,7 @@ fn reject_incompatible_legacy_index(conn: &Connection) -> Result<()> {
     }
 
     Err(KboltError::Config(
-        "cache index uses an older text-storage format; rebuild the kbolt cache before using this branch".to_string(),
+        "cache index uses an older text-storage format; rebuild the kbolt cache before using this version".to_string(),
     )
     .into())
 }
