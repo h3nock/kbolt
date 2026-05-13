@@ -8,7 +8,9 @@ use kbolt_types::{DiskUsage, KboltError};
 use rusqlite::types::{Type as SqlType, Value as SqlValue};
 use rusqlite::{params, params_from_iter, Connection, Error, ErrorCode};
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, TermQuery};
+use tantivy::query::{
+    BooleanQuery, BoostQuery, ConstScoreQuery, Occur, Query, TermQuery, TermSetQuery,
+};
 use tantivy::schema::{Field, IndexRecordOption, Value, FAST, INDEXED, STORED, TEXT};
 use tantivy::tokenizer::TokenStream;
 use tantivy::{Index, IndexReader, IndexWriter, TantivyDocument, Term};
@@ -210,6 +212,12 @@ pub struct BM25Hit {
 pub struct DenseHit {
     pub chunk_id: i64,
     pub distance: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchScopeIds {
+    pub document_ids: Vec<i64>,
+    pub chunk_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1331,6 +1339,53 @@ CREATE TABLE IF NOT EXISTS document_texts (
         Ok(chunks)
     }
 
+    pub fn get_active_search_scope_ids_in_collections(
+        &self,
+        collection_ids: &[i64],
+    ) -> Result<SearchScopeIds> {
+        if collection_ids.is_empty() {
+            return Ok(SearchScopeIds {
+                document_ids: Vec::new(),
+                chunk_ids: Vec::new(),
+            });
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let placeholders = vec!["?"; collection_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT d.id, c.id
+             FROM chunks c
+             JOIN documents d ON d.id = c.doc_id
+             WHERE d.active = 1
+               AND d.collection_id IN ({placeholders})
+             ORDER BY d.id ASC, c.seq ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(collection_ids.iter()), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+
+        let mut document_ids = Vec::new();
+        let mut seen_documents = HashSet::new();
+        let mut chunk_ids = Vec::new();
+        for row in rows {
+            let (doc_id, chunk_id) = row?;
+            if seen_documents.insert(doc_id) {
+                document_ids.push(doc_id);
+            }
+            chunk_ids.push(chunk_id);
+        }
+
+        Ok(SearchScopeIds {
+            document_ids,
+            chunk_ids,
+        })
+    }
+
     pub fn replace_document_generation(
         &self,
         replacement: DocumentGenerationReplace<'_>,
@@ -1787,6 +1842,32 @@ CREATE TABLE IF NOT EXISTS document_texts (
         fields: &[(&str, f32)],
         limit: usize,
     ) -> Result<Vec<BM25Hit>> {
+        self.query_bm25_filtered(space, query, fields, None, limit)
+    }
+
+    pub fn query_bm25_in_documents(
+        &self,
+        space: &str,
+        query: &str,
+        fields: &[(&str, f32)],
+        document_ids: &[i64],
+        limit: usize,
+    ) -> Result<Vec<BM25Hit>> {
+        if document_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.query_bm25_filtered(space, query, fields, Some(document_ids), limit)
+    }
+
+    fn query_bm25_filtered(
+        &self,
+        space: &str,
+        query: &str,
+        fields: &[(&str, f32)],
+        document_ids: Option<&[i64]>,
+        limit: usize,
+    ) -> Result<Vec<BM25Hit>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -1825,6 +1906,17 @@ CREATE TABLE IF NOT EXISTS document_texts (
             build_literal_bm25_query(&space_indexes.tantivy_index, &query_fields, query)?
         else {
             return Ok(Vec::new());
+        };
+        let parsed_query = if let Some(document_ids) = document_ids {
+            Box::new(BooleanQuery::new(vec![
+                (Occur::Must, parsed_query),
+                (
+                    Occur::Must,
+                    build_doc_id_filter_query(space_indexes.fields.doc_id, document_ids)?,
+                ),
+            ])) as Box<dyn Query>
+        } else {
+            parsed_query
         };
         space_indexes.tantivy_reader.reload()?;
         let searcher = space_indexes.tantivy_reader.searcher();
@@ -1951,6 +2043,30 @@ CREATE TABLE IF NOT EXISTS document_texts (
     }
 
     pub fn query_dense(&self, space: &str, vector: &[f32], limit: usize) -> Result<Vec<DenseHit>> {
+        self.query_dense_filtered(space, vector, None, limit)
+    }
+
+    pub fn query_dense_in_chunks(
+        &self,
+        space: &str,
+        vector: &[f32],
+        chunk_ids: &[i64],
+        limit: usize,
+    ) -> Result<Vec<DenseHit>> {
+        if chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.query_dense_filtered(space, vector, Some(chunk_ids), limit)
+    }
+
+    fn query_dense_filtered(
+        &self,
+        space: &str,
+        vector: &[f32],
+        chunk_ids: Option<&[i64]>,
+        limit: usize,
+    ) -> Result<Vec<DenseHit>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -1977,9 +2093,27 @@ CREATE TABLE IF NOT EXISTS document_texts (
             )));
         }
 
-        let matches = index
-            .search::<f32>(vector, limit)
-            .map_err(|err| CoreError::Internal(format!("usearch query failed: {err}")))?;
+        let matches = if let Some(chunk_ids) = chunk_ids {
+            let allowed_keys = chunk_ids
+                .iter()
+                .map(|chunk_id| {
+                    u64::try_from(*chunk_id).map_err(|_| {
+                        CoreError::Internal(format!(
+                            "chunk_id must be non-negative for usearch query: {chunk_id}"
+                        ))
+                    })
+                })
+                .collect::<Result<HashSet<_>>>()?;
+            index
+                .filtered_search::<f32, _>(vector, limit, |key| allowed_keys.contains(&key))
+                .map_err(|err| {
+                    CoreError::Internal(format!("usearch filtered query failed: {err}"))
+                })?
+        } else {
+            index
+                .search::<f32>(vector, limit)
+                .map_err(|err| CoreError::Internal(format!("usearch query failed: {err}")))?
+        };
         let hits = matches
             .keys
             .into_iter()
@@ -2572,6 +2706,26 @@ fn build_literal_bm25_query(
     } else {
         Ok(Some(Box::new(BooleanQuery::new(clauses))))
     }
+}
+
+fn build_doc_id_filter_query(field: Field, document_ids: &[i64]) -> Result<Box<dyn Query>> {
+    let mut terms = Vec::new();
+    let mut seen = HashSet::new();
+    for doc_id in document_ids {
+        let doc_id = u64::try_from(*doc_id).map_err(|_| {
+            CoreError::Internal(format!(
+                "doc_id must be non-negative for tantivy query: {doc_id}"
+            ))
+        })?;
+        if seen.insert(doc_id) {
+            terms.push(Term::from_field_u64(field, doc_id));
+        }
+    }
+
+    Ok(Box::new(ConstScoreQuery::new(
+        Box::new(TermSetQuery::new(terms)),
+        0.0,
+    )))
 }
 
 fn analyzed_terms_for_field(index: &Index, field: Field, query: &str) -> Result<Vec<String>> {

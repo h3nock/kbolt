@@ -1966,13 +1966,21 @@ fn search_keyword_returns_ranked_results_for_targeted_collection() {
 
         let root = tempdir().expect("create temp root");
         let work_path = root.path().join("work-api");
+        let noise_path = root.path().join("work-noise");
         std::fs::create_dir_all(&work_path).expect("create collection dir");
+        std::fs::create_dir_all(&noise_path).expect("create noise dir");
         add_collection_fixture(&engine, "work", "api", work_path.clone());
+        add_collection_fixture(&engine, "work", "noise", noise_path.clone());
 
         write_text_file(&work_path.join("src/lib.rs"), "fn alpha_search_term() {}\n");
-        write_text_file(&work_path.join("src/other.rs"), "fn beta() {}\n");
+        write_text_file(
+            &noise_path.join("strong.md"),
+            &std::iter::repeat_n("alpha_search_term", 100)
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
         engine
-            .update(update_options(Some("work"), &["api"]))
+            .update(update_options(Some("work"), &["api", "noise"]))
             .expect("initial update");
 
         let response = engine
@@ -1981,7 +1989,7 @@ fn search_keyword_returns_ranked_results_for_targeted_collection() {
                 mode: SearchMode::Keyword,
                 space: Some("work".to_string()),
                 collections: vec!["api".to_string()],
-                limit: 5,
+                limit: 1,
                 min_score: 0.0,
                 no_rerank: false,
                 debug: true,
@@ -2164,15 +2172,19 @@ fn search_semantic_returns_dense_ranked_results_when_embedder_is_configured() {
 
         let root = tempdir().expect("create temp root");
         let work_path = root.path().join("work-api");
+        let noise_path = root.path().join("work-noise");
         std::fs::create_dir_all(&work_path).expect("create collection dir");
+        std::fs::create_dir_all(&noise_path).expect("create noise dir");
         add_collection_fixture(&engine, "work", "api", work_path.clone());
+        add_collection_fixture(&engine, "work", "noise", noise_path.clone());
 
         write_text_file(
             &work_path.join("docs/guide.md"),
-            "semantic anchor token appears here\n",
+            "semantic anchor token appears here with extra words that make the vector farther\n",
         );
+        write_text_file(&noise_path.join("exact.md"), "semantic anchor token\n");
         engine
-            .update(update_options(Some("work"), &["api"]))
+            .update(update_options(Some("work"), &["api", "noise"]))
             .expect("initial update with embeddings");
 
         let response = engine
@@ -2181,7 +2193,7 @@ fn search_semantic_returns_dense_ranked_results_when_embedder_is_configured() {
                 mode: SearchMode::Semantic,
                 space: Some("work".to_string()),
                 collections: vec!["api".to_string()],
-                limit: 5,
+                limit: 1,
                 min_score: 0.0,
                 no_rerank: false,
                 debug: true,
@@ -2189,7 +2201,7 @@ fn search_semantic_returns_dense_ranked_results_when_embedder_is_configured() {
             .expect("run semantic search");
 
         assert_eq!(response.effective_mode, SearchMode::Semantic);
-        assert!(!response.results.is_empty(), "expected at least one result");
+        assert_eq!(response.results.len(), 1);
         let first = &response.results[0];
         assert_eq!(first.space, "work");
         assert_eq!(first.collection, "api");

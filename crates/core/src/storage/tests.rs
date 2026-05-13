@@ -153,6 +153,69 @@ fn tantivy_index_and_query_returns_ranked_hits() {
 }
 
 #[test]
+fn bm25_document_filter_does_not_change_scores() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    storage.create_space("work", None).expect("create work");
+
+    storage
+        .index_tantivy(
+            "work",
+            &[
+                super::TantivyEntry {
+                    chunk_id: 11,
+                    doc_id: 1,
+                    filepath: "api/strong.md".to_string(),
+                    semantic_title: None,
+                    heading: None,
+                    body: "alpha alpha alpha".to_string(),
+                },
+                super::TantivyEntry {
+                    chunk_id: 22,
+                    doc_id: 2,
+                    filepath: "api/weak.md".to_string(),
+                    semantic_title: None,
+                    heading: None,
+                    body: "alpha".to_string(),
+                },
+                super::TantivyEntry {
+                    chunk_id: 33,
+                    doc_id: 3,
+                    filepath: "other/excluded.md".to_string(),
+                    semantic_title: None,
+                    heading: None,
+                    body: "alpha alpha".to_string(),
+                },
+            ],
+        )
+        .expect("index entries");
+    storage.commit_tantivy("work").expect("commit tantivy");
+
+    let unfiltered = storage
+        .query_bm25("work", "alpha", &[("body", 1.0)], 10)
+        .expect("query unfiltered bm25");
+    let filtered = storage
+        .query_bm25_in_documents("work", "alpha", &[("body", 1.0)], &[1, 2], 10)
+        .expect("query filtered bm25");
+    let expected = unfiltered
+        .iter()
+        .filter(|hit| [11, 22].contains(&hit.chunk_id))
+        .collect::<Vec<_>>();
+
+    assert_eq!(filtered.len(), expected.len());
+    for (filtered, expected) in filtered.iter().zip(expected) {
+        assert_eq!(filtered.chunk_id, expected.chunk_id);
+        assert!(
+            (filtered.score - expected.score).abs() < f32::EPSILON,
+            "filter should not perturb BM25 score for chunk {}: filtered={}, unfiltered={}",
+            filtered.chunk_id,
+            filtered.score,
+            expected.score
+        );
+    }
+}
+
+#[test]
 fn bm25_literal_queries_accept_punctuation_heavy_user_text() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");

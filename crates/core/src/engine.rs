@@ -87,6 +87,13 @@ struct SearchCollectionMeta {
 }
 
 #[derive(Debug, Clone)]
+struct SearchTargetScope {
+    space: String,
+    document_ids: Vec<i64>,
+    chunk_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone)]
 struct SearchHitCandidate {
     chunk_id: i64,
     bm25_score: f32,
@@ -706,13 +713,14 @@ impl Engine {
             );
         }
 
-        let max_candidates = self.max_search_candidates(&targets)?;
+        let target_scopes = self.search_target_scopes(&targets)?;
+        let max_candidates = self.max_search_candidates(&target_scopes);
         let mut retrieval_limit =
             self.initial_search_candidate_limit(&requested_mode, req.limit, rerank_enabled);
         let results = loop {
             let ranked_chunks = self.rank_chunks_for_mode(
                 &requested_mode,
-                &targets,
+                &target_scopes,
                 query,
                 retrieval_limit,
                 req.min_score,

@@ -71,46 +71,74 @@ impl Engine {
         }
     }
 
-    pub(super) fn max_search_candidates(&self, targets: &[UpdateTarget]) -> Result<usize> {
-        let mut total = 0usize;
+    pub(super) fn search_target_scopes(
+        &self,
+        targets: &[UpdateTarget],
+    ) -> Result<Vec<SearchTargetScope>> {
+        let mut grouped: Vec<(String, Vec<i64>)> = Vec::new();
         for target in targets {
-            total = total.saturating_add(
-                self.storage
-                    .count_chunks_in_collection(target.collection.id)?,
-            );
+            if let Some((_, collection_ids)) =
+                grouped.iter_mut().find(|(space, _)| space == &target.space)
+            {
+                collection_ids.push(target.collection.id);
+            } else {
+                grouped.push((target.space.clone(), vec![target.collection.id]));
+            }
         }
-        Ok(total)
+
+        let mut scopes = Vec::with_capacity(grouped.len());
+        for (space, mut collection_ids) in grouped {
+            collection_ids.sort_unstable();
+            collection_ids.dedup();
+
+            let ids = self
+                .storage
+                .get_active_search_scope_ids_in_collections(&collection_ids)?;
+            scopes.push(SearchTargetScope {
+                space,
+                document_ids: ids.document_ids,
+                chunk_ids: ids.chunk_ids,
+            });
+        }
+        Ok(scopes)
+    }
+
+    pub(super) fn max_search_candidates(&self, scopes: &[SearchTargetScope]) -> usize {
+        scopes
+            .iter()
+            .map(|scope| scope.chunk_ids.len())
+            .fold(0usize, usize::saturating_add)
     }
 
     pub(super) fn rank_chunks_for_mode(
         &self,
         mode: &SearchMode,
-        targets: &[UpdateTarget],
+        scopes: &[SearchTargetScope],
         query: &str,
         limit: usize,
         min_score: f32,
         pipeline: &mut SearchPipeline,
     ) -> Result<Vec<RankedChunk>> {
         match mode {
-            SearchMode::Keyword => self.rank_keyword_chunks(targets, query, limit, min_score),
-            SearchMode::Auto => self.rank_auto_chunks(targets, query, limit, min_score, pipeline),
-            SearchMode::Semantic => self.rank_semantic_chunks(targets, query, limit, min_score),
-            SearchMode::Deep => self.rank_deep_chunks(targets, query, limit, min_score, pipeline),
+            SearchMode::Keyword => self.rank_keyword_chunks(scopes, query, limit, min_score),
+            SearchMode::Auto => self.rank_auto_chunks(scopes, query, limit, min_score, pipeline),
+            SearchMode::Semantic => self.rank_semantic_chunks(scopes, query, limit, min_score),
+            SearchMode::Deep => self.rank_deep_chunks(scopes, query, limit, min_score, pipeline),
         }
     }
 
     pub(super) fn rank_keyword_chunks(
         &self,
-        targets: &[UpdateTarget],
+        scopes: &[SearchTargetScope],
         query: &str,
         limit: usize,
         min_score: f32,
     ) -> Result<Vec<RankedChunk>> {
         let boosts = &self.config.ranking.bm25_boosts;
         let mut candidates = Vec::new();
-        for space in unique_target_spaces(targets) {
-            let hits = self.storage.query_bm25(
-                space,
+        for scope in scopes {
+            let hits = self.storage.query_bm25_in_documents(
+                &scope.space,
                 query,
                 &[
                     ("title", boosts.title),
@@ -118,6 +146,7 @@ impl Engine {
                     ("body", boosts.body),
                     ("filepath", boosts.filepath),
                 ],
+                &scope.document_ids,
                 limit,
             )?;
             for hit in hits {
@@ -169,7 +198,7 @@ impl Engine {
 
     pub(super) fn rank_semantic_chunks(
         &self,
-        targets: &[UpdateTarget],
+        scopes: &[SearchTargetScope],
         query: &str,
         limit: usize,
         min_score: f32,
@@ -192,12 +221,12 @@ impl Engine {
             .into());
         }
 
-        self.rank_semantic_chunks_with_embedding(targets, &vectors[0], limit, min_score)
+        self.rank_semantic_chunks_with_embedding(scopes, &vectors[0], limit, min_score)
     }
 
     fn rank_semantic_chunks_with_embedding(
         &self,
-        targets: &[UpdateTarget],
+        scopes: &[SearchTargetScope],
         query_vector: &[f32],
         limit: usize,
         min_score: f32,
@@ -209,8 +238,13 @@ impl Engine {
         }
 
         let mut candidates = Vec::new();
-        for space in unique_target_spaces(targets) {
-            let hits = self.storage.query_dense(space, query_vector, limit)?;
+        for scope in scopes {
+            let hits = self.storage.query_dense_in_chunks(
+                &scope.space,
+                query_vector,
+                &scope.chunk_ids,
+                limit,
+            )?;
             for hit in hits {
                 candidates.push(hit);
             }
@@ -248,7 +282,7 @@ impl Engine {
 
     pub(super) fn rank_auto_chunks(
         &self,
-        targets: &[UpdateTarget],
+        scopes: &[SearchTargetScope],
         query: &str,
         limit: usize,
         min_score: f32,
@@ -257,9 +291,9 @@ impl Engine {
         let keyword = if self.embedder.is_some() {
             let (keyword_result, semantic_result) = std::thread::scope(|scope| {
                 let keyword_handle =
-                    scope.spawn(|| self.rank_keyword_chunks(targets, query, limit, 0.0));
+                    scope.spawn(|| self.rank_keyword_chunks(scopes, query, limit, 0.0));
                 let semantic_handle =
-                    scope.spawn(|| self.rank_semantic_chunks(targets, query, limit, 0.0));
+                    scope.spawn(|| self.rank_semantic_chunks(scopes, query, limit, 0.0));
                 (keyword_handle.join(), semantic_handle.join())
             });
 
@@ -301,7 +335,7 @@ impl Engine {
                 min_score,
             ));
         } else {
-            self.rank_keyword_chunks(targets, query, limit, min_score)?
+            self.rank_keyword_chunks(scopes, query, limit, min_score)?
         };
 
         Ok(keyword)
@@ -309,7 +343,7 @@ impl Engine {
 
     pub(super) fn rank_deep_chunks(
         &self,
-        targets: &[UpdateTarget],
+        scopes: &[SearchTargetScope],
         query: &str,
         limit: usize,
         min_score: f32,
@@ -397,14 +431,12 @@ impl Engine {
                     let vv = &variant_vectors;
                     let variant = variants[variant_index].clone();
                     scope.spawn(move || {
-                        let keyword = self.rank_keyword_chunks(targets, &variant, limit, 0.0)?;
+                        let keyword = self.rank_keyword_chunks(scopes, &variant, limit, 0.0)?;
                         let semantic = vv
                             .as_ref()
                             .and_then(|vectors| vectors.get(variant_index))
                             .map(|vector| {
-                                self.rank_semantic_chunks_with_embedding(
-                                    targets, vector, limit, 0.0,
-                                )
+                                self.rank_semantic_chunks_with_embedding(scopes, vector, limit, 0.0)
                             })
                             .transpose()?
                             .unwrap_or_default();
@@ -601,17 +633,6 @@ impl Engine {
             limit,
         )
     }
-}
-
-fn unique_target_spaces(targets: &[UpdateTarget]) -> Vec<&str> {
-    let mut seen = HashSet::new();
-    let mut spaces = Vec::new();
-    for target in targets {
-        if seen.insert(target.space.as_str()) {
-            spaces.push(target.space.as_str());
-        }
-    }
-    spaces
 }
 
 #[derive(Debug, Clone)]
@@ -955,35 +976,6 @@ mod tests {
             dense,
             original_rank: None,
         }
-    }
-
-    fn target(space: &str, collection_id: i64, collection_name: &str) -> UpdateTarget {
-        UpdateTarget {
-            space: space.to_string(),
-            collection: CollectionRow {
-                id: collection_id,
-                space_id: 1,
-                name: collection_name.to_string(),
-                path: std::path::PathBuf::from(collection_name),
-                description: None,
-                extensions: None,
-                created: "2026-01-01T00:00:00Z".to_string(),
-                updated: "2026-01-01T00:00:00Z".to_string(),
-            },
-        }
-    }
-
-    #[test]
-    fn unique_target_spaces_preserves_first_space_order() {
-        let targets = vec![
-            target("work", 1, "notes"),
-            target("work", 2, "docs"),
-            target("archive", 3, "old"),
-            target("work", 4, "tasks"),
-            target("archive", 5, "logs"),
-        ];
-
-        assert_eq!(unique_target_spaces(&targets), vec!["work", "archive"]);
     }
 
     #[test]
