@@ -18,7 +18,7 @@ impl Extractor for HtmlExtractor {
     }
 
     fn version(&self) -> u32 {
-        3
+        4
     }
 
     fn extract(&self, _path: &Path, bytes: &[u8]) -> Result<ExtractedDocument> {
@@ -176,7 +176,11 @@ fn should_skip_element(element: ElementRef<'_>) -> bool {
         || element
             .value()
             .attr("aria-hidden")
-            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+        || element
+            .value()
+            .attr("style")
+            .is_some_and(style_declares_hidden)
 }
 
 fn should_skip_element_name(name: &str) -> bool {
@@ -233,6 +237,32 @@ fn is_structural_container(name: &str) -> bool {
             | "figure"
             | "figcaption"
     )
+}
+
+fn style_declares_hidden(style: &str) -> bool {
+    let mut display_none = false;
+    let mut visibility_hidden = false;
+
+    for declaration in style.split(';') {
+        let Some((raw_name, raw_value)) = declaration.split_once(':') else {
+            continue;
+        };
+        let name = raw_name.trim().to_ascii_lowercase();
+        let value = raw_value
+            .split('!')
+            .next()
+            .unwrap_or(raw_value)
+            .trim()
+            .to_ascii_lowercase();
+
+        match name.as_str() {
+            "display" => display_none = value == "none",
+            "visibility" => visibility_hidden = matches!(value.as_str(), "hidden" | "collapse"),
+            _ => {}
+        }
+    }
+
+    display_none || visibility_hidden
 }
 
 fn heading_level(name: &str) -> Option<usize> {
@@ -563,7 +593,10 @@ Lead text.
                 br#"<body>
 <p>Visible target</p>
 <div hidden>secret hiddenword</div>
-<section aria-hidden="true"><p>aria hiddenword</p></section>
+<section aria-hidden=" true "><p>aria hiddenword</p></section>
+<div style="display: none">style hiddenword</div>
+<div style="visibility:hidden !important">visibility hiddenword</div>
+<div style="display:none; display:block">Actually visible visibletarget</div>
 </body>"#,
             )
             .expect("extract html");
@@ -575,6 +608,7 @@ Lead text.
             .collect::<Vec<_>>()
             .join("\n\n");
         assert!(canonical.contains("Visible target"));
+        assert!(canonical.contains("Actually visible visibletarget"));
         assert!(!canonical.contains("hiddenword"));
     }
 
