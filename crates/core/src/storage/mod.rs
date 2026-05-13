@@ -1431,6 +1431,27 @@ CREATE TABLE IF NOT EXISTS document_texts (
         })
     }
 
+    pub fn count_active_chunks_in_collections(&self, collection_ids: &[i64]) -> Result<usize> {
+        if collection_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let placeholders = vec!["?"; collection_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT COUNT(*)
+             FROM chunks c
+             JOIN documents d ON d.id = c.doc_id
+             WHERE d.active = 1
+               AND d.collection_id IN ({placeholders})"
+        );
+        query_count(&conn, &sql, params_from_iter(collection_ids.iter()))
+    }
+
     pub fn has_inactive_documents_in_collections(&self, collection_ids: &[i64]) -> Result<bool> {
         if collection_ids.is_empty() {
             return Ok(false);

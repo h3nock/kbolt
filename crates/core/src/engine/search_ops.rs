@@ -92,23 +92,28 @@ impl Engine {
             collection_ids.sort_unstable();
             collection_ids.dedup();
 
-            let summary = self
-                .storage
-                .get_active_search_scope_summary_in_collections(&collection_ids)?;
             let filtered = collection_scoped
                 || self
                     .storage
                     .has_inactive_documents_in_collections(&collection_ids)?;
+            let (document_ids, chunk_count) = if filtered {
+                let summary = self
+                    .storage
+                    .get_active_search_scope_summary_in_collections(&collection_ids)?;
+                (summary.document_ids, summary.chunk_count)
+            } else {
+                (
+                    Vec::new(),
+                    self.storage
+                        .count_active_chunks_in_collections(&collection_ids)?,
+                )
+            };
             scopes.push(SearchTargetScope {
                 space,
                 collection_ids,
                 filtered,
-                document_ids: if filtered {
-                    summary.document_ids
-                } else {
-                    Vec::new()
-                },
-                chunk_count: summary.chunk_count,
+                document_ids,
+                chunk_count,
                 chunk_ids: Mutex::new(None),
             });
         }

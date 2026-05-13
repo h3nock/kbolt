@@ -1691,6 +1691,11 @@ fn active_search_scope_summary_counts_active_chunks() {
     assert_eq!(summary.chunk_count, 2);
     assert!(!summary.document_ids.contains(&empty_doc_id));
 
+    let active_chunk_count = storage
+        .count_active_chunks_in_collections(&[collection_id])
+        .expect("count active chunks");
+    assert_eq!(active_chunk_count, 2);
+
     let chunk_ids = storage
         .get_active_chunk_ids_in_collections(&[collection_id])
         .expect("get active chunk ids");
