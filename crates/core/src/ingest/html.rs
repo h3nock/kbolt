@@ -89,6 +89,10 @@ impl ExtractionState {
                     if should_skip_element(child_name) {
                         continue;
                     }
+                    if is_text_boundary_element(child_name) {
+                        residual.push_boundary();
+                        continue;
+                    }
 
                     if block_kind_for(child_name).is_some() || is_structural_container(child_name) {
                         emitted_child |= self.push_residual_paragraph(&mut residual);
@@ -174,10 +178,15 @@ fn block_kind_for(name: &str) -> Option<BlockKind> {
     match name {
         "p" => Some(BlockKind::Paragraph),
         "li" => Some(BlockKind::ListItem),
+        "dt" | "dd" => Some(BlockKind::Paragraph),
         "blockquote" => Some(BlockKind::BlockQuote),
         "pre" => Some(BlockKind::CodeFence),
         _ => None,
     }
+}
+
+fn is_text_boundary_element(name: &str) -> bool {
+    matches!(name, "br" | "hr")
 }
 
 fn is_structural_container(name: &str) -> bool {
@@ -247,7 +256,11 @@ fn collect_text_from_element(element: ElementRef<'_>, collector: &mut TextCollec
             Node::Text(text) => collector.push(text),
             Node::Element(_) => {
                 if let Some(child_element) = ElementRef::wrap(child) {
-                    collect_text_from_element(child_element, collector);
+                    if is_text_boundary_element(element_name(child_element)) {
+                        collector.push_boundary();
+                    } else {
+                        collect_text_from_element(child_element, collector);
+                    }
                 }
             }
             _ => {}
@@ -287,6 +300,23 @@ impl TextCollector {
         match self.mode {
             TextMode::Normal => self.push_normal(raw),
             TextMode::Preserve => self.text.push_str(raw),
+        }
+    }
+
+    fn push_boundary(&mut self) {
+        match self.mode {
+            TextMode::Normal => {
+                if !self.text.is_empty() && !self.last_was_space {
+                    self.text.push(' ');
+                    self.last_was_space = true;
+                }
+            }
+            TextMode::Preserve => {
+                if !self.text.ends_with('\n') {
+                    self.text.push('\n');
+                }
+                self.last_was_space = false;
+            }
         }
     }
 
@@ -442,6 +472,34 @@ Lead text.
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn preserves_boundaries_for_html_separator_elements() {
+        let extractor = HtmlExtractor;
+        let doc = extractor
+            .extract(
+                Path::new("docs/separators.html"),
+                br#"<body>
+<p>alpha<br>beta brtarget</p>
+<dl><dt>Term</dt><dd>Definition ddtarget</dd></dl>
+<div><span>left</span><hr><span>right hrtarget</span></div>
+</body>"#,
+            )
+            .expect("extract html");
+
+        let canonical = doc
+            .blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(canonical.contains("alpha beta brtarget"));
+        assert!(canonical.contains("Term\n\nDefinition ddtarget"));
+        assert!(canonical.contains("left right hrtarget"));
+        assert!(!canonical.contains("alphabeta"));
+        assert!(!canonical.contains("TermDefinition"));
+        assert!(!canonical.contains("leftright"));
     }
 
     #[test]
