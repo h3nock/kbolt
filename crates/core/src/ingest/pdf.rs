@@ -17,9 +17,17 @@ impl Extractor for PdfExtractor {
 
     fn extract(&self, _path: &Path, bytes: &[u8]) -> Result<ExtractedDocument> {
         let text = extract_pdf_text(bytes)?;
+        let blocks = paragraph_blocks(text.as_str());
+        if blocks.is_empty() {
+            return Err(kbolt_types::KboltError::InvalidInput(
+                "pdf text extraction produced no text; scanned or image-only PDFs need OCR"
+                    .to_string(),
+            )
+            .into());
+        }
 
         Ok(ExtractedDocument {
-            blocks: paragraph_blocks(text.as_str()),
+            blocks,
             metadata: HashMap::new(),
             title: None,
         })
@@ -152,5 +160,14 @@ mod tests {
             .extract(Path::new("papers/bad.pdf"), b"not a pdf")
             .expect_err("invalid pdf should fail");
         assert!(err.to_string().contains("pdf text extraction failed"));
+    }
+
+    #[test]
+    fn rejects_pdf_when_extraction_produces_no_text() {
+        let extractor = PdfExtractor;
+        let err = extractor
+            .extract(Path::new("papers/scan.pdf"), &simple_pdf_fixture(""))
+            .expect_err("empty extracted text should fail");
+        assert!(err.to_string().contains("produced no text"));
     }
 }
