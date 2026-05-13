@@ -667,7 +667,10 @@ impl Engine {
     }
 
     pub fn search(&self, req: SearchRequest) -> Result<SearchResponse> {
-        let _lock = self.acquire_operation_lock(LockMode::Shared)?;
+        let _profile = crate::profile::SearchProfileGuard::start();
+        let _lock = crate::profile::timed_search_stage("operation_lock", || {
+            self.acquire_operation_lock(LockMode::Shared)
+        })?;
         let started = Instant::now();
         let query = req.query.trim();
         if query.is_empty() {
@@ -679,10 +682,13 @@ impl Engine {
             matches!(requested_mode, SearchMode::Auto | SearchMode::Deep) && !req.no_rerank;
         let mut pipeline = self.initial_search_pipeline(&requested_mode);
 
-        let targets = self.resolve_targets(TargetScope {
-            space: req.space.as_deref(),
-            collections: &req.collections,
+        let targets = crate::profile::timed_search_stage("resolve_targets", || {
+            self.resolve_targets(TargetScope {
+                space: req.space.as_deref(),
+                collections: &req.collections,
+            })
         })?;
+        crate::profile::increment_search_count("target_collections", targets.len() as u64);
 
         let staleness_hint = targets
             .iter()
@@ -713,19 +719,38 @@ impl Engine {
             );
         }
 
-        let target_scopes = self.search_target_scopes(&targets, !req.collections.is_empty())?;
-        let max_candidates = self.max_search_candidates(&target_scopes);
+        let target_scopes = crate::profile::timed_search_stage("search_target_scopes", || {
+            self.search_target_scopes(&targets, !req.collections.is_empty())
+        })?;
+        crate::profile::increment_search_count("target_scopes", target_scopes.len() as u64);
+        for scope in &target_scopes {
+            crate::profile::increment_search_count("scope_chunks", scope.chunk_count as u64);
+            if scope.filtered {
+                crate::profile::increment_search_count("filtered_scopes", 1);
+                crate::profile::increment_search_count(
+                    "scope_document_filters",
+                    scope.document_ids.len() as u64,
+                );
+            }
+        }
+        let max_candidates = crate::profile::timed_search_stage("max_search_candidates", || {
+            self.max_search_candidates(&target_scopes)
+        });
         let mut retrieval_limit =
             self.initial_search_candidate_limit(&requested_mode, req.limit, rerank_enabled);
         let results = loop {
-            let ranked_chunks = self.rank_chunks_for_mode(
-                &requested_mode,
-                &target_scopes,
-                query,
-                retrieval_limit,
-                req.min_score,
-                &mut pipeline,
-            )?;
+            crate::profile::increment_search_count("retrieval_iterations", 1);
+            let ranked_chunks = crate::profile::timed_search_stage("rank_chunks", || {
+                self.rank_chunks_for_mode(
+                    &requested_mode,
+                    &target_scopes,
+                    query,
+                    retrieval_limit,
+                    req.min_score,
+                    &mut pipeline,
+                )
+            })?;
+            crate::profile::increment_search_count("ranked_chunks", ranked_chunks.len() as u64);
 
             if ranked_chunks.is_empty() {
                 return Ok(SearchResponse {
@@ -740,16 +765,19 @@ impl Engine {
             }
 
             let ranked_len = ranked_chunks.len();
-            let results = self.assemble_search_results(
-                query,
-                &requested_mode,
-                ranked_chunks,
-                &collections_by_id,
-                req.debug,
-                rerank_enabled,
-                &mut pipeline,
-                req.limit,
-            )?;
+            let results = crate::profile::timed_search_stage("assemble_results", || {
+                self.assemble_search_results(
+                    query,
+                    &requested_mode,
+                    ranked_chunks,
+                    &collections_by_id,
+                    req.debug,
+                    rerank_enabled,
+                    &mut pipeline,
+                    req.limit,
+                )
+            })?;
+            crate::profile::increment_search_count("assembled_results", results.len() as u64);
 
             if results.len() >= req.limit
                 || ranked_len < retrieval_limit

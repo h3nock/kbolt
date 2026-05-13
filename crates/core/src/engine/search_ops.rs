@@ -97,15 +97,18 @@ impl Engine {
                     .storage
                     .has_inactive_documents_in_collections(&collection_ids)?;
             let (document_ids, chunk_count) = if filtered {
-                let summary = self
-                    .storage
-                    .get_active_search_scope_summary_in_collections(&collection_ids)?;
+                let summary = crate::profile::timed_search_stage("scope_summary", || {
+                    self.storage
+                        .get_active_search_scope_summary_in_collections(&collection_ids)
+                })?;
                 (summary.document_ids, summary.chunk_count)
             } else {
                 (
                     Vec::new(),
-                    self.storage
-                        .count_active_chunks_in_collections(&collection_ids)?,
+                    crate::profile::timed_search_stage("scope_chunk_count", || {
+                        self.storage
+                            .count_active_chunks_in_collections(&collection_ids)
+                    })?,
                 )
             };
             scopes.push(SearchTargetScope {
@@ -136,9 +139,11 @@ impl Engine {
             return Ok(chunk_ids.clone());
         }
 
-        let loaded = self
-            .storage
-            .get_active_chunk_ids_in_collections(&scope.collection_ids)?;
+        let loaded = crate::profile::timed_search_stage("scope_chunk_ids", || {
+            self.storage
+                .get_active_chunk_ids_in_collections(&scope.collection_ids)
+        })?;
+        crate::profile::increment_search_count("scope_chunk_id_filters", loaded.len() as u64);
         *chunk_ids = Some(loaded.clone());
         Ok(loaded)
     }
@@ -176,18 +181,19 @@ impl Engine {
                 ("body", boosts.body),
                 ("filepath", boosts.filepath),
             ];
-            let hits = if scope.filtered {
-                self.storage.query_bm25_in_documents(
-                    &scope.space,
-                    query,
-                    fields,
-                    &scope.document_ids,
-                    limit,
-                )?
-            } else {
-                self.storage
-                    .query_bm25(&scope.space, query, fields, limit)?
-            };
+            let hits = crate::profile::timed_search_stage("bm25_query", || {
+                if scope.filtered {
+                    self.storage.query_bm25_in_documents(
+                        &scope.space,
+                        query,
+                        fields,
+                        &scope.document_ids,
+                        limit,
+                    )
+                } else {
+                    self.storage.query_bm25(&scope.space, query, fields, limit)
+                }
+            })?;
             for hit in hits {
                 candidates.push(SearchHitCandidate {
                     chunk_id: hit.chunk_id,
@@ -249,10 +255,12 @@ impl Engine {
             .into());
         };
 
-        let vectors = embedder.embed_batch(
-            crate::models::EmbeddingInputKind::Query,
-            &[query.to_string()],
-        )?;
+        let vectors = crate::profile::timed_search_stage("query_embedding", || {
+            embedder.embed_batch(
+                crate::models::EmbeddingInputKind::Query,
+                &[query.to_string()],
+            )
+        })?;
         if vectors.len() != 1 || vectors[0].is_empty() {
             return Err(KboltError::Inference(
                 "embedder must return one non-empty query vector".to_string(),
@@ -278,14 +286,19 @@ impl Engine {
 
         let mut candidates = Vec::new();
         for scope in scopes {
-            let hits = if scope.filtered {
-                let chunk_ids = self.chunk_ids_for_scope(scope)?;
-                self.storage
-                    .query_dense_in_chunks(&scope.space, query_vector, &chunk_ids, limit)?
-            } else {
-                self.storage
-                    .query_dense(&scope.space, query_vector, limit)?
-            };
+            let hits = crate::profile::timed_search_stage("dense_query", || {
+                if scope.filtered {
+                    let chunk_ids = self.chunk_ids_for_scope(scope)?;
+                    self.storage.query_dense_in_chunks(
+                        &scope.space,
+                        query_vector,
+                        &chunk_ids,
+                        limit,
+                    )
+                } else {
+                    self.storage.query_dense(&scope.space, query_vector, limit)
+                }
+            })?;
             for hit in hits {
                 candidates.push(hit);
             }
@@ -330,11 +343,20 @@ impl Engine {
         pipeline: &mut SearchPipeline,
     ) -> Result<Vec<RankedChunk>> {
         let keyword = if self.embedder.is_some() {
+            let search_profile = crate::profile::current_search_profile();
             let (keyword_result, semantic_result) = std::thread::scope(|scope| {
-                let keyword_handle =
-                    scope.spawn(|| self.rank_keyword_chunks(scopes, query, limit, 0.0));
-                let semantic_handle =
-                    scope.spawn(|| self.rank_semantic_chunks(scopes, query, limit, 0.0));
+                let keyword_profile = search_profile.clone();
+                let keyword_handle = scope.spawn(move || {
+                    crate::profile::with_search_profile(keyword_profile, || {
+                        self.rank_keyword_chunks(scopes, query, limit, 0.0)
+                    })
+                });
+                let semantic_profile = search_profile.clone();
+                let semantic_handle = scope.spawn(move || {
+                    crate::profile::with_search_profile(semantic_profile, || {
+                        self.rank_semantic_chunks(scopes, query, limit, 0.0)
+                    })
+                });
                 (keyword_handle.join(), semantic_handle.join())
             });
 
@@ -402,7 +424,9 @@ impl Engine {
         let mut variants = vec![normalized_query.clone()];
         let max_generated = self.config.ranking.deep_variants_max.saturating_sub(1);
         if max_generated > 0 {
-            let generated = expander.expand(query, max_generated)?;
+            let generated = crate::profile::timed_search_stage("deep_expand", || {
+                expander.expand(query, max_generated)
+            })?;
             let mut seen = HashSet::from([normalized_query.to_ascii_lowercase()]);
             for generated_query in generated {
                 let text = crate::models::normalize_query_text(&generated_query);
@@ -423,7 +447,9 @@ impl Engine {
         }
         pipeline.expansion = true;
         let variant_vectors = if let Some(embedder) = self.embedder.as_ref() {
-            match embedder.embed_batch(crate::models::EmbeddingInputKind::Query, &variants) {
+            match crate::profile::timed_search_stage("deep_query_embeddings", || {
+                embedder.embed_batch(crate::models::EmbeddingInputKind::Query, &variants)
+            }) {
                 Ok(vectors) => {
                     if vectors.len() != variants.len() {
                         return Err(KboltError::Inference(format!(
@@ -465,29 +491,39 @@ impl Engine {
             variant_vectors.as_deref(),
             max_generated.min(DEEP_SELECTED_GENERATED_VARIANTS_MAX),
         );
+        crate::profile::increment_search_count(
+            "deep_selected_variants",
+            selected_variant_indices.len() as u64,
+        );
+        let search_profile = crate::profile::current_search_profile();
         let variant_results: Vec<Result<Vec<RankedChunk>>> = std::thread::scope(|scope| {
             let handles: Vec<_> = selected_variant_indices
                 .iter()
                 .map(|&variant_index| {
                     let vv = &variant_vectors;
                     let variant = variants[variant_index].clone();
+                    let variant_profile = search_profile.clone();
                     scope.spawn(move || {
-                        let keyword = self.rank_keyword_chunks(scopes, &variant, limit, 0.0)?;
-                        let semantic = vv
-                            .as_ref()
-                            .and_then(|vectors| vectors.get(variant_index))
-                            .map(|vector| {
-                                self.rank_semantic_chunks_with_embedding(scopes, vector, limit, 0.0)
-                            })
-                            .transpose()?
-                            .unwrap_or_default();
-                        Ok(fuse_ranked_chunks(
-                            keyword,
-                            semantic,
-                            &self.config.ranking.hybrid_fusion,
-                            limit,
-                            0.0,
-                        ))
+                        crate::profile::with_search_profile(variant_profile, || {
+                            let keyword = self.rank_keyword_chunks(scopes, &variant, limit, 0.0)?;
+                            let semantic = vv
+                                .as_ref()
+                                .and_then(|vectors| vectors.get(variant_index))
+                                .map(|vector| {
+                                    self.rank_semantic_chunks_with_embedding(
+                                        scopes, vector, limit, 0.0,
+                                    )
+                                })
+                                .transpose()?
+                                .unwrap_or_default();
+                            Ok(fuse_ranked_chunks(
+                                keyword,
+                                semantic,
+                                &self.config.ranking.hybrid_fusion,
+                                limit,
+                                0.0,
+                            ))
+                        })
                     })
                 })
                 .collect();
@@ -529,7 +565,9 @@ impl Engine {
             .iter()
             .map(|candidate| candidate.chunk_id)
             .collect::<Vec<_>>();
-        let chunk_rows = self.storage.get_chunks(&chunk_ids)?;
+        let chunk_rows = crate::profile::timed_search_stage("sqlite_get_chunks", || {
+            self.storage.get_chunks(&chunk_ids)
+        })?;
         let chunk_by_id = chunk_rows
             .into_iter()
             .map(|chunk| (chunk.id, chunk))
@@ -541,9 +579,10 @@ impl Engine {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let docs_by_id: HashMap<i64, DocumentRow> = self
-            .storage
-            .get_documents_by_ids(&unique_doc_ids)?
+        let docs_by_id: HashMap<i64, DocumentRow> =
+            crate::profile::timed_search_stage("sqlite_get_documents", || {
+                self.storage.get_documents_by_ids(&unique_doc_ids)
+            })?
             .into_iter()
             .map(|doc| (doc.id, doc))
             .collect();
@@ -622,7 +661,9 @@ impl Engine {
             for &idx in &representative_indices {
                 rerank_doc_ids.push(candidates[idx].doc_id);
             }
-            ensure_document_texts_loaded(&self.storage, &rerank_doc_ids, &mut text_by_doc)?;
+            crate::profile::timed_search_stage("rerank_load_texts", || {
+                ensure_document_texts_loaded(&self.storage, &rerank_doc_ids, &mut text_by_doc)
+            })?;
 
             let mut rerank_inputs = Vec::new();
             for &idx in &representative_indices {
@@ -630,7 +671,9 @@ impl Engine {
                 let rerank_input = build_rerank_input(candidate, &text_by_doc)?;
                 rerank_inputs.push(rerank_input);
             }
-            let raw_scores = match reranker.rerank(query, &rerank_inputs) {
+            let raw_scores = match crate::profile::timed_search_stage("rerank_model", || {
+                reranker.rerank(query, &rerank_inputs)
+            }) {
                 Ok(scores) => {
                     pipeline.rerank = true;
                     Some(scores)
@@ -672,15 +715,17 @@ impl Engine {
             apply_reranker_scores(&mut candidates, &doc_reranker_scores);
         }
 
-        finalize_search_results(
-            candidates,
-            &self.storage,
-            &mut text_by_doc,
-            &mut chunks_by_doc,
-            &self.config.chunking,
-            debug,
-            limit,
-        )
+        crate::profile::timed_search_stage("finalize_results", || {
+            finalize_search_results(
+                candidates,
+                &self.storage,
+                &mut text_by_doc,
+                &mut chunks_by_doc,
+                &self.config.chunking,
+                debug,
+                limit,
+            )
+        })
     }
 }
 
@@ -868,7 +913,9 @@ fn finalize_search_results(
         .iter()
         .map(|candidate| candidate.doc_id)
         .collect::<Vec<_>>();
-    ensure_document_texts_loaded(storage, &final_doc_ids, text_by_doc)?;
+    crate::profile::timed_search_stage("final_load_texts", || {
+        ensure_document_texts_loaded(storage, &final_doc_ids, text_by_doc)
+    })?;
     let mut neighbor_doc_ids = Vec::new();
     for candidate in &candidates {
         let document_text = candidate_document_text(candidate, text_by_doc)?;
@@ -878,7 +925,9 @@ fn finalize_search_results(
     }
     neighbor_doc_ids.sort_unstable();
     neighbor_doc_ids.dedup();
-    ensure_neighbor_chunks_loaded(storage, &neighbor_doc_ids, chunks_by_doc)?;
+    crate::profile::timed_search_stage("final_load_neighbors", || {
+        ensure_neighbor_chunks_loaded(storage, &neighbor_doc_ids, chunks_by_doc)
+    })?;
 
     let mut results = Vec::new();
     for candidate in candidates {
