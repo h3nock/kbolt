@@ -5810,6 +5810,12 @@ fn update_reports_pathful_walk_errors_and_counts_them_as_failures() {
         write_text_file(&collection_path.join("src/lib.rs"), "fn alpha() {}\n");
         let blocked_dir = collection_path.join("blocked");
         std::fs::create_dir_all(&blocked_dir).expect("create blocked dir");
+        write_text_file(&blocked_dir.join("keep.md"), "keep indexed\n");
+        let initial = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+        assert_eq!(initial.added_docs, 2);
+
         let mut permissions = std::fs::metadata(&blocked_dir)
             .expect("stat blocked dir")
             .permissions();
@@ -5826,6 +5832,7 @@ fn update_reports_pathful_walk_errors_and_counts_them_as_failures() {
         std::fs::set_permissions(&blocked_dir, restored_permissions)
             .expect("restore blocked dir permissions");
         assert_eq!(report.failed_docs, 1);
+        assert_eq!(report.deactivated_docs, 0);
         assert!(
             report
                 .errors
@@ -5833,6 +5840,20 @@ fn update_reports_pathful_walk_errors_and_counts_them_as_failures() {
                 .any(|error| error.path.ends_with("blocked") && error.error.contains("walk error")),
             "expected walk error for blocked directory, got {:?}",
             report.errors
+        );
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let blocked_doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "blocked/keep.md")
+            .expect("query blocked doc")
+            .expect("blocked doc should remain indexed");
+        assert!(
+            blocked_doc.active,
+            "walk errors must not deactivate docs under the failed prefix"
         );
     });
 }

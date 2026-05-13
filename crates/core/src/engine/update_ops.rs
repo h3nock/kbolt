@@ -828,6 +828,8 @@ impl Engine {
         )?;
         let extractor_registry = default_registry();
         let mut touched_collection = false;
+        let mut failed_walk_prefixes = Vec::new();
+        let mut collection_walk_incomplete = false;
 
         for entry in super::ignore_helpers::build_collection_walk(&target.collection.path) {
             let entry = match entry {
@@ -835,8 +837,21 @@ impl Engine {
                 Err(err) => {
                     let error_path = walk_error_path(&err).map(Path::to_path_buf);
                     if let Some(path) = error_path.as_deref() {
-                        let failed_path = collection_relative_path(&target.collection.path, path)
-                            .unwrap_or_else(|_| path.display().to_string());
+                        let failed_path =
+                            match collection_relative_path(&target.collection.path, path) {
+                                Ok(relative) => {
+                                    if relative.is_empty() || relative == "." {
+                                        collection_walk_incomplete = true;
+                                    } else {
+                                        failed_walk_prefixes.push(relative.clone());
+                                    }
+                                    relative
+                                }
+                                Err(_) => {
+                                    collection_walk_incomplete = true;
+                                    path.display().to_string()
+                                }
+                            };
                         failed_docs.insert(update_doc_key(
                             &target.space,
                             &target.collection.path,
@@ -1322,7 +1337,15 @@ impl Engine {
 
         let mut missing_docs = docs_by_path
             .values()
-            .filter(|doc| doc.active && !seen_paths.contains(&doc.path))
+            .filter(|doc| {
+                doc.active
+                    && !seen_paths.contains(&doc.path)
+                    && !path_is_under_failed_walk(
+                        doc.path.as_str(),
+                        &failed_walk_prefixes,
+                        collection_walk_incomplete,
+                    )
+            })
             .cloned()
             .collect::<Vec<_>>();
         missing_docs.sort_by(|left, right| left.path.cmp(&right.path));
@@ -1371,6 +1394,25 @@ fn walk_error_path(err: &ignore::Error) -> Option<&Path> {
         | ignore::Error::UnrecognizedFileType(_)
         | ignore::Error::InvalidDefinition => None,
     }
+}
+
+fn path_is_under_failed_walk(
+    doc_path: &str,
+    failed_walk_prefixes: &[String],
+    collection_walk_incomplete: bool,
+) -> bool {
+    if collection_walk_incomplete {
+        return true;
+    }
+
+    failed_walk_prefixes.iter().any(|prefix| {
+        prefix.is_empty()
+            || prefix == "."
+            || doc_path == prefix
+            || doc_path
+                .strip_prefix(prefix.as_str())
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    })
 }
 
 #[derive(Debug)]
