@@ -1640,7 +1640,7 @@ fn get_document_by_docid_resolves_uniquely_and_honors_optional_space_scope() {
 }
 
 #[test]
-fn get_document_returns_indexed_text_for_deleted_file_and_errors_for_ambiguous_docid() {
+fn get_document_handles_deleted_unreadable_and_ambiguous_docid_cases() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
         engine.add_space("work", None).expect("add work");
@@ -1676,9 +1676,21 @@ fn get_document_returns_indexed_text_for_deleted_file_and_errors_for_ambiguous_d
                 offset: None,
                 limit: None,
             })
-            .expect("unreadable source should still return indexed text");
-        assert_eq!(unreadable.content, "fn alpha() {}");
-        assert!(unreadable.stale);
+            .expect_err("unreadable source should surface an io error");
+        match KboltError::from(unreadable) {
+            KboltError::Io(err) => {
+                let message = err.to_string();
+                assert!(
+                    message.contains("failed to read indexed source"),
+                    "unexpected io error: {message}"
+                );
+                assert!(
+                    message.contains("src/lib.rs"),
+                    "expected source path in io error: {message}"
+                );
+            }
+            other => panic!("unexpected error: {other}"),
+        }
 
         let work_space = engine.storage().get_space("work").expect("get work space");
         let collection = engine
@@ -1867,7 +1879,7 @@ fn multi_get_respects_max_bytes_and_supports_mixed_locators() {
 }
 
 #[test]
-fn multi_get_returns_deleted_indexed_documents_as_stale() {
+fn multi_get_returns_deleted_sources_as_stale_and_surfaces_unreadable_sources() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);
         engine.add_space("work", None).expect("add work");
@@ -1879,13 +1891,17 @@ fn multi_get_returns_deleted_indexed_documents_as_stale() {
 
         let existing = work_path.join("a.md");
         let deleted = work_path.join("b.md");
+        let unreadable = work_path.join("c.md");
         write_text_file(&existing, "alpha\n");
         write_text_file(&deleted, "beta\n");
+        write_text_file(&unreadable, "gamma\n");
         engine
             .update(update_options(Some("work"), &["api"]))
             .expect("initial update");
 
         std::fs::remove_file(&deleted).expect("remove b.md");
+        std::fs::remove_file(&unreadable).expect("remove c.md");
+        std::fs::create_dir(&unreadable).expect("replace c.md with directory");
 
         let result = engine
             .multi_get(MultiGetRequest {
@@ -1907,6 +1923,29 @@ fn multi_get_returns_deleted_indexed_documents_as_stale() {
         assert!(result.documents[1].stale);
         assert!(result.omitted.is_empty());
         assert!(result.warnings.is_empty());
+
+        let err = engine
+            .multi_get(MultiGetRequest {
+                locators: vec![Locator::Path("api/c.md".to_string())],
+                space: Some("work".to_string()),
+                max_files: 10,
+                max_bytes: 51_200,
+            })
+            .expect_err("unreadable source should surface an io error");
+        match KboltError::from(err) {
+            KboltError::Io(err) => {
+                let message = err.to_string();
+                assert!(
+                    message.contains("failed to read indexed source"),
+                    "unexpected io error: {message}"
+                );
+                assert!(
+                    message.contains("c.md"),
+                    "expected source path in io error: {message}"
+                );
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     });
 }
 
@@ -2133,6 +2172,7 @@ fn update_get_and_search_use_extracted_html_text() {
   <body>
     <h1>Visible Guide</h1>
     <p>alpha <strong>htmltarget</strong> canonical body.</p>
+    <table><tr><td>tabletarget visible cell</td></tr></table>
   </body>
 </html>"#,
         );
@@ -2170,6 +2210,7 @@ fn update_get_and_search_use_extracted_html_text() {
             .expect("get indexed html text");
         assert!(indexed.content.contains("Visible Guide"));
         assert!(indexed.content.contains("alpha htmltarget canonical body."));
+        assert!(indexed.content.contains("tabletarget visible cell"));
         assert!(!indexed.content.contains("<p>"));
         assert!(!indexed.content.contains("ignored_script_token"));
 

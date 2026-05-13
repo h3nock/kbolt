@@ -544,10 +544,7 @@ impl Engine {
 
         let document_text = self.storage.get_document_text(document.id)?;
         let full_path = collection_row.path.join(&document.path);
-        let stale = match std::fs::read(&full_path) {
-            Ok(bytes) => sha256_hex(&bytes) != document.hash,
-            Err(_) => true,
-        };
+        let stale = source_is_stale(&full_path, document.hash.as_str())?;
 
         let lines = document_text.text.lines().collect::<Vec<_>>();
         let total_lines = lines.len();
@@ -1003,6 +1000,21 @@ impl Engine {
         }
 
         Ok(None)
+    }
+}
+
+fn source_is_stale(path: &Path, indexed_hash: &str) -> Result<bool> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(sha256_hex(&bytes) != indexed_hash),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(err) => Err(std::io::Error::new(
+            err.kind(),
+            format!(
+                "failed to read indexed source '{}' for stale check: {err}",
+                path.display()
+            ),
+        )
+        .into()),
     }
 }
 

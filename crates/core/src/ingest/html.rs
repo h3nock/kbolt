@@ -77,21 +77,42 @@ impl ExtractionState {
         }
 
         let mut emitted_child = false;
+        let mut residual = TextCollector::normal();
         for child in element.children() {
-            if let Some(child_element) = ElementRef::wrap(child) {
-                emitted_child |= self.walk_element(child_element);
+            match child.value() {
+                Node::Text(text) => residual.push(text),
+                Node::Element(_) => {
+                    let Some(child_element) = ElementRef::wrap(child) else {
+                        continue;
+                    };
+                    let child_name = element_name(child_element);
+                    if should_skip_element(child_name) {
+                        continue;
+                    }
+
+                    if block_kind_for(child_name).is_some() || is_structural_container(child_name) {
+                        emitted_child |= self.push_residual_paragraph(&mut residual);
+                        emitted_child |= self.walk_element(child_element);
+                    } else {
+                        collect_text_from_element(child_element, &mut residual);
+                    }
+                }
+                _ => {}
             }
         }
 
-        if !emitted_child && is_text_container(name) {
-            let text = collect_normal_text(element);
-            if !text.is_empty() {
-                self.push_block(BlockKind::Paragraph, name, text);
-                return true;
-            }
-        }
-
+        emitted_child |= self.push_residual_paragraph(&mut residual);
         emitted_child
+    }
+
+    fn push_residual_paragraph(&mut self, residual: &mut TextCollector) -> bool {
+        let text = residual.take();
+        if text.is_empty() {
+            return false;
+        }
+
+        self.push_block(BlockKind::Paragraph, "p", text);
+        true
     }
 
     fn push_block(&mut self, kind: BlockKind, element_name: &str, text: String) {
@@ -159,8 +180,34 @@ fn block_kind_for(name: &str) -> Option<BlockKind> {
     }
 }
 
-fn is_text_container(name: &str) -> bool {
-    matches!(name, "body" | "main" | "article" | "section" | "div")
+fn is_structural_container(name: &str) -> bool {
+    matches!(
+        name,
+        "html"
+            | "body"
+            | "main"
+            | "article"
+            | "section"
+            | "div"
+            | "header"
+            | "footer"
+            | "nav"
+            | "aside"
+            | "ul"
+            | "ol"
+            | "menu"
+            | "dl"
+            | "table"
+            | "thead"
+            | "tbody"
+            | "tfoot"
+            | "tr"
+            | "td"
+            | "th"
+            | "caption"
+            | "figure"
+            | "figcaption"
+    )
 }
 
 fn heading_level(name: &str) -> Option<usize> {
@@ -263,6 +310,15 @@ impl TextCollector {
             TextMode::Preserve => self.text,
         }
     }
+
+    fn take(&mut self) -> String {
+        let text = std::mem::take(&mut self.text);
+        self.last_was_space = false;
+        match self.mode {
+            TextMode::Normal => text.trim().to_string(),
+            TextMode::Preserve => text,
+        }
+    }
 }
 
 fn trim_preserved_text(text: &str) -> String {
@@ -353,6 +409,39 @@ fn main() {}
             .expect("extract html");
 
         assert_eq!(doc.title.as_deref(), Some("Guide"));
+    }
+
+    #[test]
+    fn preserves_visible_text_from_mixed_unrecognized_containers() {
+        let extractor = HtmlExtractor;
+        let doc = extractor
+            .extract(
+                Path::new("docs/prices.html"),
+                br#"<body>
+Lead text.
+<p>Intro paragraph.</p>
+<table><tr><td>Price tabletarget</td></tr></table>
+<span>Tail text.</span>
+</body>"#,
+            )
+            .expect("extract html");
+
+        let texts = doc
+            .blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>();
+        assert!(texts.iter().any(|text| *text == "Lead text."));
+        assert!(texts.iter().any(|text| *text == "Intro paragraph."));
+        assert!(texts.iter().any(|text| *text == "Price tabletarget"));
+        assert!(texts.iter().any(|text| *text == "Tail text."));
+        assert_eq!(
+            texts
+                .iter()
+                .filter(|text| text.contains("Intro paragraph."))
+                .count(),
+            1
+        );
     }
 
     #[test]
