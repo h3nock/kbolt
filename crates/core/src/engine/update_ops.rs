@@ -655,10 +655,13 @@ impl Engine {
                 .chunks
                 .iter()
                 .map(|chunk| -> Result<TantivyEntry> {
-                    let chunk_text = self.storage.get_chunk_text(chunk.id)?;
+                    let chunk_text = crate::storage::chunk_text_from_canonical(
+                        document_text.text.as_str(),
+                        chunk,
+                    )?;
                     let chunk_body = crate::ingest::chunk::chunk_retrieval_body(
-                        chunk_text.text.as_str(),
-                        chunk_text.chunk.retrieval_prefix.as_deref(),
+                        chunk_text.as_str(),
+                        chunk.retrieval_prefix.as_deref(),
                     );
                     Ok(TantivyEntry {
                         chunk_id: chunk.id,
