@@ -21,7 +21,7 @@ const DEFAULT_SPACE_NAME: &str = "default";
 const SPACES_DIR: &str = "spaces";
 const TANTIVY_DIR_NAME: &str = "tantivy";
 const USEARCH_FILENAME: &str = "vectors.usearch";
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub struct Storage {
     db: Mutex<Connection>,
@@ -100,6 +100,7 @@ pub struct DocumentTextRow {
     pub extractor_key: String,
     pub source_hash: String,
     pub text_hash: String,
+    pub generation_key: String,
     pub text: String,
     pub created: String,
 }
@@ -121,6 +122,7 @@ pub struct DocumentGenerationReplace<'a> {
     pub extractor_key: &'a str,
     pub source_hash: &'a str,
     pub text_hash: &'a str,
+    pub generation_key: &'a str,
     pub text: &'a str,
     pub chunks: &'a [ChunkInsert],
 }
@@ -325,12 +327,14 @@ CREATE TABLE IF NOT EXISTS document_texts (
     extractor_key     TEXT NOT NULL,
     source_hash       TEXT NOT NULL,
     text_hash         TEXT NOT NULL,
+    generation_key    TEXT NOT NULL DEFAULT '',
     text              TEXT NOT NULL,
     created           TEXT NOT NULL
 );
 "#,
         )?;
         ensure_documents_title_source_column(&conn)?;
+        ensure_document_texts_generation_key_column(&conn)?;
         ensure_schema_version(&conn)?;
 
         conn.execute(
@@ -1472,12 +1476,13 @@ CREATE TABLE IF NOT EXISTS document_texts (
         };
 
         tx.execute(
-            "INSERT INTO document_texts (doc_id, extractor_key, source_hash, text_hash, text, created)
-             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            "INSERT INTO document_texts (doc_id, extractor_key, source_hash, text_hash, generation_key, text, created)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
              ON CONFLICT(doc_id) DO UPDATE SET
                  extractor_key = excluded.extractor_key,
                  source_hash = excluded.source_hash,
                  text_hash = excluded.text_hash,
+                 generation_key = excluded.generation_key,
                  text = excluded.text,
                  created = excluded.created",
             params![
@@ -1485,6 +1490,7 @@ CREATE TABLE IF NOT EXISTS document_texts (
                 replacement.extractor_key,
                 replacement.source_hash,
                 replacement.text_hash,
+                replacement.generation_key,
                 replacement.text
             ],
         )?;
@@ -1523,6 +1529,7 @@ CREATE TABLE IF NOT EXISTS document_texts (
         extractor_key: &str,
         source_hash: &str,
         text_hash: &str,
+        generation_key: &str,
         text: &str,
     ) -> Result<()> {
         let conn = self
@@ -1532,15 +1539,23 @@ CREATE TABLE IF NOT EXISTS document_texts (
         let _doc = lookup_document_id(&conn, doc_id)?;
 
         conn.execute(
-            "INSERT INTO document_texts (doc_id, extractor_key, source_hash, text_hash, text, created)
-             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            "INSERT INTO document_texts (doc_id, extractor_key, source_hash, text_hash, generation_key, text, created)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
              ON CONFLICT(doc_id) DO UPDATE SET
                  extractor_key = excluded.extractor_key,
                  source_hash = excluded.source_hash,
                  text_hash = excluded.text_hash,
+                 generation_key = excluded.generation_key,
                  text = excluded.text,
                  created = excluded.created",
-            params![doc_id, extractor_key, source_hash, text_hash, text],
+            params![
+                doc_id,
+                extractor_key,
+                source_hash,
+                text_hash,
+                generation_key,
+                text
+            ],
         )?;
         Ok(())
     }
@@ -1553,7 +1568,7 @@ CREATE TABLE IF NOT EXISTS document_texts (
         let _doc = lookup_document_id(&conn, doc_id)?;
 
         let result = conn.query_row(
-            "SELECT doc_id, extractor_key, source_hash, text_hash, text, created
+            "SELECT doc_id, extractor_key, source_hash, text_hash, generation_key, text, created
              FROM document_texts
              WHERE doc_id = ?1",
             params![doc_id],
@@ -1582,7 +1597,7 @@ CREATE TABLE IF NOT EXISTS document_texts (
 
         let placeholders = vec!["?"; requested.len()].join(", ");
         let sql = format!(
-            "SELECT doc_id, extractor_key, source_hash, text_hash, text, created
+            "SELECT doc_id, extractor_key, source_hash, text_hash, generation_key, text, created
              FROM document_texts
              WHERE doc_id IN ({placeholders})
              ORDER BY doc_id ASC"
@@ -1612,6 +1627,22 @@ CREATE TABLE IF NOT EXISTS document_texts (
         let exists: i64 = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM document_texts WHERE doc_id = ?1)",
             params![doc_id],
+            |row| row.get(0),
+        )?;
+        Ok(exists != 0)
+    }
+
+    pub fn has_current_document_text(&self, doc_id: i64, generation_key: &str) -> Result<bool> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let exists: i64 = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM document_texts
+                WHERE doc_id = ?1 AND generation_key = ?2
+            )",
+            params![doc_id, generation_key],
             |row| row.get(0),
         )?;
         Ok(exists != 0)
@@ -2753,6 +2784,23 @@ fn ensure_documents_title_source_column(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn ensure_document_texts_generation_key_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(document_texts)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let columns = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    if columns.iter().any(|column| column == "generation_key") {
+        return Ok(());
+    }
+
+    conn.execute(
+        "ALTER TABLE document_texts ADD COLUMN generation_key TEXT NOT NULL DEFAULT ''",
+        [],
+    )?;
+    Ok(())
+}
+
 fn build_literal_bm25_query(
     index: &Index,
     fields: &[Bm25FieldSpec],
@@ -2994,8 +3042,9 @@ fn decode_document_text_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Documen
         extractor_key: row.get(1)?,
         source_hash: row.get(2)?,
         text_hash: row.get(3)?,
-        text: row.get(4)?,
-        created: row.get(5)?,
+        generation_key: row.get(4)?,
+        text: row.get(5)?,
+        created: row.get(6)?,
     })
 }
 

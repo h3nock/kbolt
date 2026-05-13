@@ -17,6 +17,10 @@ impl Extractor for HtmlExtractor {
         "html"
     }
 
+    fn version(&self) -> u32 {
+        2
+    }
+
     fn extract(&self, _path: &Path, bytes: &[u8]) -> Result<ExtractedDocument> {
         let source = std::str::from_utf8(bytes).map_err(|err| {
             kbolt_types::KboltError::InvalidInput(format!("non-utf8 html input: {err}"))

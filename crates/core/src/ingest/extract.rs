@@ -40,6 +40,10 @@ pub trait Extractor: Send + Sync {
         "txt"
     }
 
+    fn version(&self) -> u32 {
+        1
+    }
+
     fn supports_path(&self, _path: &Path) -> bool {
         false
     }

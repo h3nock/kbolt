@@ -569,8 +569,13 @@ impl Engine {
         Ok(preflight)
     }
 
-    fn document_has_canonical_text(&self, doc_id: i64) -> Result<bool> {
-        self.storage.has_document_text(doc_id)
+    fn document_has_current_canonical_text(
+        &self,
+        doc_id: i64,
+        generation_key: &str,
+    ) -> Result<bool> {
+        self.storage
+            .has_current_document_text(doc_id, generation_key)
     }
 
     fn replay_fts_dirty_documents(
@@ -910,6 +915,9 @@ impl Engine {
                 );
                 continue;
             };
+            let policy = resolve_policy(&self.config.chunking, Some(extractor.profile_key()), None);
+            let generation_key =
+                ingestion_generation_key(extractor.profile_key(), extractor.version(), &policy);
 
             report.scanned_docs += 1;
             crate::profile::increment_update_count("docs_scanned", 1);
@@ -973,8 +981,9 @@ impl Engine {
             };
 
             if let Some(existing) = docs_by_path.get(&relative_path) {
-                let has_canonical_text = self.document_has_canonical_text(existing.id)?;
-                if existing.active && existing.modified == modified && has_canonical_text {
+                let has_current_canonical_text =
+                    self.document_has_current_canonical_text(existing.id, generation_key.as_str())?;
+                if existing.active && existing.modified == modified && has_current_canonical_text {
                     report.skipped_mtime_docs += 1;
                     push_update_decision(
                         report,
@@ -1027,8 +1036,9 @@ impl Engine {
             let pending_decision;
             let pending_indexing;
             if let Some(doc) = existing.as_ref() {
-                let has_canonical_text = self.document_has_canonical_text(doc.id)?;
-                if doc.hash == hash && has_canonical_text {
+                let has_current_canonical_text =
+                    self.document_has_current_canonical_text(doc.id, generation_key.as_str())?;
+                if doc.hash == hash && has_current_canonical_text {
                     if doc.active {
                         report.skipped_hash_docs += 1;
                         push_update_decision(
@@ -1117,7 +1127,6 @@ impl Engine {
                 build_canonical_document(&extracted)
             });
             let text_hash = sha256_hex(canonical.text.as_bytes());
-            let policy = resolve_policy(&self.config.chunking, Some(extractor.profile_key()), None);
             let max_document_tokens = effective_chunk_hard_max(&policy);
             let chunk_started = Instant::now();
             let final_chunks_result = match self.embedding_document_sizer.as_ref() {
@@ -1213,6 +1222,7 @@ impl Engine {
                             extractor_key: extractor.profile_key(),
                             source_hash: &hash,
                             text_hash: &text_hash,
+                            generation_key: &generation_key,
                             text: canonical.text.as_str(),
                             chunks: &chunk_inserts,
                         })
@@ -1570,4 +1580,20 @@ fn effective_chunk_hard_max(policy: &crate::config::ChunkPolicy) -> usize {
         .max(policy.soft_max_tokens)
         .max(policy.target_tokens)
         .max(1)
+}
+
+fn ingestion_generation_key(
+    extractor_key: &str,
+    extractor_version: u32,
+    policy: &crate::config::ChunkPolicy,
+) -> String {
+    format!(
+        "extractor={extractor_key}:v{extractor_version};chunk=target:{}:soft:{}:hard:{}:overlap:{}:neighbors:{}:prefix:{}",
+        policy.target_tokens,
+        policy.soft_max_tokens,
+        policy.hard_max_tokens,
+        policy.boundary_overlap_tokens,
+        policy.neighbor_window,
+        policy.contextual_prefix
+    )
 }

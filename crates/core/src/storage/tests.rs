@@ -629,7 +629,7 @@ fn new_creates_expected_schema_objects() {
     let schema_version = conn
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
         .expect("query schema version");
-    assert_eq!(schema_version, 1);
+    assert_eq!(schema_version, 2);
 }
 
 #[test]
@@ -799,6 +799,14 @@ CREATE TABLE embeddings (
         )
         .expect("query document_texts table");
     assert_eq!(document_texts_exists, 1);
+    let generation_key_exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('document_texts') WHERE name = 'generation_key'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("query document_texts generation_key column");
+    assert_eq!(generation_key_exists, 1);
     let title_source_exists = conn
         .query_row(
             "SELECT COUNT(*) FROM pragma_table_info('documents') WHERE name = 'title_source'",
@@ -1693,7 +1701,14 @@ fn put_get_and_hydrate_document_text() {
         .has_document_text(doc_id)
         .expect("check missing document text"));
     storage
-        .put_document_text(doc_id, "txt", "hash-1", "text-hash-1", canonical_text)
+        .put_document_text(
+            doc_id,
+            "txt",
+            "hash-1",
+            "text-hash-1",
+            "generation-1",
+            canonical_text,
+        )
         .expect("put document text");
     assert!(storage
         .has_document_text(doc_id)
@@ -1704,7 +1719,14 @@ fn put_get_and_hydrate_document_text() {
     assert_eq!(stored.extractor_key, "txt");
     assert_eq!(stored.source_hash, "hash-1");
     assert_eq!(stored.text_hash, "text-hash-1");
+    assert_eq!(stored.generation_key, "generation-1");
     assert_eq!(stored.text, canonical_text);
+    assert!(storage
+        .has_current_document_text(doc_id, "generation-1")
+        .expect("check current document text"));
+    assert!(!storage
+        .has_current_document_text(doc_id, "generation-2")
+        .expect("check stale document text"));
 
     let chunk_ids = storage
         .insert_chunks(
@@ -1754,6 +1776,7 @@ fn replace_document_generation_writes_text_and_chunks_atomically() {
         extractor_key: "code",
         source_hash: "hash-1",
         text_hash: "text-hash-1",
+        generation_key: "generation-1",
         text: "alpha\n\nbeta",
         chunks: &[
             super::ChunkInsert {
@@ -1829,6 +1852,7 @@ fn replace_document_generation_returns_old_chunks_and_cascades_embeddings() {
             extractor_key: "code",
             source_hash: "hash-1",
             text_hash: "text-hash-1",
+            generation_key: "generation-1",
             text: "alpha",
             chunks: &[super::ChunkInsert {
                 seq: 0,
@@ -1855,6 +1879,7 @@ fn replace_document_generation_returns_old_chunks_and_cascades_embeddings() {
             extractor_key: "code",
             source_hash: "hash-2",
             text_hash: "text-hash-2",
+            generation_key: "generation-2",
             text: "gamma",
             chunks: &[super::ChunkInsert {
                 seq: 0,
@@ -1906,6 +1931,7 @@ fn replace_document_generation_rejects_invalid_span_without_mutating_existing() 
             extractor_key: "code",
             source_hash: "hash-1",
             text_hash: "text-hash-1",
+            generation_key: "generation-1",
             text: "alpha",
             chunks: &[super::ChunkInsert {
                 seq: 0,
@@ -1928,6 +1954,7 @@ fn replace_document_generation_rejects_invalid_span_without_mutating_existing() 
             extractor_key: "code",
             source_hash: "hash-2",
             text_hash: "text-hash-2",
+            generation_key: "generation-2",
             text: "éclair",
             chunks: &[super::ChunkInsert {
                 seq: 0,
@@ -1988,7 +2015,14 @@ fn get_chunk_text_rejects_invalid_canonical_span() {
         )
         .expect("insert doc");
     storage
-        .put_document_text(doc_id, "txt", "hash-1", "text-hash-1", "éclair")
+        .put_document_text(
+            doc_id,
+            "txt",
+            "hash-1",
+            "text-hash-1",
+            "generation-1",
+            "éclair",
+        )
         .expect("put document text");
     let chunk_ids = storage
         .insert_chunks(

@@ -4819,6 +4819,81 @@ fn update_replaces_existing_chunks_from_canonical_text_when_raw_spacing_changes(
 }
 
 #[test]
+fn update_rebuilds_unchanged_file_when_chunking_generation_changes() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine();
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        let file_path = collection_path.join("guide.txt");
+        write_text_file(
+            &file_path,
+            "one two three four five six seven eight nine ten\n",
+        );
+
+        let first = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+        assert_eq!(first.added_docs, 1);
+        assert_eq!(first.failed_docs, 0);
+        assert!(
+            first.errors.is_empty(),
+            "unexpected errors: {:?}",
+            first.errors
+        );
+
+        let config_dir = engine.config().config_dir.clone();
+        let cache_dir = engine.config().cache_dir.clone();
+        drop(engine);
+
+        let storage = Storage::new(&cache_dir).expect("reopen storage");
+        let mut config = base_test_config(config_dir, cache_dir);
+        config.chunking.defaults.target_tokens = 2;
+        config.chunking.defaults.soft_max_tokens = 2;
+        config.chunking.defaults.hard_max_tokens = 2;
+        config.chunking.defaults.boundary_overlap_tokens = 0;
+        let engine = Engine::from_parts(storage, config);
+
+        let second = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update after chunking generation change");
+        assert_eq!(second.scanned_docs, 1);
+        assert_eq!(second.skipped_mtime_docs, 0);
+        assert_eq!(second.skipped_hash_docs, 0);
+        assert_eq!(second.updated_docs, 1);
+        assert_eq!(second.failed_docs, 0);
+        assert!(
+            second.errors.is_empty(),
+            "unexpected errors: {:?}",
+            second.errors
+        );
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.txt")
+            .expect("query document")
+            .expect("document exists");
+        let chunks = engine
+            .storage()
+            .get_chunks_for_document(doc.id)
+            .expect("load rebuilt chunks");
+        assert!(
+            chunks.len() > 1,
+            "expected tighter chunking policy to rebuild into multiple chunks, got {chunks:?}"
+        );
+    });
+}
+
+#[test]
 fn update_replaces_existing_chunks_after_successful_preinsert_preflight() {
     with_kbolt_space_env(None, || {
         let mut chunking = ChunkingConfig::default();
