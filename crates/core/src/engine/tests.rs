@@ -2113,6 +2113,75 @@ fn search_keyword_includes_neighbor_chunks_for_context() {
 }
 
 #[test]
+fn search_keyword_uses_profile_neighbor_window_for_context() {
+    with_kbolt_space_env(None, || {
+        let root = tempdir().expect("create temp root");
+        let root_path = root.path().to_path_buf();
+        std::mem::forget(root);
+        let config_dir = root_path.join("config");
+        let cache_dir = root_path.join("cache");
+        let storage = Storage::new(&cache_dir).expect("create storage");
+        let mut config = base_test_config(config_dir, cache_dir);
+        config.chunking.defaults.neighbor_window = 1;
+        let mut md_policy = config.chunking.defaults.clone();
+        md_policy.target_tokens = 128;
+        md_policy.soft_max_tokens = 128;
+        md_policy.hard_max_tokens = 128;
+        md_policy.boundary_overlap_tokens = 0;
+        md_policy.neighbor_window = 0;
+        config.chunking.profiles.insert("md".to_string(), md_policy);
+        let engine = Engine::from_parts(storage, config);
+        engine.add_space("work", None).expect("add work");
+
+        let work_path = root_path.join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        let left = std::iter::repeat_n("leftprofilectx", 100)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let middle = std::iter::repeat_n("profiletargetonly", 100)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let right = std::iter::repeat_n("rightprofilectx", 100)
+            .collect::<Vec<_>>()
+            .join(" ");
+        write_text_file(
+            &work_path.join("docs/guide.md"),
+            &format!("# Title\n\n{left}\n\n{middle}\n\n{right}\n"),
+        );
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let response = engine
+            .search(SearchRequest {
+                query: "profiletargetonly".to_string(),
+                mode: SearchMode::Keyword,
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                limit: 5,
+                min_score: 0.0,
+                no_rerank: false,
+                debug: false,
+            })
+            .expect("run keyword search");
+
+        assert!(!response.results.is_empty(), "expected at least one result");
+        let first = &response.results[0];
+        assert!(first.text.contains("profiletargetonly"));
+        assert!(
+            !first.text.contains("leftprofilectx"),
+            "md profile neighbor_window=0 should suppress previous chunk"
+        );
+        assert!(
+            !first.text.contains("rightprofilectx"),
+            "md profile neighbor_window=0 should suppress next chunk"
+        );
+    });
+}
+
+#[test]
 fn search_keyword_hydrates_result_text_when_source_file_is_missing() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);

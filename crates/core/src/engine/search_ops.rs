@@ -544,8 +544,6 @@ impl Engine {
         }
 
         let mut text_by_doc: HashMap<i64, DocumentTextRow> = HashMap::new();
-        let neighbor_window = self.config.chunking.defaults.neighbor_window;
-
         let mut chunks_by_doc: HashMap<i64, Vec<ChunkRow>> = HashMap::new();
 
         if apply_rerank && !candidates.is_empty() {
@@ -607,7 +605,7 @@ impl Engine {
                     &self.storage,
                     &mut text_by_doc,
                     &mut chunks_by_doc,
-                    neighbor_window,
+                    &self.config.chunking,
                     debug,
                     limit,
                 );
@@ -632,7 +630,7 @@ impl Engine {
             &self.storage,
             &mut text_by_doc,
             &mut chunks_by_doc,
-            neighbor_window,
+            &self.config.chunking,
             debug,
             limit,
         )
@@ -809,7 +807,7 @@ fn finalize_search_results(
     storage: &Storage,
     text_by_doc: &mut HashMap<i64, DocumentTextRow>,
     chunks_by_doc: &mut HashMap<i64, Vec<ChunkRow>>,
-    neighbor_window: usize,
+    chunking: &crate::config::ChunkingConfig,
     debug: bool,
     limit: usize,
 ) -> Result<Vec<SearchResult>> {
@@ -820,11 +818,21 @@ fn finalize_search_results(
         .map(|candidate| candidate.doc_id)
         .collect::<Vec<_>>();
     ensure_document_texts_loaded(storage, &final_doc_ids, text_by_doc)?;
-    ensure_neighbor_chunks_loaded(storage, &final_doc_ids, chunks_by_doc, neighbor_window)?;
+    let mut neighbor_doc_ids = Vec::new();
+    for candidate in &candidates {
+        let document_text = candidate_document_text(candidate, text_by_doc)?;
+        if result_neighbor_window(chunking, document_text) > 0 {
+            neighbor_doc_ids.push(candidate.doc_id);
+        }
+    }
+    neighbor_doc_ids.sort_unstable();
+    neighbor_doc_ids.dedup();
+    ensure_neighbor_chunks_loaded(storage, &neighbor_doc_ids, chunks_by_doc)?;
 
     let mut results = Vec::new();
     for candidate in candidates {
         let document_text = candidate_document_text(&candidate, text_by_doc)?;
+        let neighbor_window = result_neighbor_window(chunking, document_text);
         let text = search_text_with_canonical_neighbors(
             document_text.text.as_str(),
             &candidate.chunk,
@@ -879,12 +887,7 @@ fn ensure_neighbor_chunks_loaded(
     storage: &Storage,
     doc_ids: &[i64],
     chunks_by_doc: &mut HashMap<i64, Vec<ChunkRow>>,
-    neighbor_window: usize,
 ) -> Result<()> {
-    if neighbor_window == 0 {
-        return Ok(());
-    }
-
     let missing = doc_ids
         .iter()
         .copied()
@@ -896,6 +899,13 @@ fn ensure_neighbor_chunks_loaded(
 
     chunks_by_doc.extend(storage.get_chunks_for_documents(&missing)?);
     Ok(())
+}
+
+fn result_neighbor_window(
+    chunking: &crate::config::ChunkingConfig,
+    document_text: &DocumentTextRow,
+) -> usize {
+    resolve_policy(chunking, Some(document_text.extractor_key.as_str()), None).neighbor_window
 }
 
 fn candidate_neighbors<'a>(
