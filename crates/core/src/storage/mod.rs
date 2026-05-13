@@ -2436,14 +2436,38 @@ CREATE TABLE IF NOT EXISTS document_texts (
             return Ok(Vec::new());
         }
 
-        self.query_dense_filtered(space, vector, Some(chunk_ids), limit)
+        let allowed_keys = chunk_ids
+            .iter()
+            .map(|chunk_id| {
+                u64::try_from(*chunk_id).map_err(|_| {
+                    CoreError::Internal(format!(
+                        "chunk_id must be non-negative for usearch query: {chunk_id}"
+                    ))
+                })
+            })
+            .collect::<Result<HashSet<_>>>()?;
+        self.query_dense_in_key_set(space, vector, &allowed_keys, limit)
+    }
+
+    pub(crate) fn query_dense_in_key_set(
+        &self,
+        space: &str,
+        vector: &[f32],
+        allowed_keys: &HashSet<u64>,
+        limit: usize,
+    ) -> Result<Vec<DenseHit>> {
+        if allowed_keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.query_dense_filtered(space, vector, Some(allowed_keys), limit)
     }
 
     fn query_dense_filtered(
         &self,
         space: &str,
         vector: &[f32],
-        chunk_ids: Option<&[i64]>,
+        allowed_keys: Option<&HashSet<u64>>,
         limit: usize,
     ) -> Result<Vec<DenseHit>> {
         if limit == 0 {
@@ -2472,17 +2496,7 @@ CREATE TABLE IF NOT EXISTS document_texts (
             )));
         }
 
-        let matches = if let Some(chunk_ids) = chunk_ids {
-            let allowed_keys = chunk_ids
-                .iter()
-                .map(|chunk_id| {
-                    u64::try_from(*chunk_id).map_err(|_| {
-                        CoreError::Internal(format!(
-                            "chunk_id must be non-negative for usearch query: {chunk_id}"
-                        ))
-                    })
-                })
-                .collect::<Result<HashSet<_>>>()?;
+        let matches = if let Some(allowed_keys) = allowed_keys {
             index
                 .filtered_search::<f32, _>(vector, limit, |key| allowed_keys.contains(&key))
                 .map_err(|err| {

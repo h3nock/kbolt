@@ -117,7 +117,7 @@ impl Engine {
                 filtered,
                 document_ids,
                 chunk_count,
-                chunk_ids: Mutex::new(None),
+                chunk_key_filter: Mutex::new(None),
             });
         }
         Ok(scopes)
@@ -130,22 +130,36 @@ impl Engine {
             .fold(0usize, usize::saturating_add)
     }
 
-    fn chunk_ids_for_scope(&self, scope: &SearchTargetScope) -> Result<Vec<i64>> {
-        let mut chunk_ids = scope
-            .chunk_ids
+    fn chunk_key_filter_for_scope(&self, scope: &SearchTargetScope) -> Result<Arc<HashSet<u64>>> {
+        let mut chunk_key_filter = scope
+            .chunk_key_filter
             .lock()
-            .map_err(|_| CoreError::poisoned("search scope chunk ids"))?;
-        if let Some(chunk_ids) = chunk_ids.as_ref() {
-            return Ok(chunk_ids.clone());
+            .map_err(|_| CoreError::poisoned("search scope chunk key filter"))?;
+        if let Some(chunk_key_filter) = chunk_key_filter.as_ref() {
+            return Ok(Arc::clone(chunk_key_filter));
         }
 
-        let loaded = crate::profile::timed_search_stage("scope_chunk_ids", || {
+        let chunk_ids = crate::profile::timed_search_stage("scope_chunk_ids", || {
             self.storage
                 .get_active_chunk_ids_in_collections(&scope.collection_ids)
         })?;
-        crate::profile::increment_search_count("scope_chunk_id_filters", loaded.len() as u64);
-        *chunk_ids = Some(loaded.clone());
-        Ok(loaded)
+        crate::profile::increment_search_count("scope_chunk_id_filters", chunk_ids.len() as u64);
+        let mut allowed_keys = HashSet::with_capacity(chunk_ids.len());
+        for chunk_id in chunk_ids {
+            let key = u64::try_from(chunk_id).map_err(|_| {
+                CoreError::Internal(format!(
+                    "chunk_id must be non-negative for usearch query: {chunk_id}"
+                ))
+            })?;
+            allowed_keys.insert(key);
+        }
+        crate::profile::increment_search_count(
+            "dense_filter_keys_built",
+            allowed_keys.len() as u64,
+        );
+        let allowed_keys = Arc::new(allowed_keys);
+        *chunk_key_filter = Some(Arc::clone(&allowed_keys));
+        Ok(allowed_keys)
     }
 
     pub(super) fn rank_chunks_for_mode(
@@ -288,11 +302,11 @@ impl Engine {
         for scope in scopes {
             let hits = crate::profile::timed_search_stage("dense_query", || {
                 if scope.filtered {
-                    let chunk_ids = self.chunk_ids_for_scope(scope)?;
-                    self.storage.query_dense_in_chunks(
+                    let allowed_keys = self.chunk_key_filter_for_scope(scope)?;
+                    self.storage.query_dense_in_key_set(
                         &scope.space,
                         query_vector,
-                        &chunk_ids,
+                        &allowed_keys,
                         limit,
                     )
                 } else {
