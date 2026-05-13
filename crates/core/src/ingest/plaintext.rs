@@ -15,10 +15,6 @@ impl Extractor for PlaintextExtractor {
         "txt"
     }
 
-    fn supports_path(&self, _path: &Path) -> bool {
-        true
-    }
-
     fn extract(&self, _path: &Path, bytes: &[u8]) -> Result<ExtractedDocument> {
         if let Err(err) = std::str::from_utf8(bytes) {
             return Err(kbolt_types::KboltError::InvalidInput(format!(
@@ -161,11 +157,11 @@ mod tests {
     }
 
     #[test]
-    fn supports_path_acts_as_generic_text_fallback() {
+    fn does_not_act_as_generic_path_fallback() {
         let extractor = PlaintextExtractor;
         assert_eq!(extractor.profile_key(), "txt");
-        assert!(extractor.supports_path(Path::new("docs/readme.md")));
-        assert!(extractor.supports_path(Path::new("src/main.rs")));
+        assert!(!extractor.supports_path(Path::new("docs/readme.md")));
+        assert!(!extractor.supports_path(Path::new("src/main.rs")));
     }
 
     #[test]

@@ -221,6 +221,6 @@ mod tests {
         assert!(code
             .as_ref()
             .is_some_and(|extractor| extractor.profile_key() == "code"));
-        assert!(unknown.is_some());
+        assert!(unknown.is_none());
     }
 }
