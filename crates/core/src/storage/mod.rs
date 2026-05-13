@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use crate::error::{CoreError, Result};
 use crate::ingest::chunk::FinalChunkKind;
 use kbolt_types::{DiskUsage, KboltError};
-use rusqlite::types::Value as SqlValue;
+use rusqlite::types::{Type as SqlType, Value as SqlValue};
 use rusqlite::{params, params_from_iter, Connection, Error, ErrorCode};
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, TermQuery};
@@ -90,6 +90,22 @@ pub struct ChunkInsert {
     pub length: usize,
     pub heading: Option<String>,
     pub kind: FinalChunkKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentTextRow {
+    pub doc_id: i64,
+    pub extractor_key: String,
+    pub source_hash: String,
+    pub text_hash: String,
+    pub text: String,
+    pub created: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkTextRow {
+    pub chunk: ChunkRow,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1293,6 +1309,84 @@ CREATE TABLE IF NOT EXISTS document_texts (
         Ok(chunks)
     }
 
+    pub fn put_document_text(
+        &self,
+        doc_id: i64,
+        extractor_key: &str,
+        source_hash: &str,
+        text_hash: &str,
+        text: &str,
+    ) -> Result<()> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let _doc = lookup_document_id(&conn, doc_id)?;
+
+        conn.execute(
+            "INSERT INTO document_texts (doc_id, extractor_key, source_hash, text_hash, text, created)
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+             ON CONFLICT(doc_id) DO UPDATE SET
+                 extractor_key = excluded.extractor_key,
+                 source_hash = excluded.source_hash,
+                 text_hash = excluded.text_hash,
+                 text = excluded.text,
+                 created = excluded.created",
+            params![doc_id, extractor_key, source_hash, text_hash, text],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_document_text(&self, doc_id: i64) -> Result<DocumentTextRow> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let _doc = lookup_document_id(&conn, doc_id)?;
+
+        let result = conn.query_row(
+            "SELECT doc_id, extractor_key, source_hash, text_hash, text, created
+             FROM document_texts
+             WHERE doc_id = ?1",
+            params![doc_id],
+            decode_document_text_row,
+        );
+        match result {
+            Ok(row) => Ok(row),
+            Err(Error::QueryReturnedNoRows) => Err(missing_document_text_error(doc_id)),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn get_chunk_text(&self, chunk_id: i64) -> Result<ChunkTextRow> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let result = conn.query_row(
+            "SELECT c.id, c.doc_id, c.seq, c.offset, c.length, c.heading, c.kind, dt.text
+             FROM chunks c
+             JOIN document_texts dt ON dt.doc_id = c.doc_id
+             WHERE c.id = ?1",
+            params![chunk_id],
+            |row| {
+                let chunk = decode_chunk_row(row)?;
+                let document_text: String = row.get(7)?;
+                Ok((chunk, document_text))
+            },
+        );
+        let (chunk, document_text) = match result {
+            Ok(row) => row,
+            Err(Error::QueryReturnedNoRows) => {
+                let doc_id = lookup_chunk_doc_id(&conn, chunk_id)?;
+                return Err(missing_document_text_error(doc_id));
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let text = canonical_chunk_text(&document_text, &chunk)?;
+        Ok(ChunkTextRow { chunk, text })
+    }
+
     pub fn insert_embeddings(&self, entries: &[(i64, &str)]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
@@ -1405,8 +1499,8 @@ CREATE TABLE IF NOT EXISTS document_texts (
                 doc_path: row.get(1)?,
                 collection_path: PathBuf::from(row.get::<_, String>(2)?),
                 space_name: row.get(3)?,
-                offset: offset_value as usize,
-                length: length_value as usize,
+                offset: decode_non_negative_usize(offset_value, 4, "chunks.offset")?,
+                length: decode_non_negative_usize(length_value, 5, "chunks.length")?,
             })
         })?;
 
@@ -2176,6 +2270,22 @@ fn load_chunk_ids_for_doc(conn: &Connection, doc_id: i64) -> Result<Vec<i64>> {
     Ok(chunk_ids)
 }
 
+fn lookup_chunk_doc_id(conn: &Connection, chunk_id: i64) -> Result<i64> {
+    let result = conn.query_row(
+        "SELECT doc_id FROM chunks WHERE id = ?1",
+        params![chunk_id],
+        |row| row.get::<_, i64>(0),
+    );
+    match result {
+        Ok(doc_id) => Ok(doc_id),
+        Err(Error::QueryReturnedNoRows) => Err(KboltError::DocumentNotFound {
+            path: format!("chunk_id={chunk_id}"),
+        }
+        .into()),
+        Err(err) => Err(err.into()),
+    }
+}
+
 fn query_count<P: rusqlite::Params>(conn: &Connection, sql: &str, params: P) -> Result<usize> {
     let count: i64 = conn.query_row(sql, params, |row| row.get(0))?;
     Ok(count as usize)
@@ -2515,6 +2625,17 @@ fn decode_document_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentRow>
     })
 }
 
+fn decode_document_text_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentTextRow> {
+    Ok(DocumentTextRow {
+        doc_id: row.get(0)?,
+        extractor_key: row.get(1)?,
+        source_hash: row.get(2)?,
+        text_hash: row.get(3)?,
+        text: row.get(4)?,
+        created: row.get(5)?,
+    })
+}
+
 fn decode_chunk_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRow> {
     let offset_value: i64 = row.get(3)?;
     let length_value: i64 = row.get(4)?;
@@ -2526,11 +2647,57 @@ fn decode_chunk_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRow> {
         id: row.get(0)?,
         doc_id: row.get(1)?,
         seq: row.get(2)?,
-        offset: offset_value as usize,
-        length: length_value as usize,
+        offset: decode_non_negative_usize(offset_value, 3, "chunks.offset")?,
+        length: decode_non_negative_usize(length_value, 4, "chunks.length")?,
         heading: row.get(5)?,
         kind,
     })
+}
+
+fn decode_non_negative_usize(
+    value: i64,
+    column: usize,
+    name: &'static str,
+) -> rusqlite::Result<usize> {
+    if value < 0 {
+        return Err(Error::FromSqlConversionFailure(
+            column,
+            SqlType::Integer,
+            Box::new(KboltError::Internal(format!("{name} must not be negative"))),
+        ));
+    }
+
+    Ok(value as usize)
+}
+
+fn canonical_chunk_text(document_text: &str, chunk: &ChunkRow) -> Result<String> {
+    let end = chunk.offset.checked_add(chunk.length).ok_or_else(|| {
+        CoreError::Internal(format!("chunk {} text span overflows usize", chunk.id))
+    })?;
+    if end > document_text.len() {
+        return Err(CoreError::Internal(format!(
+            "chunk {} text span {}..{} exceeds document text length {}",
+            chunk.id,
+            chunk.offset,
+            end,
+            document_text.len()
+        )));
+    }
+    if !document_text.is_char_boundary(chunk.offset) || !document_text.is_char_boundary(end) {
+        return Err(CoreError::Internal(format!(
+            "chunk {} text span {}..{} is not on UTF-8 boundaries",
+            chunk.id, chunk.offset, end
+        )));
+    }
+
+    Ok(document_text[chunk.offset..end].to_string())
+}
+
+fn missing_document_text_error(doc_id: i64) -> CoreError {
+    KboltError::Internal(format!(
+        "document {doc_id} is missing persisted canonical text; rebuild the kbolt cache"
+    ))
+    .into()
 }
 
 #[cfg(test)]

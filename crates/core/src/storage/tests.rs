@@ -1554,6 +1554,203 @@ fn get_chunks_for_document_rejects_invalid_stored_chunk_kind() {
 }
 
 #[test]
+fn get_chunks_for_document_rejects_negative_stored_span() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/lib.rs",
+            "lib",
+            DocumentTitleSource::Extracted,
+            "hash-1",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc");
+
+    {
+        let conn = storage.db.lock().expect("lock db");
+        conn.execute(
+            "INSERT INTO chunks (doc_id, seq, offset, length, heading, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![doc_id, 0, -1, 10, Option::<String>::None, "section"],
+        )
+        .expect("insert invalid chunk span");
+    }
+
+    let err = storage
+        .get_chunks_for_document(doc_id)
+        .expect_err("negative chunk span should fail");
+    assert!(err
+        .to_string()
+        .contains("chunks.offset must not be negative"));
+}
+
+#[test]
+fn put_get_and_hydrate_document_text() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/lib.rs",
+            "lib",
+            DocumentTitleSource::Extracted,
+            "hash-1",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc");
+
+    let canonical_text = "alpha café\n\nbeta";
+    storage
+        .put_document_text(doc_id, "txt", "hash-1", "text-hash-1", canonical_text)
+        .expect("put document text");
+    let stored = storage
+        .get_document_text(doc_id)
+        .expect("get document text");
+    assert_eq!(stored.extractor_key, "txt");
+    assert_eq!(stored.source_hash, "hash-1");
+    assert_eq!(stored.text_hash, "text-hash-1");
+    assert_eq!(stored.text, canonical_text);
+
+    let chunk_ids = storage
+        .insert_chunks(
+            doc_id,
+            &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: "alpha café".len(),
+                heading: None,
+                kind: FinalChunkKind::Paragraph,
+            }],
+        )
+        .expect("insert chunk");
+
+    let chunk_text = storage
+        .get_chunk_text(chunk_ids[0])
+        .expect("hydrate chunk text");
+    assert_eq!(chunk_text.text, "alpha café");
+    assert_eq!(chunk_text.chunk.id, chunk_ids[0]);
+}
+
+#[test]
+fn get_chunk_text_rejects_invalid_canonical_span() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/lib.rs",
+            "lib",
+            DocumentTitleSource::Extracted,
+            "hash-1",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc");
+    storage
+        .put_document_text(doc_id, "txt", "hash-1", "text-hash-1", "éclair")
+        .expect("put document text");
+    let chunk_ids = storage
+        .insert_chunks(
+            doc_id,
+            &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 1,
+                heading: None,
+                kind: FinalChunkKind::Paragraph,
+            }],
+        )
+        .expect("insert chunk");
+
+    let err = storage
+        .get_chunk_text(chunk_ids[0])
+        .expect_err("invalid utf8 boundary should fail");
+    assert!(err.to_string().contains("not on UTF-8 boundaries"));
+}
+
+#[test]
+fn get_chunk_text_reports_missing_document_text() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/lib.rs",
+            "lib",
+            DocumentTitleSource::Extracted,
+            "hash-1",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc");
+    let chunk_ids = storage
+        .insert_chunks(
+            doc_id,
+            &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 5,
+                heading: None,
+                kind: FinalChunkKind::Paragraph,
+            }],
+        )
+        .expect("insert chunk");
+
+    let err = storage
+        .get_chunk_text(chunk_ids[0])
+        .expect_err("missing document text should fail");
+    assert!(err.to_string().contains("missing persisted canonical text"));
+}
+
+#[test]
 fn delete_chunks_for_document_returns_deleted_ids() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
