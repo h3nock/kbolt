@@ -1,6 +1,9 @@
 use super::*;
 use kbolt_types::{UpdateDecision, UpdateDecisionKind};
 
+const CANONICAL_TEXT_GENERATION: u32 = 1;
+const CHUNKER_GENERATION: u32 = 1;
+
 impl Engine {
     pub fn update(&self, options: UpdateOptions) -> Result<UpdateReport> {
         let _lock = self.acquire_operation_lock(LockMode::Exclusive)?;
@@ -1588,7 +1591,7 @@ fn ingestion_generation_key(
     policy: &crate::config::ChunkPolicy,
 ) -> String {
     format!(
-        "extractor={extractor_key}:v{extractor_version};chunk=target:{}:soft:{}:hard:{}:overlap:{}:neighbors:{}:prefix:{}",
+        "canonical=v{CANONICAL_TEXT_GENERATION};chunker=v{CHUNKER_GENERATION};extractor={extractor_key}:v{extractor_version};chunk=target:{}:soft:{}:hard:{}:overlap:{}:neighbors:{}:prefix:{}",
         policy.target_tokens,
         policy.soft_max_tokens,
         policy.hard_max_tokens,

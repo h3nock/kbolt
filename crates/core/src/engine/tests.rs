@@ -5013,6 +5013,28 @@ fn update_rebuilds_unchanged_file_when_chunking_generation_changes() {
             first.errors
         );
 
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "guide.txt")
+            .expect("query document")
+            .expect("document exists");
+        let document_text = engine
+            .storage()
+            .get_document_text(doc.id)
+            .expect("load document text");
+        assert!(
+            document_text
+                .generation_key
+                .starts_with("canonical=v1;chunker=v1;extractor=txt:v1;"),
+            "generation key should include canonical and chunker versions: {}",
+            document_text.generation_key
+        );
+
         let config_dir = engine.config().config_dir.clone();
         let cache_dir = engine.config().cache_dir.clone();
         drop(engine);
