@@ -77,10 +77,11 @@ impl Extractor for MarkdownExtractor {
                         }
                     }
 
+                    let length = text.len();
                     blocks.push(ExtractedBlock {
                         text,
                         offset: open.start,
-                        length: span_end.saturating_sub(open.start),
+                        length,
                         kind: open.block_kind,
                         heading_path: open.heading_path,
                         attrs: open.attrs,
@@ -362,6 +363,10 @@ fn main() {}
         let canonical = list_items.join("\n\n");
         assert_eq!(canonical.matches("nestedtarget").count(), 1);
         assert!(!canonical.contains("listtarget\n  - child"));
+        assert!(doc
+            .blocks
+            .iter()
+            .all(|block| block.length == block.text.len()));
     }
 
     #[test]
