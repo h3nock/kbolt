@@ -91,13 +91,15 @@ impl Engine {
             collection_ids.sort_unstable();
             collection_ids.dedup();
 
-            let ids = self
+            let summary = self
                 .storage
-                .get_active_search_scope_ids_in_collections(&collection_ids)?;
+                .get_active_search_scope_summary_in_collections(&collection_ids)?;
             scopes.push(SearchTargetScope {
                 space,
-                document_ids: ids.document_ids,
-                chunk_ids: ids.chunk_ids,
+                collection_ids,
+                document_ids: summary.document_ids,
+                chunk_count: summary.chunk_count,
+                chunk_ids: Mutex::new(None),
             });
         }
         Ok(scopes)
@@ -106,8 +108,24 @@ impl Engine {
     pub(super) fn max_search_candidates(&self, scopes: &[SearchTargetScope]) -> usize {
         scopes
             .iter()
-            .map(|scope| scope.chunk_ids.len())
+            .map(|scope| scope.chunk_count)
             .fold(0usize, usize::saturating_add)
+    }
+
+    fn chunk_ids_for_scope(&self, scope: &SearchTargetScope) -> Result<Vec<i64>> {
+        let mut chunk_ids = scope
+            .chunk_ids
+            .lock()
+            .map_err(|_| CoreError::poisoned("search scope chunk ids"))?;
+        if let Some(chunk_ids) = chunk_ids.as_ref() {
+            return Ok(chunk_ids.clone());
+        }
+
+        let loaded = self
+            .storage
+            .get_active_chunk_ids_in_collections(&scope.collection_ids)?;
+        *chunk_ids = Some(loaded.clone());
+        Ok(loaded)
     }
 
     pub(super) fn rank_chunks_for_mode(
@@ -239,10 +257,11 @@ impl Engine {
 
         let mut candidates = Vec::new();
         for scope in scopes {
+            let chunk_ids = self.chunk_ids_for_scope(scope)?;
             let hits = self.storage.query_dense_in_chunks(
                 &scope.space,
                 query_vector,
-                &scope.chunk_ids,
+                &chunk_ids,
                 limit,
             )?;
             for hit in hits {

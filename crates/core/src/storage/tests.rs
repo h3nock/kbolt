@@ -1582,6 +1582,103 @@ fn insert_and_get_chunks_for_document() {
 }
 
 #[test]
+fn active_search_scope_summary_counts_active_chunks() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let active_doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/active.rs",
+            "active",
+            DocumentTitleSource::Extracted,
+            "hash-active",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert active doc");
+    let inactive_doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/inactive.rs",
+            "inactive",
+            DocumentTitleSource::Extracted,
+            "hash-inactive",
+            "2026-03-01T10:01:00Z",
+        )
+        .expect("insert inactive doc");
+    let empty_doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/empty.rs",
+            "empty",
+            DocumentTitleSource::Extracted,
+            "hash-empty",
+            "2026-03-01T10:02:00Z",
+        )
+        .expect("insert empty doc");
+
+    let active_chunk_ids = storage
+        .insert_chunks(
+            active_doc_id,
+            &[
+                super::ChunkInsert {
+                    seq: 0,
+                    offset: 0,
+                    length: 10,
+                    heading: None,
+                    kind: FinalChunkKind::Section,
+                },
+                super::ChunkInsert {
+                    seq: 1,
+                    offset: 10,
+                    length: 12,
+                    heading: None,
+                    kind: FinalChunkKind::Section,
+                },
+            ],
+        )
+        .expect("insert active chunks");
+    storage
+        .insert_chunks(
+            inactive_doc_id,
+            &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 8,
+                heading: None,
+                kind: FinalChunkKind::Section,
+            }],
+        )
+        .expect("insert inactive chunk");
+    storage
+        .deactivate_document(inactive_doc_id)
+        .expect("deactivate inactive doc");
+
+    let summary = storage
+        .get_active_search_scope_summary_in_collections(&[collection_id])
+        .expect("get active scope summary");
+    assert_eq!(summary.document_ids, vec![active_doc_id]);
+    assert_eq!(summary.chunk_count, 2);
+    assert!(!summary.document_ids.contains(&empty_doc_id));
+
+    let chunk_ids = storage
+        .get_active_chunk_ids_in_collections(&[collection_id])
+        .expect("get active chunk ids");
+    assert_eq!(chunk_ids, active_chunk_ids);
+}
+
+#[test]
 fn get_chunks_for_document_rejects_invalid_stored_chunk_kind() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");

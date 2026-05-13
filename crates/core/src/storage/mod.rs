@@ -217,9 +217,9 @@ pub struct DenseHit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SearchScopeIds {
+pub struct SearchScopeSummary {
     pub document_ids: Vec<i64>,
-    pub chunk_ids: Vec<i64>,
+    pub chunk_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1378,14 +1378,14 @@ CREATE TABLE IF NOT EXISTS document_texts (
         Ok(chunks)
     }
 
-    pub fn get_active_search_scope_ids_in_collections(
+    pub fn get_active_search_scope_summary_in_collections(
         &self,
         collection_ids: &[i64],
-    ) -> Result<SearchScopeIds> {
+    ) -> Result<SearchScopeSummary> {
         if collection_ids.is_empty() {
-            return Ok(SearchScopeIds {
+            return Ok(SearchScopeSummary {
                 document_ids: Vec::new(),
-                chunk_ids: Vec::new(),
+                chunk_count: 0,
             });
         }
 
@@ -1396,12 +1396,13 @@ CREATE TABLE IF NOT EXISTS document_texts (
 
         let placeholders = vec!["?"; collection_ids.len()].join(", ");
         let sql = format!(
-            "SELECT d.id, c.id
+            "SELECT d.id, COUNT(c.id)
              FROM chunks c
              JOIN documents d ON d.id = c.doc_id
              WHERE d.active = 1
                AND d.collection_id IN ({placeholders})
-             ORDER BY d.id ASC, c.seq ASC"
+             GROUP BY d.id
+             ORDER BY d.id ASC"
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(collection_ids.iter()), |row| {
@@ -1409,20 +1410,47 @@ CREATE TABLE IF NOT EXISTS document_texts (
         })?;
 
         let mut document_ids = Vec::new();
-        let mut seen_documents = HashSet::new();
-        let mut chunk_ids = Vec::new();
+        let mut chunk_count = 0usize;
         for row in rows {
-            let (doc_id, chunk_id) = row?;
-            if seen_documents.insert(doc_id) {
-                document_ids.push(doc_id);
-            }
-            chunk_ids.push(chunk_id);
+            let (doc_id, doc_chunk_count) = row?;
+            let doc_chunk_count = usize::try_from(doc_chunk_count).map_err(|_| {
+                CoreError::Internal(format!(
+                    "active chunk count must be non-negative for document {doc_id}"
+                ))
+            })?;
+            document_ids.push(doc_id);
+            chunk_count = chunk_count.saturating_add(doc_chunk_count);
         }
 
-        Ok(SearchScopeIds {
+        Ok(SearchScopeSummary {
             document_ids,
-            chunk_ids,
+            chunk_count,
         })
+    }
+
+    pub fn get_active_chunk_ids_in_collections(&self, collection_ids: &[i64]) -> Result<Vec<i64>> {
+        if collection_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let placeholders = vec!["?"; collection_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT c.id
+             FROM chunks c
+             JOIN documents d ON d.id = c.doc_id
+             WHERE d.active = 1
+               AND d.collection_id IN ({placeholders})
+             ORDER BY d.id ASC, c.seq ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(collection_ids.iter()), |row| row.get(0))?;
+        let chunk_ids = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(chunk_ids)
     }
 
     pub fn replace_document_generation(

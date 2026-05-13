@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::config;
@@ -86,11 +86,13 @@ struct SearchCollectionMeta {
     collection: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct SearchTargetScope {
     space: String,
+    collection_ids: Vec<i64>,
     document_ids: Vec<i64>,
-    chunk_ids: Vec<i64>,
+    chunk_count: usize,
+    chunk_ids: Mutex<Option<Vec<i64>>>,
 }
 
 #[derive(Debug, Clone)]
