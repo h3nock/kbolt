@@ -2304,6 +2304,87 @@ fn update_get_and_search_use_extracted_pdf_text() {
 }
 
 #[test]
+fn update_invalidates_stale_empty_pdf_generation_before_mtime_skip() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine();
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        let file_path = work_path.join("papers/scan.pdf");
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent).expect("create pdf parent");
+        }
+        let pdf_bytes = crate::ingest::pdf::simple_pdf_fixture("");
+        std::fs::write(&file_path, &pdf_bytes).expect("write empty-text pdf fixture");
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let modified =
+            super::modified_token(&std::fs::metadata(&file_path).expect("read pdf metadata"))
+                .expect("format pdf mtime");
+        let source_hash = super::sha256_hex(&pdf_bytes);
+        let text_hash = super::sha256_hex(b"");
+        let policy = &engine.config().chunking.defaults;
+        let stale_generation_key = format!(
+            "extractor=pdf:v1;chunk=target:{}:soft:{}:hard:{}:overlap:{}:neighbors:{}:prefix:{}",
+            policy.target_tokens,
+            policy.soft_max_tokens,
+            policy.hard_max_tokens,
+            policy.boundary_overlap_tokens,
+            policy.neighbor_window,
+            policy.contextual_prefix
+        );
+        let doc_id = engine
+            .storage()
+            .upsert_document(
+                collection.id,
+                "papers/scan.pdf",
+                "scan",
+                crate::storage::DocumentTitleSource::FilenameFallback,
+                &source_hash,
+                &modified,
+            )
+            .expect("seed old pdf document");
+        engine
+            .storage()
+            .put_document_text(
+                doc_id,
+                "pdf",
+                &source_hash,
+                &text_hash,
+                &stale_generation_key,
+                "",
+            )
+            .expect("seed stale empty pdf text");
+
+        let report = engine
+            .update(verbose_update_options(Some("work"), &["api"]))
+            .expect("update stale empty pdf");
+        assert_eq!(report.scanned_docs, 1);
+        assert_eq!(report.skipped_mtime_docs, 0);
+        assert_eq!(report.skipped_hash_docs, 0);
+        assert_eq!(report.failed_docs, 1);
+        assert!(
+            report.decisions.iter().any(|decision| decision.kind
+                == UpdateDecisionKind::ExtractFailed
+                && decision
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("scanned or image-only PDFs"))),
+            "expected stale pdf to be re-extracted and fail visibly: {:?}",
+            report.decisions
+        );
+    });
+}
+
+#[test]
 fn search_errors_when_canonical_text_is_missing() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_default_space(None);

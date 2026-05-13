@@ -15,6 +15,10 @@ impl Extractor for PdfExtractor {
         "pdf"
     }
 
+    fn version(&self) -> u32 {
+        2
+    }
+
     fn extract(&self, _path: &Path, bytes: &[u8]) -> Result<ExtractedDocument> {
         let text = extract_pdf_text(bytes)?;
         let blocks = paragraph_blocks(text.as_str());
