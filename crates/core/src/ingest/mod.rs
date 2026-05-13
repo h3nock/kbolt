@@ -1,3 +1,4 @@
+pub mod canonical;
 pub mod chunk;
 pub mod code;
 pub mod extract;

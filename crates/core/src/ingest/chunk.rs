@@ -86,10 +86,36 @@ pub fn chunk_document(document: &ExtractedDocument, policy: &ChunkPolicy) -> Vec
         .expect("whitespace token counter should be infallible")
 }
 
+pub fn chunk_canonical_document(
+    document: &ExtractedDocument,
+    policy: &ChunkPolicy,
+) -> Vec<FinalChunk> {
+    let counter = WhitespaceTokenCounter;
+    chunk_canonical_document_with_counter(document, policy, &counter)
+        .expect("whitespace token counter should be infallible")
+}
+
 pub fn chunk_document_with_counter(
     document: &ExtractedDocument,
     policy: &ChunkPolicy,
     counter: &dyn TokenCounter,
+) -> Result<Vec<FinalChunk>> {
+    chunk_document_with_counter_inner(document, policy, counter, TableHeaderMode::SourceBlocks)
+}
+
+pub fn chunk_canonical_document_with_counter(
+    document: &ExtractedDocument,
+    policy: &ChunkPolicy,
+    counter: &dyn TokenCounter,
+) -> Result<Vec<FinalChunk>> {
+    chunk_document_with_counter_inner(document, policy, counter, TableHeaderMode::CanonicalBlocks)
+}
+
+fn chunk_document_with_counter_inner(
+    document: &ExtractedDocument,
+    policy: &ChunkPolicy,
+    counter: &dyn TokenCounter,
+    table_header_mode: TableHeaderMode,
 ) -> Result<Vec<FinalChunk>> {
     if document.blocks.is_empty() {
         return Ok(Vec::new());
@@ -98,7 +124,8 @@ pub fn chunk_document_with_counter(
     debug_assert_valid_blocks(&document.blocks);
 
     let soft_max = normalized_soft_max(policy);
-    let expanded = expand_blocks_for_hard_max(&document.blocks, policy, counter)?;
+    let expanded =
+        expand_blocks_for_hard_max(&document.blocks, policy, counter, table_header_mode)?;
     let mut chunks = Vec::new();
     let mut current = Vec::new();
 
@@ -127,6 +154,12 @@ pub fn chunk_document_with_counter(
     }
 
     Ok(chunks)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TableHeaderMode {
+    SourceBlocks,
+    CanonicalBlocks,
 }
 
 /// Resolves the effective chunk policy for a file profile.
@@ -211,6 +244,7 @@ fn expand_blocks_for_hard_max(
     blocks: &[ExtractedBlock],
     policy: &ChunkPolicy,
     counter: &dyn TokenCounter,
+    table_header_mode: TableHeaderMode,
 ) -> Result<Vec<ExtractedBlock>> {
     let hard_max = normalized_hard_max(policy);
     let target = normalized_target(policy);
@@ -229,7 +263,12 @@ fn expand_blocks_for_hard_max(
             }
         }
 
-        let tagged = attach_table_header_attr(block, active_table_header.as_deref());
+        let tagged = match table_header_mode {
+            TableHeaderMode::SourceBlocks => {
+                attach_table_header_attr(block, active_table_header.as_deref())
+            }
+            TableHeaderMode::CanonicalBlocks => block.clone(),
+        };
 
         if count_single_block_tokens(&tagged, counter)? <= hard_max {
             expanded.push(tagged);
