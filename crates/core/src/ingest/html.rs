@@ -240,29 +240,53 @@ fn is_structural_container(name: &str) -> bool {
 }
 
 fn style_declares_hidden(style: &str) -> bool {
-    let mut display_none = false;
-    let mut visibility_hidden = false;
+    let mut display: Option<StyleDeclarationState> = None;
+    let mut visibility: Option<StyleDeclarationState> = None;
 
     for declaration in style.split(';') {
         let Some((raw_name, raw_value)) = declaration.split_once(':') else {
             continue;
         };
         let name = raw_name.trim().to_ascii_lowercase();
-        let value = raw_value
+        let important = raw_value
             .split('!')
-            .next()
-            .unwrap_or(raw_value)
-            .trim()
-            .to_ascii_lowercase();
+            .skip(1)
+            .any(|suffix| suffix.trim().eq_ignore_ascii_case("important"));
+        let value = raw_value.split('!').next().unwrap_or(raw_value).trim();
 
         match name.as_str() {
-            "display" => display_none = value == "none",
-            "visibility" => visibility_hidden = matches!(value.as_str(), "hidden" | "collapse"),
+            "display" => apply_style_state(
+                &mut display,
+                StyleDeclarationState {
+                    important,
+                    hidden: value.eq_ignore_ascii_case("none"),
+                },
+            ),
+            "visibility" => apply_style_state(
+                &mut visibility,
+                StyleDeclarationState {
+                    important,
+                    hidden: value.eq_ignore_ascii_case("hidden")
+                        || value.eq_ignore_ascii_case("collapse"),
+                },
+            ),
             _ => {}
         }
     }
 
-    display_none || visibility_hidden
+    display.is_some_and(|state| state.hidden) || visibility.is_some_and(|state| state.hidden)
+}
+
+#[derive(Clone, Copy)]
+struct StyleDeclarationState {
+    important: bool,
+    hidden: bool,
+}
+
+fn apply_style_state(current: &mut Option<StyleDeclarationState>, next: StyleDeclarationState) {
+    if current.is_none_or(|state| next.important || !state.important) {
+        *current = Some(next);
+    }
 }
 
 fn heading_level(name: &str) -> Option<usize> {
@@ -596,7 +620,9 @@ Lead text.
 <section aria-hidden=" true "><p>aria hiddenword</p></section>
 <div style="display: none">style hiddenword</div>
 <div style="visibility:hidden !important">visibility hiddenword</div>
+<div style="display:none !important; display:block">important hiddenword</div>
 <div style="display:none; display:block">Actually visible visibletarget</div>
+<div style="visibility:hidden; visibility:visible !important">Visible important importanttarget</div>
 </body>"#,
             )
             .expect("extract html");
@@ -609,6 +635,7 @@ Lead text.
             .join("\n\n");
         assert!(canonical.contains("Visible target"));
         assert!(canonical.contains("Actually visible visibletarget"));
+        assert!(canonical.contains("Visible important importanttarget"));
         assert!(!canonical.contains("hiddenword"));
     }
 
