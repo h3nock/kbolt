@@ -1433,6 +1433,31 @@ CREATE TABLE IF NOT EXISTS document_texts (
         })
     }
 
+    pub fn has_inactive_documents_in_collections(&self, collection_ids: &[i64]) -> Result<bool> {
+        if collection_ids.is_empty() {
+            return Ok(false);
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let placeholders = vec!["?"; collection_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM documents
+                 WHERE active = 0
+                   AND collection_id IN ({placeholders})
+             )"
+        );
+        let exists: i64 = conn.query_row(&sql, params_from_iter(collection_ids.iter()), |row| {
+            row.get(0)
+        })?;
+        Ok(exists != 0)
+    }
+
     pub fn get_active_chunk_ids_in_collections(&self, collection_ids: &[i64]) -> Result<Vec<i64>> {
         if collection_ids.is_empty() {
             return Ok(Vec::new());

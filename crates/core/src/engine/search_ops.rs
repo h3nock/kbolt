@@ -74,6 +74,7 @@ impl Engine {
     pub(super) fn search_target_scopes(
         &self,
         targets: &[UpdateTarget],
+        collection_scoped: bool,
     ) -> Result<Vec<SearchTargetScope>> {
         let mut grouped: Vec<(String, Vec<i64>)> = Vec::new();
         for target in targets {
@@ -94,10 +95,19 @@ impl Engine {
             let summary = self
                 .storage
                 .get_active_search_scope_summary_in_collections(&collection_ids)?;
+            let filtered = collection_scoped
+                || self
+                    .storage
+                    .has_inactive_documents_in_collections(&collection_ids)?;
             scopes.push(SearchTargetScope {
                 space,
                 collection_ids,
-                document_ids: summary.document_ids,
+                filtered,
+                document_ids: if filtered {
+                    summary.document_ids
+                } else {
+                    Vec::new()
+                },
                 chunk_count: summary.chunk_count,
                 chunk_ids: Mutex::new(None),
             });
@@ -155,18 +165,24 @@ impl Engine {
         let boosts = &self.config.ranking.bm25_boosts;
         let mut candidates = Vec::new();
         for scope in scopes {
-            let hits = self.storage.query_bm25_in_documents(
-                &scope.space,
-                query,
-                &[
-                    ("title", boosts.title),
-                    ("heading", boosts.heading),
-                    ("body", boosts.body),
-                    ("filepath", boosts.filepath),
-                ],
-                &scope.document_ids,
-                limit,
-            )?;
+            let fields = &[
+                ("title", boosts.title),
+                ("heading", boosts.heading),
+                ("body", boosts.body),
+                ("filepath", boosts.filepath),
+            ];
+            let hits = if scope.filtered {
+                self.storage.query_bm25_in_documents(
+                    &scope.space,
+                    query,
+                    fields,
+                    &scope.document_ids,
+                    limit,
+                )?
+            } else {
+                self.storage
+                    .query_bm25(&scope.space, query, fields, limit)?
+            };
             for hit in hits {
                 candidates.push(SearchHitCandidate {
                     chunk_id: hit.chunk_id,
@@ -257,13 +273,14 @@ impl Engine {
 
         let mut candidates = Vec::new();
         for scope in scopes {
-            let chunk_ids = self.chunk_ids_for_scope(scope)?;
-            let hits = self.storage.query_dense_in_chunks(
-                &scope.space,
-                query_vector,
-                &chunk_ids,
-                limit,
-            )?;
+            let hits = if scope.filtered {
+                let chunk_ids = self.chunk_ids_for_scope(scope)?;
+                self.storage
+                    .query_dense_in_chunks(&scope.space, query_vector, &chunk_ids, limit)?
+            } else {
+                self.storage
+                    .query_dense(&scope.space, query_vector, limit)?
+            };
             for hit in hits {
                 candidates.push(hit);
             }

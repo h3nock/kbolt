@@ -10,7 +10,7 @@ use crate::config::{
     ChunkPolicy, ChunkingConfig, Config, EmbedderRoleConfig, ProviderOperation,
     ProviderProfileConfig, RankingConfig, ReapingConfig, RoleBindingsConfig,
 };
-use crate::engine::{retrieval_text_with_prefix, Engine};
+use crate::engine::{retrieval_text_with_prefix, Engine, TargetScope};
 use crate::ingest::chunk::FinalChunkKind;
 use crate::storage::Storage;
 use kbolt_types::{
@@ -3251,6 +3251,65 @@ fn search_keyword_refills_after_deactivated_result_is_filtered() {
 
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].path, "api/weak.md");
+    });
+}
+
+#[test]
+fn whole_space_search_scope_avoids_filters_until_inactive_docs_exist() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let work_path = root.path().join("work-api");
+        std::fs::create_dir_all(&work_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", work_path.clone());
+
+        let keep = work_path.join("keep.md");
+        let stale = work_path.join("stale.md");
+        write_text_file(&keep, "keep token\n");
+        write_text_file(&stale, "stale token\n");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("initial update");
+
+        let targets = engine
+            .resolve_targets(TargetScope {
+                space: Some("work"),
+                collections: &[],
+            })
+            .expect("resolve whole-space targets");
+        let scopes = engine
+            .search_target_scopes(&targets, false)
+            .expect("build whole-space search scope");
+        assert_eq!(scopes.len(), 1);
+        assert!(!scopes[0].filtered);
+        assert!(scopes[0].document_ids.is_empty());
+        assert_eq!(scopes[0].chunk_count, 2);
+
+        let collection_scopes = engine
+            .search_target_scopes(&targets, true)
+            .expect("build collection-filtered search scope");
+        assert!(collection_scopes[0].filtered);
+        assert_eq!(collection_scopes[0].document_ids.len(), 2);
+
+        std::fs::remove_file(&stale).expect("remove stale file");
+        engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("deactivate stale document");
+
+        let targets = engine
+            .resolve_targets(TargetScope {
+                space: Some("work"),
+                collections: &[],
+            })
+            .expect("resolve whole-space targets after deactivate");
+        let scopes = engine
+            .search_target_scopes(&targets, false)
+            .expect("build whole-space search scope after deactivate");
+        assert!(scopes[0].filtered);
+        assert_eq!(scopes[0].document_ids.len(), 1);
+        assert_eq!(scopes[0].chunk_count, 1);
     });
 }
 

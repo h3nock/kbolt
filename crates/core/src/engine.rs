@@ -90,6 +90,7 @@ struct SearchCollectionMeta {
 struct SearchTargetScope {
     space: String,
     collection_ids: Vec<i64>,
+    filtered: bool,
     document_ids: Vec<i64>,
     chunk_count: usize,
     chunk_ids: Mutex<Option<Vec<i64>>>,
@@ -712,7 +713,7 @@ impl Engine {
             );
         }
 
-        let target_scopes = self.search_target_scopes(&targets)?;
+        let target_scopes = self.search_target_scopes(&targets, !req.collections.is_empty())?;
         let max_candidates = self.max_search_candidates(&target_scopes);
         let mut retrieval_limit =
             self.initial_search_candidate_limit(&requested_mode, req.limit, rerank_enabled);
