@@ -297,7 +297,19 @@ impl Engine {
                 continue;
             }
 
-            let result = self.embed_pending_batch_with_partial_failures(
+            let mut preflight_failed_chunk_ids = Vec::new();
+            let pending = self.preflight_pending_embeddings(
+                pending,
+                report,
+                failed_docs,
+                &mut preflight_failed_chunk_ids,
+            )?;
+            failed_chunk_ids.extend(preflight_failed_chunk_ids);
+            if pending.is_empty() {
+                continue;
+            }
+
+            let result = self.embed_preflighted_pending_batch_with_partial_failures(
                 embedder.as_ref(),
                 pending,
                 report,
@@ -329,7 +341,7 @@ impl Engine {
         };
 
         let pending = std::mem::take(pending_embeddings);
-        let result = self.embed_pending_batch_with_partial_failures(
+        let result = self.embed_preflighted_pending_batch_with_partial_failures(
             embedder.as_ref(),
             pending,
             report,
@@ -343,7 +355,7 @@ impl Engine {
         self.store_chunk_embeddings(self.embedding_model_key(), result.embeddings, report)
     }
 
-    fn embed_pending_batch_with_partial_failures(
+    fn embed_preflighted_pending_batch_with_partial_failures(
         &self,
         embedder: &dyn crate::models::Embedder,
         pending: Vec<PendingChunkEmbedding>,
@@ -352,16 +364,6 @@ impl Engine {
     ) -> Result<EmbeddedPendingBatch> {
         if pending.is_empty() {
             return Ok(EmbeddedPendingBatch::default());
-        }
-
-        let mut failed_chunk_ids = Vec::new();
-        let pending =
-            self.preflight_pending_embeddings(pending, report, failed_docs, &mut failed_chunk_ids)?;
-        if pending.is_empty() {
-            return Ok(EmbeddedPendingBatch {
-                embeddings: Vec::new(),
-                failed_chunk_ids,
-            });
         }
 
         let texts = pending
@@ -391,21 +393,16 @@ impl Engine {
                     .collect::<Vec<_>>();
                 Ok(EmbeddedPendingBatch {
                     embeddings,
-                    failed_chunk_ids,
+                    failed_chunk_ids: Vec::new(),
                 })
             }
-            Err(err) => self
-                .split_pending_embedding_batch(
-                    embedder,
-                    pending,
-                    report,
-                    failed_docs,
-                    err.to_string(),
-                )
-                .map(|mut result| {
-                    result.failed_chunk_ids.extend(failed_chunk_ids);
-                    result
-                }),
+            Err(err) => self.split_pending_embedding_batch(
+                embedder,
+                pending,
+                report,
+                failed_docs,
+                err.to_string(),
+            ),
         }
     }
 
@@ -437,10 +434,18 @@ impl Engine {
         let mut right = pending;
         let left = right.drain(..mid).collect::<Vec<_>>();
 
-        let mut left_result =
-            self.embed_pending_batch_with_partial_failures(embedder, left, report, failed_docs)?;
-        let right_result =
-            self.embed_pending_batch_with_partial_failures(embedder, right, report, failed_docs)?;
+        let mut left_result = self.embed_preflighted_pending_batch_with_partial_failures(
+            embedder,
+            left,
+            report,
+            failed_docs,
+        )?;
+        let right_result = self.embed_preflighted_pending_batch_with_partial_failures(
+            embedder,
+            right,
+            report,
+            failed_docs,
+        )?;
         left_result.embeddings.extend(right_result.embeddings);
         left_result
             .failed_chunk_ids

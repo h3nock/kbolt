@@ -2,6 +2,7 @@ use fs2::FileExt;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tempfile::tempdir;
 
@@ -82,6 +83,28 @@ struct CharCountDocumentSizer;
 
 impl crate::models::EmbeddingDocumentSizer for CharCountDocumentSizer {
     fn count_document_tokens(&self, text: &str) -> crate::Result<usize> {
+        Ok(text.chars().count())
+    }
+}
+
+#[derive(Default)]
+struct CountingCharDocumentSizer {
+    calls: AtomicUsize,
+}
+
+impl CountingCharDocumentSizer {
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn reset(&self) {
+        self.calls.store(0, Ordering::SeqCst);
+    }
+}
+
+impl crate::models::EmbeddingDocumentSizer for CountingCharDocumentSizer {
+    fn count_document_tokens(&self, text: &str) -> crate::Result<usize> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(text.chars().count())
     }
 }
@@ -3255,6 +3278,90 @@ fn update_embeds_chunks_when_embedder_is_configured() {
             .expect("list files");
         assert_eq!(files.len(), 1);
         assert!(files[0].embedded, "file should be fully embedded");
+    });
+}
+
+#[test]
+fn update_preflights_fresh_embedding_payload_once_before_embedding() {
+    with_kbolt_space_env(None, || {
+        let sizer = Arc::new(CountingCharDocumentSizer::default());
+        let engine = test_engine_with_embedding_runtime(
+            Arc::new(DeterministicEmbedder),
+            sizer.clone(),
+            ChunkingConfig::default(),
+        );
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+        write_text_file(&collection_path.join("guide.md"), "alpha beta\n");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update with fresh embedding");
+
+        assert_eq!(report.scanned_docs, 1);
+        assert_eq!(report.added_docs, 1);
+        assert_eq!(report.embedded_chunks, 1);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert_eq!(
+            sizer.call_count(),
+            2,
+            "fresh chunk should be counted once for chunking and once for preinsert preflight"
+        );
+    });
+}
+
+#[test]
+fn update_still_preflights_embedding_backlog_before_embedding() {
+    with_kbolt_space_env(None, || {
+        let sizer = Arc::new(CountingCharDocumentSizer::default());
+        let engine = test_engine_with_embedding_runtime(
+            Arc::new(DeterministicEmbedder),
+            sizer.clone(),
+            ChunkingConfig::default(),
+        );
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+        write_text_file(&collection_path.join("guide.md"), "alpha beta\n");
+
+        engine
+            .update(UpdateOptions {
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                no_embed: true,
+                dry_run: false,
+                verbose: false,
+            })
+            .expect("index without embeddings");
+        sizer.reset();
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("embed backlog");
+
+        assert_eq!(report.skipped_mtime_docs, 1);
+        assert_eq!(report.embedded_chunks, 1);
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert_eq!(
+            sizer.call_count(),
+            1,
+            "backlog chunks should still be preflighted before embedding"
+        );
     });
 }
 
