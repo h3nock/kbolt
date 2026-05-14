@@ -50,7 +50,7 @@ use path_utils::{
 };
 use scoring::{dense_distance_to_score, max_option};
 pub(crate) use text_helpers::retrieval_text_with_prefix;
-use text_helpers::search_text_with_canonical_neighbors;
+use text_helpers::search_text_with_loaded_canonical_neighbors;
 
 pub struct Engine {
     storage: Storage,

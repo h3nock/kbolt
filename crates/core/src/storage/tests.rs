@@ -1972,6 +1972,10 @@ fn put_get_and_hydrate_document_text() {
         generation_keys.get(&doc_id).map(String::as_str),
         Some("generation-1")
     );
+    let extractors = storage
+        .get_document_text_extractors(&[doc_id])
+        .expect("load document text extractors");
+    assert_eq!(extractors.get(&doc_id).map(String::as_str), Some("txt"));
 
     let chunk_ids = storage
         .insert_chunks(
@@ -1993,6 +1997,13 @@ fn put_get_and_hydrate_document_text() {
     assert_eq!(chunk_text.extractor_key, "txt");
     assert_eq!(chunk_text.text, "alpha café");
     assert_eq!(chunk_text.chunk.id, chunk_ids[0]);
+    let chunk_texts = storage
+        .get_canonical_chunk_texts(&[chunk_ids[0]])
+        .expect("load canonical chunk text slices");
+    assert_eq!(
+        chunk_texts.get(&chunk_ids[0]).map(String::as_str),
+        Some("alpha café")
+    );
 }
 
 #[test]

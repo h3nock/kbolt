@@ -927,22 +927,38 @@ fn finalize_search_results(
         .iter()
         .map(|candidate| candidate.doc_id)
         .collect::<Vec<_>>();
-    crate::profile::timed_search_stage("final_load_texts", || {
-        ensure_document_texts_loaded(storage, &final_doc_ids, text_by_doc)
+    let extractor_by_doc = crate::profile::timed_search_stage("final_load_text_metadata", || {
+        load_document_text_extractors(storage, &final_doc_ids, text_by_doc)
     })?;
     crate::profile::timed_search_stage("final_load_neighbors", || {
-        ensure_neighbor_chunks_loaded(storage, &candidates, text_by_doc, chunks_by_doc, chunking)
+        ensure_neighbor_chunks_loaded(
+            storage,
+            &candidates,
+            &extractor_by_doc,
+            chunks_by_doc,
+            chunking,
+        )
+    })?;
+    let final_chunk_ids =
+        collect_final_chunk_ids(&candidates, &extractor_by_doc, chunks_by_doc, chunking)?;
+    let text_by_chunk = crate::profile::timed_search_stage("final_load_chunk_texts", || {
+        storage.get_canonical_chunk_texts(&final_chunk_ids)
     })?;
 
     let mut results = Vec::new();
     for candidate in candidates {
-        let document_text = candidate_document_text(&candidate, text_by_doc)?;
-        let neighbor_window = result_neighbor_window(chunking, document_text);
-        let text = search_text_with_canonical_neighbors(
-            document_text.text.as_str(),
+        let extractor_key = extractor_by_doc.get(&candidate.doc_id).ok_or_else(|| {
+            KboltError::Internal(format!(
+                "document text metadata cache missing for {}",
+                candidate.doc_id
+            ))
+        })?;
+        let neighbor_window = result_neighbor_window(chunking, extractor_key);
+        let text = search_text_with_loaded_canonical_neighbors(
             &candidate.chunk,
             candidate_neighbors(&candidate, chunks_by_doc, neighbor_window),
             neighbor_window,
+            &text_by_chunk,
         )?;
 
         results.push(SearchResult {
@@ -988,10 +1004,36 @@ fn ensure_document_texts_loaded(
     Ok(())
 }
 
+fn load_document_text_extractors(
+    storage: &Storage,
+    doc_ids: &[i64],
+    text_by_doc: &HashMap<i64, DocumentTextRow>,
+) -> Result<HashMap<i64, String>> {
+    let mut extractor_by_doc = HashMap::new();
+    let mut missing = Vec::new();
+    for doc_id in doc_ids {
+        if extractor_by_doc.contains_key(doc_id) {
+            continue;
+        }
+
+        if let Some(document_text) = text_by_doc.get(doc_id) {
+            extractor_by_doc.insert(*doc_id, document_text.extractor_key.clone());
+        } else {
+            missing.push(*doc_id);
+        }
+    }
+
+    if !missing.is_empty() {
+        extractor_by_doc.extend(storage.get_document_text_extractors(&missing)?);
+    }
+
+    Ok(extractor_by_doc)
+}
+
 fn ensure_neighbor_chunks_loaded(
     storage: &Storage,
     candidates: &[PendingSearchCandidate],
-    text_by_doc: &HashMap<i64, DocumentTextRow>,
+    extractor_by_doc: &HashMap<i64, String>,
     chunks_by_doc: &mut HashMap<i64, Vec<ChunkRow>>,
     chunking: &crate::config::ChunkingConfig,
 ) -> Result<()> {
@@ -1001,8 +1043,13 @@ fn ensure_neighbor_chunks_loaded(
             continue;
         }
 
-        let document_text = candidate_document_text(candidate, text_by_doc)?;
-        let neighbor_window = result_neighbor_window(chunking, document_text);
+        let extractor_key = extractor_by_doc.get(&candidate.doc_id).ok_or_else(|| {
+            KboltError::Internal(format!(
+                "document text metadata cache missing for {}",
+                candidate.doc_id
+            ))
+        })?;
+        let neighbor_window = result_neighbor_window(chunking, extractor_key);
         if neighbor_window == 0 {
             continue;
         }
@@ -1027,11 +1074,41 @@ fn ensure_neighbor_chunks_loaded(
     Ok(())
 }
 
-fn result_neighbor_window(
+fn collect_final_chunk_ids(
+    candidates: &[PendingSearchCandidate],
+    extractor_by_doc: &HashMap<i64, String>,
+    chunks_by_doc: &HashMap<i64, Vec<ChunkRow>>,
     chunking: &crate::config::ChunkingConfig,
-    document_text: &DocumentTextRow,
-) -> usize {
-    resolve_policy(chunking, Some(document_text.extractor_key.as_str()), None).neighbor_window
+) -> Result<Vec<i64>> {
+    let mut chunk_ids = HashSet::new();
+    for candidate in candidates {
+        chunk_ids.insert(candidate.chunk.id);
+        let extractor_key = extractor_by_doc.get(&candidate.doc_id).ok_or_else(|| {
+            KboltError::Internal(format!(
+                "document text metadata cache missing for {}",
+                candidate.doc_id
+            ))
+        })?;
+        let neighbor_window = result_neighbor_window(chunking, extractor_key);
+        let Some(neighbors) = candidate_neighbors(candidate, chunks_by_doc, neighbor_window) else {
+            continue;
+        };
+
+        let window = neighbor_window.min(i32::MAX as usize) as i32;
+        let min_seq = candidate.chunk.seq.saturating_sub(window);
+        let max_seq = candidate.chunk.seq.saturating_add(window);
+        for chunk in neighbors {
+            if chunk.seq >= min_seq && chunk.seq <= max_seq {
+                chunk_ids.insert(chunk.id);
+            }
+        }
+    }
+
+    Ok(chunk_ids.into_iter().collect())
+}
+
+fn result_neighbor_window(chunking: &crate::config::ChunkingConfig, extractor_key: &str) -> usize {
+    resolve_policy(chunking, Some(extractor_key), None).neighbor_window
 }
 
 fn candidate_neighbors<'a>(

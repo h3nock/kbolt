@@ -1834,6 +1834,95 @@ CREATE TABLE IF NOT EXISTS document_texts (
         Ok(generation_by_doc)
     }
 
+    pub fn get_document_text_extractors(&self, doc_ids: &[i64]) -> Result<HashMap<i64, String>> {
+        if doc_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut requested = doc_ids.to_vec();
+        requested.sort_unstable();
+        requested.dedup();
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let mut extractor_by_doc = HashMap::with_capacity(requested.len());
+        for batch in requested.chunks(SQLITE_IN_CLAUSE_BATCH_SIZE) {
+            let placeholders = vec!["?"; batch.len()].join(", ");
+            let sql = format!(
+                "SELECT doc_id, extractor_key
+                 FROM document_texts
+                 WHERE doc_id IN ({placeholders})"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(batch.iter()), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (doc_id, extractor_key) = row?;
+                extractor_by_doc.insert(doc_id, extractor_key);
+            }
+        }
+
+        for doc_id in requested {
+            if !extractor_by_doc.contains_key(&doc_id) {
+                return Err(missing_document_text_error(doc_id));
+            }
+        }
+
+        Ok(extractor_by_doc)
+    }
+
+    pub fn get_canonical_chunk_texts(&self, chunk_ids: &[i64]) -> Result<HashMap<i64, String>> {
+        if chunk_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut requested = chunk_ids.to_vec();
+        requested.sort_unstable();
+        requested.dedup();
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let mut text_by_chunk = HashMap::with_capacity(requested.len());
+        for batch in requested.chunks(SQLITE_IN_CLAUSE_BATCH_SIZE) {
+            let placeholders = vec!["?"; batch.len()].join(", ");
+            let sql = format!(
+                "SELECT c.id,
+                        substr(CAST(dt.text AS BLOB), c.offset + 1, c.length)
+                 FROM chunks c
+                 JOIN document_texts dt ON dt.doc_id = c.doc_id
+                 WHERE c.id IN ({placeholders})"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(batch.iter()), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?;
+            for row in rows {
+                let (chunk_id, bytes) = row?;
+                let text = String::from_utf8(bytes).map_err(|err| {
+                    CoreError::Internal(format!(
+                        "stored canonical text slice for chunk {chunk_id} is invalid UTF-8: {err}"
+                    ))
+                })?;
+                text_by_chunk.insert(chunk_id, text);
+            }
+        }
+
+        for chunk_id in requested {
+            if !text_by_chunk.contains_key(&chunk_id) {
+                return Err(CoreError::Internal(format!(
+                    "canonical text missing for chunk {chunk_id}"
+                )));
+            }
+        }
+
+        Ok(text_by_chunk)
+    }
+
     pub fn get_chunk_text(&self, chunk_id: i64) -> Result<ChunkTextRow> {
         let conn = self
             .db
