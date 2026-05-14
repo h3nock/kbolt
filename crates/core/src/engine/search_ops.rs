@@ -691,19 +691,30 @@ impl Engine {
             };
             let representative_indices =
                 select_rerank_representatives(&candidates, rerank_count, protected_original_docs);
-            let mut rerank_doc_ids = Vec::new();
+            let mut rerank_doc_ids = Vec::with_capacity(representative_indices.len());
+            let mut rerank_chunk_ids = Vec::with_capacity(representative_indices.len());
             for &idx in &representative_indices {
                 rerank_doc_ids.push(candidates[idx].doc_id);
+                rerank_chunk_ids.push(candidates[idx].chunk.id);
             }
-            crate::profile::timed_search_stage("rerank_load_texts", || {
-                ensure_document_texts_loaded(&self.storage, &rerank_doc_ids, &mut text_by_doc)
-            })?;
+            let rerank_text_by_chunk =
+                crate::profile::timed_search_stage("rerank_load_chunk_texts", || {
+                    self.storage.get_canonical_chunk_texts(&rerank_chunk_ids)
+                })?;
 
-            let mut rerank_inputs = Vec::new();
+            let mut rerank_inputs = Vec::with_capacity(representative_indices.len());
             for &idx in &representative_indices {
                 let candidate = &candidates[idx];
-                let rerank_input = build_rerank_input(candidate, &text_by_doc)?;
-                rerank_inputs.push(rerank_input);
+                let canonical_body =
+                    rerank_text_by_chunk
+                        .get(&candidate.chunk.id)
+                        .ok_or_else(|| {
+                            KboltError::Internal(format!(
+                                "rerank canonical text cache missing for chunk {}",
+                                candidate.chunk.id
+                            ))
+                        })?;
+                rerank_inputs.push(build_rerank_input(candidate, canonical_body));
             }
             let raw_scores = match crate::profile::timed_search_stage("rerank_model", || {
                 reranker.rerank(query, &rerank_inputs)
@@ -782,26 +793,20 @@ struct PendingSearchCandidate {
     final_score: f32,
 }
 
-fn build_rerank_input(
-    candidate: &PendingSearchCandidate,
-    text_by_doc: &HashMap<i64, DocumentTextRow>,
-) -> Result<String> {
-    let document_text = candidate_document_text(candidate, text_by_doc)?;
-    let canonical_body =
-        crate::storage::chunk_text_from_canonical(document_text.text.as_str(), &candidate.chunk)?;
+fn build_rerank_input(candidate: &PendingSearchCandidate, canonical_body: &str) -> String {
     let rerank_body = crate::ingest::chunk::chunk_retrieval_body(
-        canonical_body.as_str(),
+        canonical_body,
         candidate.chunk.retrieval_prefix.as_deref(),
     );
 
-    Ok(retrieval_text_with_prefix(
+    retrieval_text_with_prefix(
         rerank_body.as_str(),
         candidate
             .title_source
             .semantic_title(candidate.title.as_str()),
         candidate.heading.as_deref(),
         true,
-    ))
+    )
 }
 
 /// Selects one representative candidate per unique document for reranking.
@@ -1006,24 +1011,6 @@ fn finalize_search_results(
     Ok(results)
 }
 
-fn ensure_document_texts_loaded(
-    storage: &Storage,
-    doc_ids: &[i64],
-    text_by_doc: &mut HashMap<i64, DocumentTextRow>,
-) -> Result<()> {
-    let missing = doc_ids
-        .iter()
-        .copied()
-        .filter(|doc_id| !text_by_doc.contains_key(doc_id))
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
-        return Ok(());
-    }
-
-    text_by_doc.extend(storage.get_document_texts(&missing)?);
-    Ok(())
-}
-
 fn load_document_text_extractors(
     storage: &Storage,
     doc_ids: &[i64],
@@ -1141,19 +1128,6 @@ fn candidate_neighbors<'a>(
     }
 
     chunks_by_doc.get(&candidate.doc_id)
-}
-
-fn candidate_document_text<'a>(
-    candidate: &PendingSearchCandidate,
-    text_by_doc: &'a HashMap<i64, DocumentTextRow>,
-) -> Result<&'a DocumentTextRow> {
-    text_by_doc.get(&candidate.doc_id).ok_or_else(|| {
-        KboltError::Internal(format!(
-            "document text cache missing for {}",
-            candidate.doc_id
-        ))
-        .into()
-    })
 }
 
 #[cfg(test)]
