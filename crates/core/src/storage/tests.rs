@@ -1996,6 +1996,67 @@ fn put_get_and_hydrate_document_text() {
 }
 
 #[test]
+fn get_document_text_generation_keys_batches_large_inputs() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+
+    let doc_count = super::SQLITE_IN_CLAUSE_BATCH_SIZE + 5;
+    let mut doc_ids = Vec::with_capacity(doc_count);
+    for index in 0..doc_count {
+        let doc_id = storage
+            .upsert_document(
+                collection_id,
+                &format!("doc-{index}.md"),
+                &format!("Doc {index}"),
+                DocumentTitleSource::Extracted,
+                &format!("hash-{index}"),
+                "2026-03-01T10:00:00Z",
+            )
+            .expect("insert document");
+        storage
+            .put_document_text(
+                doc_id,
+                "md",
+                &format!("hash-{index}"),
+                &format!("text-hash-{index}"),
+                &format!("generation-{index}"),
+                &format!("body {index}"),
+            )
+            .expect("put document text");
+        doc_ids.push(doc_id);
+    }
+
+    let generation_keys = storage
+        .get_document_text_generation_keys(&doc_ids)
+        .expect("load generation keys");
+
+    assert_eq!(generation_keys.len(), doc_count);
+    assert_eq!(
+        generation_keys.get(&doc_ids[0]).map(String::as_str),
+        Some("generation-0")
+    );
+    let expected_last = format!("generation-{}", doc_count - 1);
+    assert_eq!(
+        generation_keys
+            .get(doc_ids.last().expect("last doc id"))
+            .map(String::as_str),
+        Some(expected_last.as_str())
+    );
+}
+
+#[test]
 fn replace_document_generation_writes_text_and_chunks_atomically() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");

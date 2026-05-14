@@ -22,6 +22,7 @@ const SPACES_DIR: &str = "spaces";
 const TANTIVY_DIR_NAME: &str = "tantivy";
 const USEARCH_FILENAME: &str = "vectors.usearch";
 const SCHEMA_VERSION: i64 = 3;
+const SQLITE_IN_CLAUSE_BATCH_SIZE: usize = 500;
 
 #[derive(Clone, Copy)]
 enum UsearchSaveMode {
@@ -1812,20 +1813,22 @@ CREATE TABLE IF NOT EXISTS document_texts (
             .db
             .lock()
             .map_err(|_| CoreError::poisoned("database"))?;
-        let placeholders = vec!["?"; requested.len()].join(", ");
-        let sql = format!(
-            "SELECT doc_id, generation_key
-             FROM document_texts
-             WHERE doc_id IN ({placeholders})"
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(requested.iter()), |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut generation_by_doc = HashMap::new();
-        for row in rows {
-            let (doc_id, generation_key) = row?;
-            generation_by_doc.insert(doc_id, generation_key);
+        let mut generation_by_doc = HashMap::with_capacity(requested.len());
+        for batch in requested.chunks(SQLITE_IN_CLAUSE_BATCH_SIZE) {
+            let placeholders = vec!["?"; batch.len()].join(", ");
+            let sql = format!(
+                "SELECT doc_id, generation_key
+                 FROM document_texts
+                 WHERE doc_id IN ({placeholders})"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(batch.iter()), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (doc_id, generation_key) = row?;
+                generation_by_doc.insert(doc_id, generation_key);
+            }
         }
 
         Ok(generation_by_doc)
