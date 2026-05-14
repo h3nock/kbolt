@@ -1385,6 +1385,32 @@ mod tests {
     }
 
     #[test]
+    fn deep_variant_aggregation_preserves_original_candidates_before_truncation() {
+        let variant_results = vec![
+            vec![
+                ranked_chunk(10, 1.0, Some(1.0), None),
+                ranked_chunk(20, 0.8, Some(0.8), None),
+            ],
+            vec![
+                ranked_chunk(30, 1.0, None, Some(1.0)),
+                ranked_chunk(40, 0.9, None, Some(0.9)),
+            ],
+            vec![
+                ranked_chunk(30, 1.0, None, Some(1.0)),
+                ranked_chunk(40, 0.9, None, Some(0.9)),
+            ],
+        ];
+
+        let fused = aggregate_deep_variant_rankings(variant_results, 1, 2, 0.0);
+
+        assert_eq!(fused.len(), 2);
+        assert!(
+            fused.iter().any(|item| item.original_rank.is_some()),
+            "expected at least one original-query candidate to survive truncation: {fused:?}"
+        );
+    }
+
+    #[test]
     fn select_deep_variant_indices_prefers_non_duplicate_generated_variants() {
         let variants = vec![
             "original".to_string(),
@@ -1617,7 +1643,7 @@ fn aggregate_deep_variant_rankings(
         }
     }
 
-    finalize_ranked_chunks(aggregates.into_values().collect(), limit, min_score)
+    finalize_deep_variant_rankings(aggregates.into_values().collect(), limit, min_score)
 }
 
 fn finalize_ranked_chunks(
@@ -1632,6 +1658,62 @@ fn finalize_ranked_chunks(
         .filter(|item| item.score >= min_score)
         .take(limit)
         .collect()
+}
+
+fn finalize_deep_variant_rankings(
+    mut ranked: Vec<RankedChunk>,
+    limit: usize,
+    min_score: f32,
+) -> Vec<RankedChunk> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    ranked.sort_by(|left, right| right.score.total_cmp(&left.score));
+    normalize_ranked_chunks_scores(&mut ranked);
+    let filtered = ranked
+        .into_iter()
+        .filter(|item| item.score >= min_score)
+        .collect::<Vec<_>>();
+
+    let protected_original_count = protected_original_doc_count(limit).min(
+        filtered
+            .iter()
+            .filter(|item| item.original_rank.is_some())
+            .count(),
+    );
+    let mut selected = Vec::with_capacity(limit);
+    let mut selected_chunks = HashSet::new();
+
+    let mut original_candidates = filtered
+        .iter()
+        .filter(|item| item.original_rank.is_some())
+        .collect::<Vec<_>>();
+    original_candidates.sort_by(|left, right| {
+        left.original_rank
+            .cmp(&right.original_rank)
+            .then_with(|| right.score.total_cmp(&left.score))
+    });
+    for item in original_candidates
+        .into_iter()
+        .take(protected_original_count)
+    {
+        if selected_chunks.insert(item.chunk_id) {
+            selected.push(item.clone());
+        }
+    }
+
+    for item in filtered {
+        if selected.len() >= limit {
+            break;
+        }
+        if selected_chunks.insert(item.chunk_id) {
+            selected.push(item);
+        }
+    }
+
+    selected.sort_by(|left, right| right.score.total_cmp(&left.score));
+    selected
 }
 
 fn select_deep_variant_indices(
