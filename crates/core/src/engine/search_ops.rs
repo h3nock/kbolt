@@ -118,6 +118,7 @@ impl Engine {
                 document_ids,
                 chunk_count,
                 chunk_key_filter: Mutex::new(None),
+                bm25_reloaded: Mutex::new(false),
             });
         }
         Ok(scopes)
@@ -162,6 +163,23 @@ impl Engine {
         Ok(allowed_keys)
     }
 
+    fn reload_bm25_for_scope(&self, scope: &SearchTargetScope) -> Result<()> {
+        let mut reloaded = scope
+            .bm25_reloaded
+            .lock()
+            .map_err(|_| CoreError::poisoned("search scope bm25 reload"))?;
+        if *reloaded {
+            return Ok(());
+        }
+
+        crate::profile::timed_search_stage("bm25_reader_reload", || {
+            self.storage.reload_tantivy_reader(&scope.space)
+        })?;
+        crate::profile::increment_search_count("bm25_reader_reloads", 1);
+        *reloaded = true;
+        Ok(())
+    }
+
     pub(super) fn rank_chunks_for_mode(
         &self,
         mode: &SearchMode,
@@ -195,9 +213,10 @@ impl Engine {
                 ("body", boosts.body),
                 ("filepath", boosts.filepath),
             ];
+            self.reload_bm25_for_scope(scope)?;
             let hits = crate::profile::timed_search_stage("bm25_query", || {
                 if scope.filtered {
-                    self.storage.query_bm25_in_documents(
+                    self.storage.query_bm25_in_documents_cached(
                         &scope.space,
                         query,
                         fields,
@@ -205,7 +224,8 @@ impl Engine {
                         limit,
                     )
                 } else {
-                    self.storage.query_bm25(&scope.space, query, fields, limit)
+                    self.storage
+                        .query_bm25_cached(&scope.space, query, fields, limit)
                 }
             })?;
             for hit in hits {

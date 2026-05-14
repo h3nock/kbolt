@@ -94,6 +94,7 @@ struct SearchTargetScope {
     document_ids: Vec<i64>,
     chunk_count: usize,
     chunk_key_filter: Mutex<Option<Arc<HashSet<u64>>>>,
+    bm25_reloaded: Mutex<bool>,
 }
 
 #[derive(Debug, Clone)]

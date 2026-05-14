@@ -2218,7 +2218,17 @@ CREATE TABLE IF NOT EXISTS document_texts (
         fields: &[(&str, f32)],
         limit: usize,
     ) -> Result<Vec<BM25Hit>> {
-        self.query_bm25_filtered(space, query, fields, None, limit)
+        self.query_bm25_filtered(space, query, fields, None, limit, true)
+    }
+
+    pub(crate) fn query_bm25_cached(
+        &self,
+        space: &str,
+        query: &str,
+        fields: &[(&str, f32)],
+        limit: usize,
+    ) -> Result<Vec<BM25Hit>> {
+        self.query_bm25_filtered(space, query, fields, None, limit, false)
     }
 
     pub fn query_bm25_in_documents(
@@ -2233,7 +2243,22 @@ CREATE TABLE IF NOT EXISTS document_texts (
             return Ok(Vec::new());
         }
 
-        self.query_bm25_filtered(space, query, fields, Some(document_ids), limit)
+        self.query_bm25_filtered(space, query, fields, Some(document_ids), limit, true)
+    }
+
+    pub(crate) fn query_bm25_in_documents_cached(
+        &self,
+        space: &str,
+        query: &str,
+        fields: &[(&str, f32)],
+        document_ids: &[i64],
+        limit: usize,
+    ) -> Result<Vec<BM25Hit>> {
+        if document_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.query_bm25_filtered(space, query, fields, Some(document_ids), limit, false)
     }
 
     fn query_bm25_filtered(
@@ -2243,6 +2268,7 @@ CREATE TABLE IF NOT EXISTS document_texts (
         fields: &[(&str, f32)],
         document_ids: Option<&[i64]>,
         limit: usize,
+        reload_reader: bool,
     ) -> Result<Vec<BM25Hit>> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -2294,7 +2320,9 @@ CREATE TABLE IF NOT EXISTS document_texts (
         } else {
             parsed_query
         };
-        space_indexes.tantivy_reader.reload()?;
+        if reload_reader {
+            space_indexes.tantivy_reader.reload()?;
+        }
         let searcher = space_indexes.tantivy_reader.searcher();
         let docs = searcher.search(&parsed_query, &TopDocs::with_limit(limit))?;
 
@@ -2314,6 +2342,12 @@ CREATE TABLE IF NOT EXISTS document_texts (
         }
 
         Ok(hits)
+    }
+
+    pub(crate) fn reload_tantivy_reader(&self, space: &str) -> Result<()> {
+        let space_indexes = self.get_space_indexes(space)?;
+        space_indexes.tantivy_reader.reload()?;
+        Ok(())
     }
 
     pub fn commit_tantivy(&self, space: &str) -> Result<()> {
