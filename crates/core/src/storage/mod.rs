@@ -1739,29 +1739,46 @@ CREATE TABLE IF NOT EXISTS document_texts (
         requested.sort_unstable();
         requested.dedup();
 
+        let text_by_doc = self.get_existing_document_texts(&requested)?;
+        for doc_id in requested {
+            if !text_by_doc.contains_key(&doc_id) {
+                return Err(missing_document_text_error(doc_id));
+            }
+        }
+
+        Ok(text_by_doc)
+    }
+
+    pub fn get_existing_document_texts(
+        &self,
+        doc_ids: &[i64],
+    ) -> Result<HashMap<i64, DocumentTextRow>> {
+        if doc_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut requested = doc_ids.to_vec();
+        requested.sort_unstable();
+        requested.dedup();
+
         let conn = self
             .db
             .lock()
             .map_err(|_| CoreError::poisoned("database"))?;
-
-        let placeholders = vec!["?"; requested.len()].join(", ");
-        let sql = format!(
-            "SELECT doc_id, extractor_key, source_hash, text_hash, generation_key, text, created
-             FROM document_texts
-             WHERE doc_id IN ({placeholders})
-             ORDER BY doc_id ASC"
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(requested.iter()), decode_document_text_row)?;
         let mut text_by_doc = HashMap::new();
-        for row in rows {
-            let row = row?;
-            text_by_doc.insert(row.doc_id, row);
-        }
-
-        for doc_id in requested {
-            if !text_by_doc.contains_key(&doc_id) {
-                return Err(missing_document_text_error(doc_id));
+        for batch in requested.chunks(SQLITE_IN_CLAUSE_BATCH_SIZE) {
+            let placeholders = vec!["?"; batch.len()].join(", ");
+            let sql = format!(
+                "SELECT doc_id, extractor_key, source_hash, text_hash, generation_key, text, created
+                 FROM document_texts
+                 WHERE doc_id IN ({placeholders})
+                 ORDER BY doc_id ASC"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(batch.iter()), decode_document_text_row)?;
+            for row in rows {
+                let row = row?;
+                text_by_doc.insert(row.doc_id, row);
             }
         }
 
@@ -3637,7 +3654,7 @@ fn validate_text_span(
     Ok(end)
 }
 
-fn missing_document_text_error(doc_id: i64) -> CoreError {
+pub(crate) fn missing_document_text_error(doc_id: i64) -> CoreError {
     KboltError::Internal(format!(
         "document {doc_id} is missing persisted canonical text; rebuild the kbolt cache"
     ))

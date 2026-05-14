@@ -230,34 +230,37 @@ impl Engine {
                 .map(|record| record.chunk.id)
                 .expect("non-empty backlog should have a last chunk id");
 
+            let backlog_doc_ids = backlog
+                .iter()
+                .filter(|record| !failed_chunk_ids.contains(&record.chunk.id))
+                .map(|record| record.chunk.doc_id)
+                .collect::<Vec<_>>();
+            let document_text_cache =
+                crate::profile::timed_update_stage("embedding_backlog_read", || {
+                    self.storage.get_existing_document_texts(&backlog_doc_ids)
+                })?;
+
             let mut pending = Vec::new();
-            let mut document_text_cache = HashMap::new();
             for record in backlog {
                 if failed_chunk_ids.contains(&record.chunk.id) {
                     continue;
                 }
 
                 let full_path = record.collection_path.join(&record.doc_path);
-                let read_started = Instant::now();
-                let document_text = match document_text_cache.entry(record.chunk.doc_id) {
-                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        match self.storage.get_document_text(record.chunk.doc_id) {
-                            Ok(document_text) => entry.insert(document_text),
-                            Err(err) => {
-                                report.errors.push(file_error(
-                                    Some(full_path.clone()),
-                                    format!("embed canonical text load failed: {err}"),
-                                ));
-                                failed_docs.insert(update_doc_key(
-                                    &record.space_name,
-                                    &record.collection_path,
-                                    &record.doc_path,
-                                ));
-                                continue;
-                            }
-                        }
-                    }
+                let Some(document_text) = document_text_cache.get(&record.chunk.doc_id) else {
+                    report.errors.push(file_error(
+                        Some(full_path.clone()),
+                        format!(
+                            "embed canonical text load failed: {}",
+                            crate::storage::missing_document_text_error(record.chunk.doc_id)
+                        ),
+                    ));
+                    failed_docs.insert(update_doc_key(
+                        &record.space_name,
+                        &record.collection_path,
+                        &record.doc_path,
+                    ));
+                    continue;
                 };
                 let chunk_canonical_text = match crate::storage::chunk_text_from_canonical(
                     document_text.text.as_str(),
@@ -277,10 +280,6 @@ impl Engine {
                         continue;
                     }
                 };
-                crate::profile::record_update_stage(
-                    "embedding_backlog_read",
-                    read_started.elapsed(),
-                );
                 let mut text = crate::ingest::chunk::chunk_retrieval_body(
                     chunk_canonical_text.as_str(),
                     record.chunk.retrieval_prefix.as_deref(),

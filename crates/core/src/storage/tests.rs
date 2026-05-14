@@ -2007,6 +2007,69 @@ fn put_get_and_hydrate_document_text() {
 }
 
 #[test]
+fn get_existing_document_texts_omits_missing_rows() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let first_doc = storage
+        .upsert_document(
+            collection_id,
+            "src/first.rs",
+            "first",
+            DocumentTitleSource::Extracted,
+            "hash-1",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert first doc");
+    let second_doc = storage
+        .upsert_document(
+            collection_id,
+            "src/second.rs",
+            "second",
+            DocumentTitleSource::Extracted,
+            "hash-2",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert second doc");
+    storage
+        .put_document_text(
+            first_doc,
+            "txt",
+            "hash-1",
+            "text-hash-1",
+            "generation-1",
+            "alpha",
+        )
+        .expect("put first document text");
+
+    let existing = storage
+        .get_existing_document_texts(&[first_doc, second_doc])
+        .expect("load existing document texts");
+    assert_eq!(existing.len(), 1);
+    assert_eq!(
+        existing.get(&first_doc).map(|row| row.text.as_str()),
+        Some("alpha")
+    );
+    assert!(!existing.contains_key(&second_doc));
+
+    let err = storage
+        .get_document_texts(&[first_doc, second_doc])
+        .expect_err("strict document text load should fail");
+    assert!(err.to_string().contains("missing persisted canonical text"));
+}
+
+#[test]
 fn get_document_text_generation_keys_batches_large_inputs() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");

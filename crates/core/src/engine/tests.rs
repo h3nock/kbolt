@@ -4411,6 +4411,77 @@ fn update_still_preflights_embedding_backlog_before_embedding() {
 }
 
 #[test]
+fn update_embedding_backlog_continues_when_one_chunk_span_is_invalid() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_embedder(Arc::new(DeterministicEmbedder));
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+        write_text_file(&collection_path.join("good.md"), "helpful setup guide\n");
+        write_text_file(
+            &collection_path.join("invalid.md"),
+            "orphan canonical text\n",
+        );
+
+        engine
+            .update(UpdateOptions {
+                space: Some("work".to_string()),
+                collections: vec!["api".to_string()],
+                no_embed: true,
+                dry_run: false,
+                verbose: false,
+            })
+            .expect("index without embeddings");
+
+        let space = engine.storage().get_space("work").expect("get work space");
+        let collection = engine
+            .storage()
+            .get_collection(space.id, "api")
+            .expect("get api collection");
+        let invalid_doc = engine
+            .storage()
+            .get_document_by_path(collection.id, "invalid.md")
+            .expect("query invalid document")
+            .expect("invalid document exists");
+        {
+            let conn = rusqlite::Connection::open(engine.config().cache_dir.join("meta.sqlite"))
+                .expect("open metadata db");
+            conn.execute(
+                "UPDATE chunks SET length = 999 WHERE doc_id = ?1",
+                [invalid_doc.id],
+            )
+            .expect("corrupt chunk span");
+        }
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("embed backlog");
+
+        assert_eq!(report.skipped_mtime_docs, 2);
+        assert_eq!(report.failed_docs, 1);
+        assert_eq!(report.embedded_chunks, 1);
+        assert!(
+            report.errors.iter().any(|error| {
+                error.path.ends_with("invalid.md")
+                    && error.error.contains("exceeds document text length")
+            }),
+            "expected invalid canonical span error, got {:?}",
+            report.errors
+        );
+        assert_eq!(
+            engine
+                .storage()
+                .count_embedded_chunks(Some(space.id))
+                .expect("count embedded chunks"),
+            1
+        );
+    });
+}
+
+#[test]
 fn update_isolates_buffered_embedding_failures() {
     with_kbolt_space_env(None, || {
         let engine = test_engine_with_embedder(Arc::new(SelectiveFailureEmbedder));
