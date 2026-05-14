@@ -76,23 +76,32 @@ impl Engine {
         targets: &[UpdateTarget],
         collection_scoped: bool,
     ) -> Result<Vec<SearchTargetScope>> {
-        let mut grouped: Vec<(String, Vec<i64>)> = Vec::new();
+        let mut grouped: Vec<(i64, String, Vec<i64>)> = Vec::new();
         for target in targets {
-            if let Some((_, collection_ids)) =
-                grouped.iter_mut().find(|(space, _)| space == &target.space)
+            if let Some((_, _, collection_ids)) = grouped
+                .iter_mut()
+                .find(|(space_id, _, _)| *space_id == target.collection.space_id)
             {
                 collection_ids.push(target.collection.id);
             } else {
-                grouped.push((target.space.clone(), vec![target.collection.id]));
+                grouped.push((
+                    target.collection.space_id,
+                    target.space.clone(),
+                    vec![target.collection.id],
+                ));
             }
         }
 
         let mut scopes = Vec::with_capacity(grouped.len());
-        for (space, mut collection_ids) in grouped {
+        for (space_id, space, mut collection_ids) in grouped {
             collection_ids.sort_unstable();
             collection_ids.dedup();
 
-            let filtered = collection_scoped
+            let selected_collections_cover_space = !collection_scoped
+                || crate::profile::timed_search_stage("scope_collection_count", || {
+                    self.storage.count_collections_in_space(space_id)
+                })? == collection_ids.len();
+            let filtered = (collection_scoped && !selected_collections_cover_space)
                 || self
                     .storage
                     .has_inactive_documents_in_collections(&collection_ids)?;

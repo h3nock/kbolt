@@ -793,6 +793,20 @@ CREATE TABLE IF NOT EXISTS document_texts (
         Ok(collections)
     }
 
+    pub fn count_collections_in_space(&self, space_id: i64) -> Result<usize> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+        let _space_name = lookup_space_name(&conn, space_id)?;
+
+        query_count(
+            &conn,
+            "SELECT COUNT(*) FROM collections WHERE space_id = ?1",
+            params![space_id],
+        )
+    }
+
     pub fn delete_collection(&self, space_id: i64, name: &str) -> Result<()> {
         let conn = self
             .db

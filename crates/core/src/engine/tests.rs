@@ -3290,8 +3290,9 @@ fn whole_space_search_scope_avoids_filters_until_inactive_docs_exist() {
         let collection_scopes = engine
             .search_target_scopes(&targets, true)
             .expect("build collection-filtered search scope");
-        assert!(collection_scopes[0].filtered);
-        assert_eq!(collection_scopes[0].document_ids.len(), 2);
+        assert!(!collection_scopes[0].filtered);
+        assert!(collection_scopes[0].document_ids.is_empty());
+        assert_eq!(collection_scopes[0].chunk_count, 2);
 
         std::fs::remove_file(&stale).expect("remove stale file");
         engine
@@ -3310,6 +3311,65 @@ fn whole_space_search_scope_avoids_filters_until_inactive_docs_exist() {
         assert!(scopes[0].filtered);
         assert_eq!(scopes[0].document_ids.len(), 1);
         assert_eq!(scopes[0].chunk_count, 1);
+
+        let collection_scopes = engine
+            .search_target_scopes(&targets, true)
+            .expect("build collection-filtered search scope after deactivate");
+        assert!(collection_scopes[0].filtered);
+        assert_eq!(collection_scopes[0].document_ids.len(), 1);
+        assert_eq!(collection_scopes[0].chunk_count, 1);
+    });
+}
+
+#[test]
+fn collection_search_scope_filters_subsets_and_skips_filters_for_explicit_whole_space() {
+    with_kbolt_space_env(None, || {
+        let engine = test_engine_with_default_space(None);
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let api_path = root.path().join("work-api");
+        let noise_path = root.path().join("work-noise");
+        std::fs::create_dir_all(&api_path).expect("create api dir");
+        std::fs::create_dir_all(&noise_path).expect("create noise dir");
+        add_collection_fixture(&engine, "work", "api", api_path.clone());
+        add_collection_fixture(&engine, "work", "noise", noise_path.clone());
+
+        write_text_file(&api_path.join("api.md"), "api scoped token\n");
+        write_text_file(&noise_path.join("noise.md"), "noise scoped token\n");
+        engine
+            .update(update_options(Some("work"), &["api", "noise"]))
+            .expect("initial update");
+
+        let api_collections = vec!["api".to_string()];
+        let api_targets = engine
+            .resolve_targets(TargetScope {
+                space: Some("work"),
+                collections: &api_collections,
+            })
+            .expect("resolve api target");
+        let api_scopes = engine
+            .search_target_scopes(&api_targets, true)
+            .expect("build api search scope");
+        assert_eq!(api_scopes.len(), 1);
+        assert!(api_scopes[0].filtered);
+        assert_eq!(api_scopes[0].document_ids.len(), 1);
+        assert_eq!(api_scopes[0].chunk_count, 1);
+
+        let all_collections = vec!["api".to_string(), "noise".to_string()];
+        let all_targets = engine
+            .resolve_targets(TargetScope {
+                space: Some("work"),
+                collections: &all_collections,
+            })
+            .expect("resolve explicit whole-space targets");
+        let all_scopes = engine
+            .search_target_scopes(&all_targets, true)
+            .expect("build explicit whole-space search scope");
+        assert_eq!(all_scopes.len(), 1);
+        assert!(!all_scopes[0].filtered);
+        assert!(all_scopes[0].document_ids.is_empty());
+        assert_eq!(all_scopes[0].chunk_count, 2);
     });
 }
 
