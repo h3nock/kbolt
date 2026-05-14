@@ -1892,6 +1892,11 @@ CREATE TABLE IF NOT EXISTS document_texts (
             let placeholders = vec!["?"; batch.len()].join(", ");
             let sql = format!(
                 "SELECT c.id,
+                        c.offset,
+                        c.length,
+                        length(CAST(dt.text AS BLOB)),
+                        substr(CAST(dt.text AS BLOB), c.offset + 1, 1),
+                        substr(CAST(dt.text AS BLOB), c.offset + c.length + 1, 1),
                         substr(CAST(dt.text AS BLOB), c.offset + 1, c.length)
                  FROM chunks c
                  JOIN document_texts dt ON dt.doc_id = c.doc_id
@@ -1899,15 +1904,27 @@ CREATE TABLE IF NOT EXISTS document_texts (
             );
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(params_from_iter(batch.iter()), |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, Vec<u8>>(6)?,
+                ))
             })?;
             for row in rows {
-                let (chunk_id, bytes) = row?;
-                let text = String::from_utf8(bytes).map_err(|err| {
-                    CoreError::Internal(format!(
-                        "stored canonical text slice for chunk {chunk_id} is invalid UTF-8: {err}"
-                    ))
-                })?;
+                let (chunk_id, offset, length, document_len, start_byte, end_byte, bytes) = row?;
+                let text = canonical_chunk_slice_from_bytes(
+                    chunk_id,
+                    offset,
+                    length,
+                    document_len,
+                    start_byte,
+                    end_byte,
+                    bytes,
+                )?;
                 text_by_chunk.insert(chunk_id, text);
             }
         }
@@ -3510,6 +3527,81 @@ fn decode_non_negative_usize(
     }
 
     Ok(value as usize)
+}
+
+fn canonical_chunk_slice_from_bytes(
+    chunk_id: i64,
+    offset_value: i64,
+    length_value: i64,
+    document_len_value: i64,
+    start_byte: Vec<u8>,
+    end_byte: Vec<u8>,
+    bytes: Vec<u8>,
+) -> Result<String> {
+    if offset_value < 0 {
+        return Err(CoreError::Internal(format!(
+            "chunk {chunk_id} offset must not be negative"
+        )));
+    }
+    if length_value < 0 {
+        return Err(CoreError::Internal(format!(
+            "chunk {chunk_id} length must not be negative"
+        )));
+    }
+    if document_len_value < 0 {
+        return Err(CoreError::Internal(format!(
+            "document text length for chunk {chunk_id} must not be negative"
+        )));
+    }
+
+    let offset = offset_value as usize;
+    let length = length_value as usize;
+    let document_len = document_len_value as usize;
+    let end = offset.checked_add(length).ok_or_else(|| {
+        CoreError::Internal(format!("chunk {chunk_id} text span overflows usize"))
+    })?;
+    if end > document_len {
+        return Err(CoreError::Internal(format!(
+            "chunk {chunk_id} text span {offset}..{end} exceeds document text length {document_len}"
+        )));
+    }
+    if bytes.len() != length {
+        return Err(CoreError::Internal(format!(
+            "canonical text slice for chunk {chunk_id} returned {} bytes, expected {length}",
+            bytes.len()
+        )));
+    }
+    validate_sqlite_utf8_boundary(chunk_id, offset, document_len, &start_byte)?;
+    validate_sqlite_utf8_boundary(chunk_id, end, document_len, &end_byte)?;
+
+    String::from_utf8(bytes).map_err(|err| {
+        CoreError::Internal(format!(
+            "stored canonical text slice for chunk {chunk_id} is invalid UTF-8: {err}"
+        ))
+    })
+}
+
+fn validate_sqlite_utf8_boundary(
+    chunk_id: i64,
+    index: usize,
+    document_len: usize,
+    byte_at_index: &[u8],
+) -> Result<()> {
+    if index == 0 || index == document_len {
+        return Ok(());
+    }
+    if byte_at_index.len() != 1 {
+        return Err(CoreError::Internal(format!(
+            "chunk {chunk_id} text boundary byte at {index} is missing"
+        )));
+    }
+    if (0x80..0xC0).contains(&byte_at_index[0]) {
+        return Err(CoreError::Internal(format!(
+            "chunk {chunk_id} text span is not on UTF-8 boundaries"
+        )));
+    }
+
+    Ok(())
 }
 
 pub(crate) fn chunk_text_from_canonical(document_text: &str, chunk: &ChunkRow) -> Result<String> {

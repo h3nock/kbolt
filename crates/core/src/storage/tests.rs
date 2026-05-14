@@ -2374,6 +2374,105 @@ fn get_chunk_text_rejects_invalid_canonical_span() {
 }
 
 #[test]
+fn get_canonical_chunk_texts_rejects_invalid_stored_spans() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage
+        .create_space("work", None)
+        .expect("create work space");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let doc_id = storage
+        .upsert_document(
+            collection_id,
+            "src/lib.rs",
+            "lib",
+            DocumentTitleSource::Extracted,
+            "hash-1",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc");
+    storage
+        .put_document_text(
+            doc_id,
+            "txt",
+            "hash-1",
+            "text-hash-1",
+            "generation-1",
+            "éclair",
+        )
+        .expect("put document text");
+    let chunk_ids = storage
+        .insert_chunks(
+            doc_id,
+            &[
+                super::ChunkInsert {
+                    seq: 0,
+                    offset: 0,
+                    length: 99,
+                    heading: None,
+                    kind: FinalChunkKind::Paragraph,
+                    retrieval_prefix: None,
+                },
+                super::ChunkInsert {
+                    seq: 1,
+                    offset: 0,
+                    length: 1,
+                    heading: None,
+                    kind: FinalChunkKind::Paragraph,
+                    retrieval_prefix: None,
+                },
+                super::ChunkInsert {
+                    seq: 2,
+                    offset: 1,
+                    length: 0,
+                    heading: None,
+                    kind: FinalChunkKind::Paragraph,
+                    retrieval_prefix: None,
+                },
+            ],
+        )
+        .expect("insert chunks");
+    let negative_chunk_id = {
+        let conn = storage.db.lock().expect("lock db");
+        conn.execute(
+            "INSERT INTO chunks (doc_id, seq, offset, length, heading, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![doc_id, 3, -1, 1, Option::<String>::None, "paragraph"],
+        )
+        .expect("insert invalid chunk span");
+        conn.last_insert_rowid()
+    };
+
+    let err = storage
+        .get_canonical_chunk_texts(&[chunk_ids[0]])
+        .expect_err("truncated SQL slice should fail");
+    assert!(err.to_string().contains("exceeds document text length"));
+
+    let err = storage
+        .get_canonical_chunk_texts(&[chunk_ids[1]])
+        .expect_err("invalid utf8 boundary should fail");
+    assert!(err.to_string().contains("not on UTF-8 boundaries"));
+
+    let err = storage
+        .get_canonical_chunk_texts(&[chunk_ids[2]])
+        .expect_err("zero-length invalid utf8 boundary should fail");
+    assert!(err.to_string().contains("not on UTF-8 boundaries"));
+
+    let err = storage
+        .get_canonical_chunk_texts(&[negative_chunk_id])
+        .expect_err("negative chunk span should fail");
+    assert!(err.to_string().contains("offset must not be negative"));
+}
+
+#[test]
 fn get_chunk_text_reports_missing_document_text() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
