@@ -38,6 +38,8 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Build release binary
         run: cargo build --locked --release --bin kbolt --target ${{ matrix.target }}
