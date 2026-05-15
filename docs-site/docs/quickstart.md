@@ -68,9 +68,9 @@ If you want the same default retrieval path with stronger ranking quality, rerun
 kbolt search "rust error handling" --rerank
 ```
 
-## 6. Read the underlying files
+## 6. Read indexed content
 
-Search gets you the matching documents and snippets. Use the read commands to inspect the source files directly:
+Search gets you the matching documents and snippets. Use the read commands to inspect the indexed document text:
 
 ```bash
 kbolt ls my_docs
@@ -99,6 +99,6 @@ At this point you should have:
 
 - Add more directories or spaces with [Add and organize content](guides/add-and-organize-content.md).
 - Search better with [Search effectively](guides/search-effectively.md).
-- Read the underlying files with [Read source files](guides/read-source-files.md).
+- Read indexed content with [Read indexed content](guides/read-source-files.md).
 - Learn the freshness options in [Keep indexes fresh](guides/keep-indexes-fresh.md).
 - If you want to use the index from Claude Desktop, go to [Use with Claude Desktop](guides/use-with-claude-desktop.md).

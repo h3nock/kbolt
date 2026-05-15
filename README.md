@@ -64,10 +64,10 @@ Use `--deep` when the query may not share vocabulary with the best matching docu
 
 ## What kbolt supports
 
-- Index Markdown, plaintext, and source code (Rust, Python, JS/TS, Go, Java, Kotlin, C/C++, C#, Ruby, PHP, Swift) from one or more local directories
+- Index Markdown, plaintext, HTML, digital PDFs, and source code (Rust, Python, JS/TS, Go, Java, Kotlin, C/C++, C#, Ruby, PHP, Swift) from one or more local directories
 - Group collections into spaces and scope search with `--space` or `--collection`
 - Search with keyword, semantic, hybrid reranked, and deep retrieval modes
-- Read underlying source files with `kbolt get`, `kbolt multi-get`, and `kbolt ls`
+- Read indexed content with `kbolt get`, `kbolt multi-get`, and `kbolt ls`
 - Check indexed content and disk usage with `kbolt status`
 - Re-scan and re-index changed files with `kbolt update`
 - Keep collections fresh automatically on macOS and Linux with `kbolt watch enable`

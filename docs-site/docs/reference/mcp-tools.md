@@ -73,7 +73,7 @@ Use the CLI when you are working directly in a terminal.
 Use MCP when another tool or agent needs to:
 
 - search your indexed content
-- read underlying files
+- read indexed content
 - check status programmatically
 
 ## Related pages

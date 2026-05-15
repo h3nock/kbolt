@@ -54,7 +54,7 @@ This command is usually launched by the MCP client rather than typed by hand in 
 
 ## Related pages
 
-- [Read source files](../../guides/read-source-files.md)
+- [Read indexed content](../../guides/read-source-files.md)
 - [Use with Claude Desktop](../../guides/use-with-claude-desktop.md)
 - [MCP tools](../mcp-tools.md)
 - [Quickstart](../../quickstart.md)

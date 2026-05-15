@@ -40,7 +40,7 @@ This keeps collection behavior local and predictable.
 To add one pattern:
 
 ```bash
-kbolt ignore add my_docs "*.pdf"
+kbolt ignore add my_docs "*.zip"
 ```
 
 To inspect the current rules for a collection:
@@ -52,7 +52,7 @@ kbolt ignore show my_docs
 To remove one exact pattern:
 
 ```bash
-kbolt ignore remove my_docs "*.pdf"
+kbolt ignore remove my_docs "*.zip"
 ```
 
 To edit the ignore file directly:

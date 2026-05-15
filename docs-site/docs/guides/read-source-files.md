@@ -1,6 +1,6 @@
-# Read source files
+# Read indexed content
 
-Search returns matching documents and snippets. Use the read commands when you want the underlying file content.
+Search returns matching documents and snippets. Use the read commands when you want the indexed document text. For extracted formats such as HTML and digital PDFs, this is the canonical text stored in the index rather than raw file bytes.
 
 ## List files in a collection
 

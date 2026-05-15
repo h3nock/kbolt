@@ -113,7 +113,7 @@ Key subcommands:
 Examples:
 
 ```bash
-kbolt ignore add my_docs "*.pdf"
+kbolt ignore add my_docs "*.zip"
 kbolt ignore show my_docs
 kbolt ignore edit my_docs
 ```
