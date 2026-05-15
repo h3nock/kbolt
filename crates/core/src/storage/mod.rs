@@ -11,7 +11,7 @@ use tantivy::collector::TopDocs;
 use tantivy::query::{
     BooleanQuery, BoostQuery, ConstScoreQuery, Occur, Query, TermQuery, TermSetQuery,
 };
-use tantivy::schema::{Field, IndexRecordOption, Value, FAST, INDEXED, STORED, TEXT};
+use tantivy::schema::{Field, IndexRecordOption, FAST, INDEXED, STORED, TEXT};
 use tantivy::tokenizer::TokenStream;
 use tantivy::{Index, IndexReader, IndexWriter, TantivyDocument, Term};
 use usearch::{IndexOptions, MetricKind, ScalarKind};
@@ -2375,18 +2375,26 @@ CREATE TABLE IF NOT EXISTS document_texts (
         let docs = searcher.search(&parsed_query, &TopDocs::with_limit(limit))?;
 
         let mut hits = Vec::with_capacity(docs.len());
+        let chunk_id_field_name = schema.get_field_entry(space_indexes.fields.chunk_id).name();
+        let mut chunk_id_columns = HashMap::new();
         for (score, address) in docs {
-            let doc = searcher.doc::<TantivyDocument>(address)?;
-            let chunk_id = doc
-                .get_first(space_indexes.fields.chunk_id)
-                .and_then(|value| value.as_u64())
-                .ok_or_else(|| {
-                    CoreError::Internal("tantivy hit missing chunk_id field".to_string())
-                })?;
-            hits.push(BM25Hit {
-                chunk_id: chunk_id as i64,
-                score,
-            });
+            let chunk_id_column = match chunk_id_columns.entry(address.segment_ord) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let column = searcher
+                        .segment_reader(address.segment_ord)
+                        .fast_fields()
+                        .u64(chunk_id_field_name)?;
+                    entry.insert(column)
+                }
+            };
+            let chunk_id = chunk_id_column.first(address.doc_id).ok_or_else(|| {
+                CoreError::Internal("tantivy hit missing chunk_id fast field".to_string())
+            })?;
+            let chunk_id = i64::try_from(chunk_id).map_err(|_| {
+                CoreError::Internal(format!("tantivy chunk_id exceeds i64 range: {chunk_id}"))
+            })?;
+            hits.push(BM25Hit { chunk_id, score });
         }
 
         Ok(hits)

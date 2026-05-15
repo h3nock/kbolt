@@ -153,6 +153,51 @@ fn tantivy_index_and_query_returns_ranked_hits() {
 }
 
 #[test]
+fn tantivy_query_returns_persisted_chunk_ids_across_commits() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    storage.create_space("work", None).expect("create work");
+
+    storage
+        .index_tantivy(
+            "work",
+            &[super::TantivyEntry {
+                chunk_id: 101,
+                doc_id: 1,
+                filepath: "api/first.md".to_string(),
+                semantic_title: None,
+                heading: None,
+                body: "sharedneedle sharedneedle sharedneedle".to_string(),
+            }],
+        )
+        .expect("index first entry");
+    storage.commit_tantivy("work").expect("commit first entry");
+    storage
+        .index_tantivy(
+            "work",
+            &[super::TantivyEntry {
+                chunk_id: 202,
+                doc_id: 2,
+                filepath: "api/second.md".to_string(),
+                semantic_title: None,
+                heading: None,
+                body: "sharedneedle".to_string(),
+            }],
+        )
+        .expect("index second entry");
+    storage.commit_tantivy("work").expect("commit second entry");
+
+    let hits = storage
+        .query_bm25("work", "sharedneedle", &[("body", 1.0)], 10)
+        .expect("query bm25");
+
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].chunk_id, 101);
+    assert_eq!(hits[1].chunk_id, 202);
+    assert!(hits[0].score > hits[1].score);
+}
+
+#[test]
 fn bm25_document_filter_does_not_change_scores() {
     let tmp = tempdir().expect("create tempdir");
     let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
