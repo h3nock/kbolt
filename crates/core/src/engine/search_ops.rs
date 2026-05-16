@@ -608,35 +608,18 @@ impl Engine {
             .iter()
             .map(|candidate| candidate.chunk_id)
             .collect::<Vec<_>>();
-        let chunk_rows = crate::profile::timed_search_stage("sqlite_get_chunks", || {
-            self.storage.get_chunks(&chunk_ids)
-        })?;
-        let chunk_by_id = chunk_rows
+        let chunk_document_rows =
+            crate::profile::timed_search_stage("sqlite_get_chunk_documents", || {
+                self.storage.get_chunks_with_documents(&chunk_ids)
+            })?;
+        let chunk_document_by_id = chunk_document_rows
             .into_iter()
-            .map(|chunk| (chunk.id, chunk))
+            .map(|(chunk, document)| (chunk.id, (chunk, document)))
             .collect::<HashMap<_, _>>();
-
-        let unique_doc_ids = chunk_by_id
-            .values()
-            .map(|chunk| chunk.doc_id)
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let docs_by_id: HashMap<i64, DocumentRow> =
-            crate::profile::timed_search_stage("sqlite_get_documents", || {
-                self.storage.get_documents_by_ids(&unique_doc_ids)
-            })?
-            .into_iter()
-            .map(|doc| (doc.id, doc))
-            .collect();
 
         let mut candidates = Vec::new();
         for ranked in ranked_chunks {
-            let Some(chunk) = chunk_by_id.get(&ranked.chunk_id) else {
-                continue;
-            };
-
-            let Some(document) = docs_by_id.get(&chunk.doc_id) else {
+            let Some((chunk, document)) = chunk_document_by_id.get(&ranked.chunk_id) else {
                 continue;
             };
             if !document.active {

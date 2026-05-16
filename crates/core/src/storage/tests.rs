@@ -66,6 +66,91 @@ fn storage_instances_can_share_cache_before_any_tantivy_write() {
 }
 
 #[test]
+fn get_chunks_with_documents_returns_joined_metadata() {
+    let tmp = tempdir().expect("create tempdir");
+    let storage = Storage::new(&tmp.path().join("cache")).expect("create storage");
+    let space_id = storage.create_space("work", None).expect("create work");
+    let collection_id = storage
+        .create_collection(
+            space_id,
+            "api",
+            std::path::Path::new("/tmp/api"),
+            None,
+            None,
+        )
+        .expect("create collection");
+    let doc_a = storage
+        .upsert_document(
+            collection_id,
+            "src/a.rs",
+            "a.rs",
+            DocumentTitleSource::Extracted,
+            "hash-a",
+            "2026-03-01T10:00:00Z",
+        )
+        .expect("insert doc a");
+    let doc_b = storage
+        .upsert_document(
+            collection_id,
+            "src/b.rs",
+            "b.rs",
+            DocumentTitleSource::Extracted,
+            "hash-b",
+            "2026-03-01T11:00:00Z",
+        )
+        .expect("insert doc b");
+    let chunk_a = storage
+        .insert_chunks(
+            doc_a,
+            &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 5,
+                heading: Some("Intro".to_string()),
+                kind: FinalChunkKind::Paragraph,
+                retrieval_prefix: None,
+            }],
+        )
+        .expect("insert chunk a")[0];
+    let chunk_b = storage
+        .insert_chunks(
+            doc_b,
+            &[super::ChunkInsert {
+                seq: 0,
+                offset: 0,
+                length: 4,
+                heading: None,
+                kind: FinalChunkKind::Paragraph,
+                retrieval_prefix: Some("context".to_string()),
+            }],
+        )
+        .expect("insert chunk b")[0];
+    storage
+        .deactivate_document(doc_b)
+        .expect("deactivate doc b");
+
+    let rows = storage
+        .get_chunks_with_documents(&[chunk_b, chunk_a])
+        .expect("get joined rows");
+    assert_eq!(rows.len(), 2);
+
+    let (_, doc_a_row) = rows
+        .iter()
+        .find(|(chunk, _)| chunk.id == chunk_a)
+        .expect("chunk a row");
+    assert_eq!(doc_a_row.path, "src/a.rs");
+    assert!(doc_a_row.active);
+
+    let (chunk_b_row, doc_b_row) = rows
+        .iter()
+        .find(|(chunk, _)| chunk.id == chunk_b)
+        .expect("chunk b row");
+    assert_eq!(chunk_b_row.retrieval_prefix.as_deref(), Some("context"));
+    assert_eq!(doc_b_row.path, "src/b.rs");
+    assert!(!doc_b_row.active);
+}
+
+#[test]
 fn commit_tantivy_releases_writer_for_other_processes() {
     let tmp = tempdir().expect("create tempdir");
     let cache_dir = tmp.path().join("cache");

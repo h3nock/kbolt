@@ -1472,6 +1472,39 @@ CREATE TABLE IF NOT EXISTS document_texts (
         Ok(chunks)
     }
 
+    pub fn get_chunks_with_documents(
+        &self,
+        chunk_ids: &[i64],
+    ) -> Result<Vec<(ChunkRow, DocumentRow)>> {
+        if chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self
+            .db
+            .lock()
+            .map_err(|_| CoreError::poisoned("database"))?;
+
+        let placeholders = vec!["?"; chunk_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT c.id, c.doc_id, c.seq, c.offset, c.length, c.heading, c.kind, c.retrieval_prefix,
+                    d.id, d.collection_id, d.path, d.title, d.title_source, d.hash, d.modified, d.active, d.deactivated_at, d.fts_dirty
+             FROM chunks c
+             JOIN documents d ON d.id = c.doc_id
+             WHERE c.id IN ({placeholders})
+             ORDER BY c.id ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(chunk_ids.iter()), |row| {
+            Ok((
+                decode_chunk_row_at(row, 0)?,
+                decode_document_row_at(row, 8)?,
+            ))
+        })?;
+        let rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn get_active_search_scope_summary_in_collections(
         &self,
         collection_ids: &[i64],
@@ -3507,22 +3540,26 @@ fn decode_collection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Collection
 }
 
 fn decode_document_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentRow> {
-    let raw_title_source: String = row.get(4)?;
+    decode_document_row_at(row, 0)
+}
+
+fn decode_document_row_at(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<DocumentRow> {
+    let raw_title_source: String = row.get(base + 4)?;
     let title_source = DocumentTitleSource::from_sql(&raw_title_source).map_err(|err| {
-        Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(err))
+        Error::FromSqlConversionFailure(base + 4, rusqlite::types::Type::Text, Box::new(err))
     })?;
-    let active_value: i64 = row.get(7)?;
-    let fts_dirty_value: i64 = row.get(9)?;
+    let active_value: i64 = row.get(base + 7)?;
+    let fts_dirty_value: i64 = row.get(base + 9)?;
     Ok(DocumentRow {
-        id: row.get(0)?,
-        collection_id: row.get(1)?,
-        path: row.get(2)?,
-        title: row.get(3)?,
+        id: row.get(base)?,
+        collection_id: row.get(base + 1)?,
+        path: row.get(base + 2)?,
+        title: row.get(base + 3)?,
         title_source,
-        hash: row.get(5)?,
-        modified: row.get(6)?,
+        hash: row.get(base + 5)?,
+        modified: row.get(base + 6)?,
         active: active_value != 0,
-        deactivated_at: row.get(8)?,
+        deactivated_at: row.get(base + 8)?,
         fts_dirty: fts_dirty_value != 0,
     })
 }
@@ -3540,21 +3577,25 @@ fn decode_document_text_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Documen
 }
 
 fn decode_chunk_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRow> {
-    let offset_value: i64 = row.get(3)?;
-    let length_value: i64 = row.get(4)?;
-    let kind_raw: String = row.get(6)?;
+    decode_chunk_row_at(row, 0)
+}
+
+fn decode_chunk_row_at(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<ChunkRow> {
+    let offset_value: i64 = row.get(base + 3)?;
+    let length_value: i64 = row.get(base + 4)?;
+    let kind_raw: String = row.get(base + 6)?;
     let kind = FinalChunkKind::try_from(kind_raw.as_str()).map_err(|err| {
-        Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(err))
+        Error::FromSqlConversionFailure(base + 6, rusqlite::types::Type::Text, Box::new(err))
     })?;
     Ok(ChunkRow {
-        id: row.get(0)?,
-        doc_id: row.get(1)?,
-        seq: row.get(2)?,
-        offset: decode_non_negative_usize(offset_value, 3, "chunks.offset")?,
-        length: decode_non_negative_usize(length_value, 4, "chunks.length")?,
-        heading: row.get(5)?,
+        id: row.get(base)?,
+        doc_id: row.get(base + 1)?,
+        seq: row.get(base + 2)?,
+        offset: decode_non_negative_usize(offset_value, base + 3, "chunks.offset")?,
+        length: decode_non_negative_usize(length_value, base + 4, "chunks.length")?,
+        heading: row.get(base + 5)?,
         kind,
-        retrieval_prefix: row.get(7)?,
+        retrieval_prefix: row.get(base + 7)?,
     })
 }
 
