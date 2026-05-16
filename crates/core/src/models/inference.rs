@@ -550,7 +550,7 @@ impl Reranker for LlamaCppEndpointReranker {
         if docs.is_empty() {
             return Ok(Vec::new());
         }
-        if self.parallel_requests <= 1 || docs.len() <= 1 {
+        if self.parallel_requests <= 1 || docs.len() <= self.parallel_requests {
             return self.rerank_single_request(query, docs);
         }
 
