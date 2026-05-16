@@ -14,7 +14,7 @@ fs2.workspace = true
 hf-hub.workspace = true
 httpdate.workspace = true
 ignore.workspace = true
-kbolt-types = { path = "../types", version = "0.1.2" }
+kbolt-types = { path = "../types", version = "0.1.5" }
 notify-debouncer-full.workspace = true
 pdf-extract.workspace = true
 pulldown-cmark.workspace = true
