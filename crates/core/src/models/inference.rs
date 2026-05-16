@@ -20,6 +20,8 @@ use crate::models::variants_expander::{ChatVariantsExpander, VARIANTS_GRAMMAR};
 use crate::models::{Embedder, EmbeddingDocumentSizer, EmbeddingInputKind, Expander, Reranker};
 use crate::{RecoveryNoticeSink, Result};
 
+const LLAMA_CPP_RERANK_PARALLEL_REQUESTS: usize = 4;
+
 #[cfg(test)]
 use crate::models::chat::build_chat_payload;
 #[cfg(test)]
@@ -548,7 +550,16 @@ impl Reranker for LlamaCppEndpointReranker {
         if docs.is_empty() {
             return Ok(Vec::new());
         }
+        if docs.len() <= LLAMA_CPP_RERANK_PARALLEL_REQUESTS {
+            return self.rerank_single_request(query, docs);
+        }
 
+        self.rerank_parallel_requests(query, docs)
+    }
+}
+
+impl LlamaCppEndpointReranker {
+    fn rerank_single_request(&self, query: &str, docs: &[String]) -> Result<Vec<f32>> {
         let payload = json!({
             "model": self.model,
             "query": query,
@@ -566,6 +577,41 @@ impl Reranker for LlamaCppEndpointReranker {
             .into_items()?;
         finalize_rerank_scores(scored, docs.len())
     }
+
+    fn rerank_parallel_requests(&self, query: &str, docs: &[String]) -> Result<Vec<f32>> {
+        let shard_count = LLAMA_CPP_RERANK_PARALLEL_REQUESTS.min(docs.len());
+        let ranges = shard_ranges(docs.len(), shard_count);
+
+        std::thread::scope(|scope| {
+            let handles = ranges
+                .into_iter()
+                .map(|(start, end)| {
+                    scope.spawn(move || self.rerank_single_request(query, &docs[start..end]))
+                })
+                .collect::<Vec<_>>();
+
+            let mut scores = Vec::with_capacity(docs.len());
+            for handle in handles {
+                let mut shard_scores = handle.join().map_err(|_| {
+                    crate::CoreError::Domain(KboltError::Inference(
+                        "llama.cpp rerank shard worker panicked".to_string(),
+                    ))
+                })??;
+                scores.append(&mut shard_scores);
+            }
+            Ok(scores)
+        })
+    }
+}
+
+fn shard_ranges(len: usize, shard_count: usize) -> Vec<(usize, usize)> {
+    (0..shard_count)
+        .filter_map(|shard| {
+            let start = shard * len / shard_count;
+            let end = (shard + 1) * len / shard_count;
+            (start < end).then_some((start, end))
+        })
+        .collect()
 }
 
 impl Reranker for OpenAiCompatibleEndpointReranker {
@@ -985,6 +1031,58 @@ mod tests {
         (format!("http://{addr}"), rx)
     }
 
+    fn serve_llama_rerank_shards(expected_requests: usize) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("server address");
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for _ in 0..expected_requests {
+                let (mut stream, _) = listener.accept().expect("accept client");
+                let body = read_full_request(&mut stream);
+                let payload: Value = serde_json::from_slice(&body).expect("parse rerank payload");
+                let docs = payload
+                    .get("documents")
+                    .and_then(Value::as_array)
+                    .expect("documents array")
+                    .iter()
+                    .map(|doc| doc.as_str().expect("document string").to_string())
+                    .collect::<Vec<_>>();
+                for doc in &docs {
+                    tx.send(doc.clone()).expect("send captured document");
+                }
+
+                let results = docs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, doc)| {
+                        let score = doc
+                            .strip_prefix("doc ")
+                            .expect("doc prefix")
+                            .parse::<f32>()
+                            .expect("doc score");
+                        json!({"index": index, "relevance_score": score})
+                    })
+                    .collect::<Vec<_>>();
+                let payload = json!({
+                    "model": "qwen3-reranker",
+                    "object": "list",
+                    "results": results,
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+        });
+
+        (format!("http://{addr}"), rx)
+    }
+
     fn read_full_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
         let raw = read_raw_request(stream);
         let header_end = raw
@@ -1170,6 +1268,49 @@ mod tests {
             .rerank("query", &["doc one".to_string(), "doc two".to_string()])
             .expect("rerank");
         assert_eq!(scores, vec![0.2, 0.9]);
+    }
+
+    #[test]
+    fn llama_cpp_native_reranker_shards_large_batches() {
+        let (base_url, captured_docs) = serve_llama_rerank_shards(4);
+        let mut config = base_config();
+        config.providers.insert(
+            "local_rerank".to_string(),
+            ProviderProfileConfig::LlamaCppServer {
+                operation: ProviderOperation::Reranking,
+                base_url,
+                model: "qwen3-reranker".to_string(),
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        );
+        config.roles.reranker = Some(RerankerRoleConfig {
+            provider: "local_rerank".to_string(),
+        });
+
+        let built = build_inference_clients(&config).expect("build clients");
+        let reranker = built.reranker.expect("reranker should exist");
+        let docs = (0..10)
+            .map(|index| format!("doc {index}"))
+            .collect::<Vec<_>>();
+        let scores = reranker.rerank("query", &docs).expect("rerank");
+
+        assert_eq!(
+            scores,
+            (0..10).map(|index| index as f32).collect::<Vec<_>>()
+        );
+
+        let mut captured = (0..10)
+            .map(|_| captured_docs.recv_timeout(Duration::from_secs(1)))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("captured shard docs");
+        captured.sort_by_key(|doc| {
+            doc.strip_prefix("doc ")
+                .expect("doc prefix")
+                .parse::<usize>()
+                .expect("doc index")
+        });
+        assert_eq!(captured, docs);
     }
 
     #[test]
