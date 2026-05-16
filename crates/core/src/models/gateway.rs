@@ -6,7 +6,10 @@ use crate::config::{
     Config, EmbedderRoleConfig, ExpanderRoleConfig, ExpanderSamplingConfig, ProviderOperation,
     ProviderProfileConfig, RerankerRoleConfig,
 };
+use crate::local::{MANAGED_RERANKER_PARALLEL_REQUESTS, MANAGED_RERANK_PROVIDER};
 use crate::Result;
+
+const DEFAULT_RERANK_PARALLEL_REQUESTS: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GatewayProviderKind {
@@ -45,6 +48,7 @@ pub(crate) struct EmbedderBinding {
 pub(crate) struct RerankerBinding {
     pub provider_name: String,
     pub deployment: ProviderDeployment,
+    pub parallel_requests: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -133,10 +137,26 @@ fn resolve_reranker_binding(
         providers,
         allowed_operations,
     )?;
+    let parallel_requests = providers
+        .get(&provider_name)
+        .and_then(ProviderProfileConfig::parallel_requests)
+        .unwrap_or_else(|| default_rerank_parallel_requests(&provider_name, &deployment));
     Ok(RerankerBinding {
         provider_name,
         deployment,
+        parallel_requests,
     })
+}
+
+fn default_rerank_parallel_requests(provider_name: &str, deployment: &ProviderDeployment) -> usize {
+    if provider_name == MANAGED_RERANK_PROVIDER
+        && deployment.kind == GatewayProviderKind::LlamaCppServer
+        && deployment.operation == ProviderOperation::Reranking
+    {
+        MANAGED_RERANKER_PARALLEL_REQUESTS
+    } else {
+        DEFAULT_RERANK_PARALLEL_REQUESTS
+    }
 }
 
 fn resolve_expander_binding(
@@ -236,6 +256,7 @@ mod tests {
                 operation: ProviderOperation::Embedding,
                 base_url: "http://127.0.0.1:8101".to_string(),
                 model: "embeddinggemma".to_string(),
+                parallel_requests: None,
                 timeout_ms: 30_000,
                 max_retries: 2,
             },
@@ -295,6 +316,7 @@ mod tests {
                     timeout_ms: 30_000,
                     max_retries: 2,
                 },
+                parallel_requests: 1,
             })
         );
         assert_eq!(
@@ -303,6 +325,64 @@ mod tests {
                 .expect("expander binding should exist")
                 .provider_name,
             "remote_rerank"
+        );
+    }
+
+    #[test]
+    fn resolve_gateway_bindings_carries_llama_rerank_parallel_requests() {
+        let mut config = base_config();
+        config.providers.insert(
+            "local_rerank".to_string(),
+            ProviderProfileConfig::LlamaCppServer {
+                operation: ProviderOperation::Reranking,
+                base_url: "http://127.0.0.1:8102".to_string(),
+                model: "qwen3-reranker".to_string(),
+                parallel_requests: Some(4),
+                timeout_ms: 30_000,
+                max_retries: 2,
+            },
+        );
+        config.roles.reranker = Some(RerankerRoleConfig {
+            provider: "local_rerank".to_string(),
+        });
+
+        let bindings = resolve_inference_gateway_bindings(&config).expect("resolve bindings");
+
+        assert_eq!(
+            bindings
+                .reranker
+                .expect("reranker binding should exist")
+                .parallel_requests,
+            4
+        );
+    }
+
+    #[test]
+    fn resolve_gateway_bindings_defaults_legacy_managed_rerank_to_managed_parallelism() {
+        let mut config = base_config();
+        config.providers.insert(
+            MANAGED_RERANK_PROVIDER.to_string(),
+            ProviderProfileConfig::LlamaCppServer {
+                operation: ProviderOperation::Reranking,
+                base_url: "http://127.0.0.1:8102".to_string(),
+                model: "qwen3-reranker".to_string(),
+                parallel_requests: None,
+                timeout_ms: 30_000,
+                max_retries: 2,
+            },
+        );
+        config.roles.reranker = Some(RerankerRoleConfig {
+            provider: MANAGED_RERANK_PROVIDER.to_string(),
+        });
+
+        let bindings = resolve_inference_gateway_bindings(&config).expect("resolve bindings");
+
+        assert_eq!(
+            bindings
+                .reranker
+                .expect("reranker binding should exist")
+                .parallel_requests,
+            MANAGED_RERANKER_PARALLEL_REQUESTS
         );
     }
 
@@ -328,6 +408,7 @@ mod tests {
                 operation: ProviderOperation::ChatCompletion,
                 base_url: "http://127.0.0.1:8103".to_string(),
                 model: "qwen3".to_string(),
+                parallel_requests: None,
                 timeout_ms: 30_000,
                 max_retries: 2,
             },

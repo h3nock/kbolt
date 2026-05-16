@@ -20,8 +20,6 @@ use crate::models::variants_expander::{ChatVariantsExpander, VARIANTS_GRAMMAR};
 use crate::models::{Embedder, EmbeddingDocumentSizer, EmbeddingInputKind, Expander, Reranker};
 use crate::{RecoveryNoticeSink, Result};
 
-const LLAMA_CPP_RERANK_PARALLEL_REQUESTS: usize = 4;
-
 #[cfg(test)]
 use crate::models::chat::build_chat_payload;
 #[cfg(test)]
@@ -51,6 +49,7 @@ struct LlamaCppEndpointReranker {
     client: HttpJsonClient,
     model: String,
     endpoint_suffix: &'static str,
+    parallel_requests: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -250,6 +249,7 @@ fn build_reranker_from_binding(
                 ),
                 model: binding.deployment.model.clone(),
                 endpoint_suffix: llama_cpp_reranking_endpoint_suffix(),
+                parallel_requests: binding.parallel_requests,
             })),
             GatewayProviderKind::OpenAiCompatible => {
                 Ok(Arc::new(OpenAiCompatibleEndpointReranker {
@@ -550,7 +550,7 @@ impl Reranker for LlamaCppEndpointReranker {
         if docs.is_empty() {
             return Ok(Vec::new());
         }
-        if docs.len() <= LLAMA_CPP_RERANK_PARALLEL_REQUESTS {
+        if self.parallel_requests <= 1 || docs.len() <= 1 {
             return self.rerank_single_request(query, docs);
         }
 
@@ -579,24 +579,38 @@ impl LlamaCppEndpointReranker {
     }
 
     fn rerank_parallel_requests(&self, query: &str, docs: &[String]) -> Result<Vec<f32>> {
-        let shard_count = LLAMA_CPP_RERANK_PARALLEL_REQUESTS.min(docs.len());
+        let shard_count = self.parallel_requests.min(docs.len());
         let ranges = shard_ranges(docs.len(), shard_count);
 
         std::thread::scope(|scope| {
             let handles = ranges
                 .into_iter()
                 .map(|(start, end)| {
-                    scope.spawn(move || self.rerank_single_request(query, &docs[start..end]))
+                    (
+                        (start, end),
+                        scope.spawn(move || self.rerank_single_request(query, &docs[start..end])),
+                    )
                 })
                 .collect::<Vec<_>>();
 
             let mut scores = Vec::with_capacity(docs.len());
-            for handle in handles {
-                let mut shard_scores = handle.join().map_err(|_| {
-                    crate::CoreError::Domain(KboltError::Inference(
-                        "llama.cpp rerank shard worker panicked".to_string(),
-                    ))
-                })??;
+            let total_shards = handles.len();
+            for (shard_index, ((start, end), handle)) in handles.into_iter().enumerate() {
+                let shard_label = format!(
+                    "llama.cpp rerank shard {}/{} docs {start}..{end}",
+                    shard_index + 1,
+                    total_shards
+                );
+                let shard_result = handle.join().map_err(|_| {
+                    crate::CoreError::Domain(KboltError::Inference(format!(
+                        "{shard_label} worker panicked"
+                    )))
+                })?;
+                let mut shard_scores = shard_result.map_err(|err| {
+                    crate::CoreError::Domain(KboltError::Inference(format!(
+                        "{shard_label} failed: {err}"
+                    )))
+                })?;
                 scores.append(&mut shard_scores);
             }
             Ok(scores)
@@ -908,7 +922,8 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
-    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc, Condvar, Mutex};
     use std::time::Duration;
 
     use super::*;
@@ -1031,56 +1046,98 @@ mod tests {
         (format!("http://{addr}"), rx)
     }
 
-    fn serve_llama_rerank_shards(expected_requests: usize) -> (String, mpsc::Receiver<String>) {
+    fn serve_llama_rerank_shards(
+        expected_requests: usize,
+    ) -> (String, mpsc::Receiver<String>, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let addr = listener.local_addr().expect("server address");
         let (tx, rx) = mpsc::channel();
+        let max_inflight = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new((Mutex::new(0usize), Condvar::new()));
+        let max_inflight_for_server = Arc::clone(&max_inflight);
         std::thread::spawn(move || {
             for _ in 0..expected_requests {
                 let (mut stream, _) = listener.accept().expect("accept client");
-                let body = read_full_request(&mut stream);
-                let payload: Value = serde_json::from_slice(&body).expect("parse rerank payload");
-                let docs = payload
-                    .get("documents")
-                    .and_then(Value::as_array)
-                    .expect("documents array")
-                    .iter()
-                    .map(|doc| doc.as_str().expect("document string").to_string())
-                    .collect::<Vec<_>>();
-                for doc in &docs {
-                    tx.send(doc.clone()).expect("send captured document");
-                }
+                let tx = tx.clone();
+                let active = Arc::clone(&active);
+                let max_inflight = Arc::clone(&max_inflight_for_server);
+                let gate = Arc::clone(&gate);
+                std::thread::spawn(move || {
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_inflight.fetch_max(current, Ordering::SeqCst);
 
-                let results = docs
-                    .iter()
-                    .enumerate()
-                    .map(|(index, doc)| {
-                        let score = doc
-                            .strip_prefix("doc ")
-                            .expect("doc prefix")
-                            .parse::<f32>()
-                            .expect("doc score");
-                        json!({"index": index, "relevance_score": score})
+                    let body = read_full_request(&mut stream);
+                    let payload: Value =
+                        serde_json::from_slice(&body).expect("parse rerank payload");
+                    let docs = payload
+                        .get("documents")
+                        .and_then(Value::as_array)
+                        .expect("documents array")
+                        .iter()
+                        .map(|doc| doc.as_str().expect("document string").to_string())
+                        .collect::<Vec<_>>();
+                    for doc in &docs {
+                        tx.send(doc.clone()).expect("send captured document");
+                    }
+
+                    let (lock, cvar) = &*gate;
+                    let mut arrived = lock.lock().expect("lock shard gate");
+                    *arrived += 1;
+                    cvar.notify_all();
+                    let _ = cvar
+                        .wait_timeout_while(arrived, Duration::from_secs(1), |arrived| {
+                            *arrived < expected_requests
+                        })
+                        .expect("wait for concurrent shard arrivals");
+
+                    if docs.iter().any(|doc| doc == "fail") {
+                        let payload = r#"{"error":"boom"}"#;
+                        let response = format!(
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            payload.len(),
+                            payload
+                        );
+                        stream
+                            .write_all(response.as_bytes())
+                            .expect("write failure response");
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        return;
+                    }
+
+                    let mut results = docs
+                        .iter()
+                        .enumerate()
+                        .map(|(index, doc)| {
+                            let score = doc
+                                .strip_prefix("doc ")
+                                .expect("doc prefix")
+                                .parse::<f32>()
+                                .expect("doc score");
+                            json!({"index": index, "relevance_score": score})
+                        })
+                        .collect::<Vec<_>>();
+                    results.reverse();
+                    let payload = json!({
+                        "model": "qwen3-reranker",
+                        "object": "list",
+                        "results": results,
                     })
-                    .collect::<Vec<_>>();
-                let payload = json!({
-                    "model": "qwen3-reranker",
-                    "object": "list",
-                    "results": results,
-                })
-                .to_string();
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    payload.len(),
-                    payload
-                );
-                stream
-                    .write_all(response.as_bytes())
-                    .expect("write response");
+                    .to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        payload.len(),
+                        payload
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .expect("write response");
+                    active.fetch_sub(1, Ordering::SeqCst);
+                });
             }
         });
 
-        (format!("http://{addr}"), rx)
+        (format!("http://{addr}"), rx, max_inflight)
     }
 
     fn read_full_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
@@ -1184,6 +1241,7 @@ mod tests {
                 operation: ProviderOperation::Embedding,
                 base_url,
                 model: "embeddinggemma".to_string(),
+                parallel_requests: None,
                 timeout_ms: 5_000,
                 max_retries: 0,
             },
@@ -1254,6 +1312,7 @@ mod tests {
                 operation: ProviderOperation::Reranking,
                 base_url: serve_once(200, body),
                 model: "qwen3-reranker".to_string(),
+                parallel_requests: None,
                 timeout_ms: 5_000,
                 max_retries: 0,
             },
@@ -1272,7 +1331,7 @@ mod tests {
 
     #[test]
     fn llama_cpp_native_reranker_shards_large_batches() {
-        let (base_url, captured_docs) = serve_llama_rerank_shards(4);
+        let (base_url, captured_docs, max_inflight) = serve_llama_rerank_shards(4);
         let mut config = base_config();
         config.providers.insert(
             "local_rerank".to_string(),
@@ -1280,6 +1339,7 @@ mod tests {
                 operation: ProviderOperation::Reranking,
                 base_url,
                 model: "qwen3-reranker".to_string(),
+                parallel_requests: Some(4),
                 timeout_ms: 5_000,
                 max_retries: 0,
             },
@@ -1311,6 +1371,50 @@ mod tests {
                 .expect("doc index")
         });
         assert_eq!(captured, docs);
+        assert!(
+            max_inflight.load(Ordering::SeqCst) > 1,
+            "expected concurrent shard requests"
+        );
+    }
+
+    #[test]
+    fn llama_cpp_native_reranker_returns_shard_errors() {
+        let (base_url, _captured_docs, _max_inflight) = serve_llama_rerank_shards(2);
+        let mut config = base_config();
+        config.providers.insert(
+            "local_rerank".to_string(),
+            ProviderProfileConfig::LlamaCppServer {
+                operation: ProviderOperation::Reranking,
+                base_url,
+                model: "qwen3-reranker".to_string(),
+                parallel_requests: Some(2),
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        );
+        config.roles.reranker = Some(RerankerRoleConfig {
+            provider: "local_rerank".to_string(),
+        });
+
+        let built = build_inference_clients(&config).expect("build clients");
+        let reranker = built.reranker.expect("reranker should exist");
+        let err = reranker
+            .rerank(
+                "query",
+                &[
+                    "doc 0".to_string(),
+                    "doc 1".to_string(),
+                    "fail".to_string(),
+                    "doc 3".to_string(),
+                ],
+            )
+            .expect_err("shard failure should fail rerank");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("llama.cpp rerank shard") && message.contains("failed"),
+            "unexpected error: {message}"
+        );
     }
 
     #[test]
@@ -1393,6 +1497,7 @@ mod tests {
                 operation: ProviderOperation::ChatCompletion,
                 base_url: serve_once(200, body),
                 model: "qwen3-1.7b".to_string(),
+                parallel_requests: None,
                 timeout_ms: 5_000,
                 max_retries: 0,
             },
@@ -1434,6 +1539,7 @@ mod tests {
                 operation: ProviderOperation::ChatCompletion,
                 base_url,
                 model: "qwen3-1.7b".to_string(),
+                parallel_requests: None,
                 timeout_ms: 5_000,
                 max_retries: 0,
             },

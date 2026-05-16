@@ -71,6 +71,7 @@ fn status_marks_http_endpoint_as_ready_when_server_responds() {
             operation: ProviderOperation::Embedding,
             base_url: serve_status(200, r#"{"ok":true}"#),
             model: "embeddinggemma".to_string(),
+            parallel_requests: None,
             timeout_ms: 5_000,
             max_retries: 0,
         },

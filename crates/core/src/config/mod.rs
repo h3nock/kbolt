@@ -23,6 +23,7 @@ const DEFAULT_CODE_CHUNK_BOUNDARY_OVERLAP_TOKENS: usize = 24;
 const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 32;
 const DEFAULT_INFERENCE_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_INFERENCE_MAX_RETRIES: u32 = 2;
+const MAX_PROVIDER_PARALLEL_REQUESTS: usize = 64;
 const DEFAULT_LOCAL_EXPANDER_MAX_TOKENS: usize = 600;
 const DEFAULT_EXPANDER_SEED: u32 = 0;
 const DEFAULT_EXPANDER_TEMPERATURE: f32 = 0.7;
@@ -80,12 +81,14 @@ impl ProviderOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProviderProfileConfig {
     LlamaCppServer {
         operation: ProviderOperation,
         base_url: String,
         model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parallel_requests: Option<usize>,
         #[serde(default = "default_inference_timeout_ms")]
         timeout_ms: u64,
         #[serde(default = "default_inference_max_retries")]
@@ -149,6 +152,15 @@ impl ProviderProfileConfig {
             | Self::OpenAiCompatible { max_retries, .. } => *max_retries,
         }
     }
+
+    pub fn parallel_requests(&self) -> Option<usize> {
+        match self {
+            Self::LlamaCppServer {
+                parallel_requests, ..
+            } => *parallel_requests,
+            Self::OpenAiCompatible { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -175,6 +187,7 @@ pub struct EmbedderRoleConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RerankerRoleConfig {
     pub provider: String,
 }
@@ -608,7 +621,33 @@ fn validate_provider_profile(scope: &str, profile: &ProviderProfileConfig) -> Re
         profile.model(),
         profile.api_key_env(),
         profile.timeout_ms(),
-    )
+    )?;
+    if let Some(parallel_requests) = profile.parallel_requests() {
+        validate_provider_parallel_requests(scope, parallel_requests)?;
+        if profile.operation() != ProviderOperation::Reranking {
+            return Err(KboltError::Config(format!(
+                "{scope}.parallel_requests is only supported for reranking providers"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_provider_parallel_requests(scope: &str, parallel_requests: usize) -> Result<()> {
+    if parallel_requests == 0 {
+        return Err(KboltError::Config(format!(
+            "{scope}.parallel_requests must be greater than zero"
+        ))
+        .into());
+    }
+    if parallel_requests > MAX_PROVIDER_PARALLEL_REQUESTS {
+        return Err(KboltError::Config(format!(
+            "{scope}.parallel_requests ({parallel_requests}) must be less than or equal to {MAX_PROVIDER_PARALLEL_REQUESTS}"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 fn validate_provider_profile_common(

@@ -127,6 +127,7 @@ contextual_prefix = false
             operation: ProviderOperation::Embedding,
             base_url: "http://127.0.0.1:8101".to_string(),
             model: "embeddinggemma".to_string(),
+            parallel_requests: None,
             timeout_ms: DEFAULT_INFERENCE_TIMEOUT_MS,
             max_retries: DEFAULT_INFERENCE_MAX_RETRIES,
         })
@@ -174,6 +175,31 @@ contextual_prefix = false
     assert_eq!(config.chunking.defaults.boundary_overlap_tokens, 32);
     assert_eq!(config.chunking.defaults.neighbor_window, 2);
     assert!(!config.chunking.defaults.contextual_prefix);
+}
+
+#[test]
+fn load_reads_llama_cpp_parallel_requests() {
+    let config = load_test_config(
+        r#"
+[providers.local_rerank]
+kind = "llama_cpp_server"
+operation = "reranking"
+base_url = "http://127.0.0.1:8102"
+model = "qwen3-reranker"
+parallel_requests = 4
+
+[roles.reranker]
+provider = "local_rerank"
+"#,
+    );
+
+    assert_eq!(
+        config
+            .providers
+            .get("local_rerank")
+            .and_then(ProviderProfileConfig::parallel_requests),
+        Some(4)
+    );
 }
 
 #[test]
@@ -225,6 +251,7 @@ fn save_writes_index_toml() {
                 operation: ProviderOperation::Reranking,
                 base_url: "http://127.0.0.1:8102".to_string(),
                 model: "qwen3-reranker".to_string(),
+                parallel_requests: Some(4),
                 timeout_ms: DEFAULT_INFERENCE_TIMEOUT_MS,
                 max_retries: DEFAULT_INFERENCE_MAX_RETRIES,
             },
@@ -295,6 +322,7 @@ fn save_rejects_invalid_provider_profiles_and_role_bindings() {
                 operation: ProviderOperation::Embedding,
                 base_url: "127.0.0.1:8101".to_string(),
                 model: "embeddinggemma".to_string(),
+                parallel_requests: None,
                 timeout_ms: DEFAULT_INFERENCE_TIMEOUT_MS,
                 max_retries: DEFAULT_INFERENCE_MAX_RETRIES,
             },
@@ -318,6 +346,7 @@ fn save_rejects_invalid_provider_profiles_and_role_bindings() {
             operation: ProviderOperation::Embedding,
             base_url: "http://127.0.0.1:8101".to_string(),
             model: "embeddinggemma".to_string(),
+            parallel_requests: None,
             timeout_ms: DEFAULT_INFERENCE_TIMEOUT_MS,
             max_retries: DEFAULT_INFERENCE_MAX_RETRIES,
         },
@@ -331,6 +360,79 @@ fn save_rejects_invalid_provider_profiles_and_role_bindings() {
     assert!(err
         .to_string()
         .contains("roles.embedder.provider references undefined provider profile 'missing'"));
+}
+
+#[test]
+fn load_rejects_invalid_llama_cpp_parallel_requests() {
+    let err = load_test_config_error(
+        r#"
+[providers.local_rerank]
+kind = "llama_cpp_server"
+operation = "reranking"
+base_url = "http://127.0.0.1:8102"
+model = "qwen3-reranker"
+parallel_requests = 0
+"#,
+    );
+    assert!(err.contains("providers.local_rerank.parallel_requests must be greater than zero"));
+
+    let err = load_test_config_error(
+        r#"
+[providers.local_rerank]
+kind = "llama_cpp_server"
+operation = "reranking"
+base_url = "http://127.0.0.1:8102"
+model = "qwen3-reranker"
+parallel_requests = 65
+"#,
+    );
+    assert!(err.contains(
+        "providers.local_rerank.parallel_requests (65) must be less than or equal to 64"
+    ));
+
+    let err = load_test_config_error(
+        r#"
+[providers.local_embed]
+kind = "llama_cpp_server"
+operation = "embedding"
+base_url = "http://127.0.0.1:8101"
+model = "embeddinggemma"
+parallel_requests = 4
+"#,
+    );
+    assert!(err.contains(
+        "providers.local_embed.parallel_requests is only supported for reranking providers"
+    ));
+
+    let err = load_test_config_error(
+        r#"
+[providers.remote_rerank]
+kind = "openai_compatible"
+operation = "reranking"
+base_url = "https://api.example.com/v1"
+model = "rerank-model"
+parallel_requests = 4
+
+[roles.reranker]
+provider = "remote_rerank"
+"#,
+    );
+    assert!(err.contains("unknown field `parallel_requests`"));
+
+    let err = load_test_config_error(
+        r#"
+[providers.local_rerank]
+kind = "llama_cpp_server"
+operation = "reranking"
+base_url = "http://127.0.0.1:8102"
+model = "qwen3-reranker"
+
+[roles.reranker]
+provider = "local_rerank"
+parallel_requests = 4
+"#,
+    );
+    assert!(err.contains("unknown field `parallel_requests`"));
 }
 
 #[test]

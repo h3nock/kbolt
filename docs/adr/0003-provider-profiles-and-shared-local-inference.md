@@ -57,6 +57,8 @@ They own:
 - model identity
 - auth source when needed
 - timeout and retry policy
+- endpoint capacity hints when kbolt can safely use them, such as llama.cpp rerank
+  parallel request count
 
 V1 provider kinds:
 - `llama_cpp_server`
@@ -126,6 +128,7 @@ kind = "llama_cpp_server"
 operation = "reranking"
 base_url = "http://127.0.0.1:8102"
 model = "qwen3-reranker"
+parallel_requests = 4
 timeout_ms = 30000
 max_retries = 2
 
@@ -166,6 +169,8 @@ presence_penalty = 0.5
 - provider profiles must define non-empty `base_url` and `model`
 - provider URLs must start with `http://` or `https://`
 - `api_key_env` must be non-empty when set
+- `parallel_requests`, when set, must be positive and is valid only for
+  `llama_cpp_server` reranking providers
 - role-specific knobs keep their own validation rules
 
 ## Consequences
