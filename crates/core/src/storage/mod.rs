@@ -382,18 +382,23 @@ CREATE TABLE IF NOT EXISTS document_texts (
             .create(true)
             .append(true)
             .open(&usearch_path)?;
-        let tantivy_index = open_or_create_tantivy_index(&tantivy_dir)?;
-        let tantivy_reader = tantivy_index.reader()?;
-        let usearch_index = open_or_create_usearch_index(&usearch_path)?;
-        let fields = tantivy_fields_from_schema(&tantivy_index.schema())?;
 
         let mut spaces = self
             .spaces
             .write()
             .map_err(|_| CoreError::poisoned("spaces"))?;
-        spaces
-            .entry(name.to_string())
-            .or_insert(Arc::new(SpaceIndexes {
+        if spaces.contains_key(name) {
+            return Ok(());
+        }
+
+        let tantivy_index = open_or_create_tantivy_index(&tantivy_dir)?;
+        let tantivy_reader = tantivy_index.reader()?;
+        let usearch_index = open_or_create_usearch_index(&usearch_path)?;
+        let fields = tantivy_fields_from_schema(&tantivy_index.schema())?;
+
+        spaces.insert(
+            name.to_string(),
+            Arc::new(SpaceIndexes {
                 _tantivy_dir: tantivy_dir,
                 usearch_path,
                 tantivy_index,
@@ -401,7 +406,8 @@ CREATE TABLE IF NOT EXISTS document_texts (
                 tantivy_writer: Mutex::new(None),
                 usearch_index: RwLock::new(usearch_index),
                 fields,
-            }));
+            }),
+        );
 
         Ok(())
     }
