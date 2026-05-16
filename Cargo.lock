@@ -1510,7 +1510,7 @@ dependencies = [
 
 [[package]]
 name = "kbolt"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "kbolt-core",
@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "kbolt-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ctrlc",
  "dirs",
@@ -1553,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "kbolt-mcp"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "kbolt-core",
  "kbolt-types",
@@ -1564,7 +1564,7 @@ dependencies = [
 
 [[package]]
 name = "kbolt-types"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
