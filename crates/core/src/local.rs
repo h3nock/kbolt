@@ -1141,7 +1141,7 @@ mod tests {
         load_setup_config, managed_model_path, missing_service_report, open_managed_service_log,
         select_port, started_service_note, ManagedRole, EMBEDDER_SPEC, EXPANDER_SPEC,
         LLAMA_SERVER_LOG_VERBOSITY, MANAGED_EMBEDDER_PARALLEL_REQUESTS,
-        MANAGED_RERANKER_PARALLEL_REQUESTS, RERANKER_SPEC,
+        MANAGED_PARALLEL_CONTEXT_TOKENS, MANAGED_RERANKER_PARALLEL_REQUESTS, RERANKER_SPEC,
     };
     use crate::config::{self, Config, ProviderProfileConfig};
 
@@ -1362,6 +1362,10 @@ operation = "embedding"
                 spec.name
             );
             if spec.role == ManagedRole::Embedder {
+                let context_tokens = (MANAGED_PARALLEL_CONTEXT_TOKENS
+                    * MANAGED_EMBEDDER_PARALLEL_REQUESTS)
+                    .to_string();
+                let ubatch_tokens = MANAGED_PARALLEL_CONTEXT_TOKENS.to_string();
                 assert!(
                     args.windows(2).any(|pair| {
                         pair[0] == "-np"
@@ -1369,14 +1373,38 @@ operation = "embedding"
                     }),
                     "expected managed embedder parallelism in args: {args:?}"
                 );
+                assert!(
+                    args.windows(2)
+                        .any(|pair| pair[0] == "-c" && pair[1] == context_tokens),
+                    "expected managed embedder context in args: {args:?}"
+                );
+                assert!(
+                    args.windows(2)
+                        .any(|pair| pair[0] == "-ub" && pair[1] == ubatch_tokens),
+                    "expected managed embedder ubatch in args: {args:?}"
+                );
             }
             if spec.role == ManagedRole::Reranker {
+                let context_tokens = (MANAGED_PARALLEL_CONTEXT_TOKENS
+                    * MANAGED_RERANKER_PARALLEL_REQUESTS)
+                    .to_string();
+                let ubatch_tokens = MANAGED_PARALLEL_CONTEXT_TOKENS.to_string();
                 assert!(
                     args.windows(2).any(|pair| {
                         pair[0] == "-np"
                             && pair[1] == MANAGED_RERANKER_PARALLEL_REQUESTS.to_string()
                     }),
                     "expected managed reranker parallelism in args: {args:?}"
+                );
+                assert!(
+                    args.windows(2)
+                        .any(|pair| pair[0] == "-c" && pair[1] == context_tokens),
+                    "expected managed reranker context in args: {args:?}"
+                );
+                assert!(
+                    args.windows(2)
+                        .any(|pair| pair[0] == "-ub" && pair[1] == ubatch_tokens),
+                    "expected managed reranker ubatch in args: {args:?}"
                 );
             }
         }
