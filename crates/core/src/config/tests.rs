@@ -203,6 +203,31 @@ provider = "local_rerank"
 }
 
 #[test]
+fn load_reads_llama_cpp_embedding_parallel_requests() {
+    let config = load_test_config(
+        r#"
+[providers.local_embed]
+kind = "llama_cpp_server"
+operation = "embedding"
+base_url = "http://127.0.0.1:8101"
+model = "embeddinggemma"
+parallel_requests = 4
+
+[roles.embedder]
+provider = "local_embed"
+"#,
+    );
+
+    assert_eq!(
+        config
+            .providers
+            .get("local_embed")
+            .and_then(ProviderProfileConfig::parallel_requests),
+        Some(4)
+    );
+}
+
+#[test]
 fn load_rejects_removed_pre_refactor_schema() {
     let tmp = tempdir().expect("create tempdir");
     let config_dir = tmp.path().join("config");
@@ -392,16 +417,16 @@ parallel_requests = 65
 
     let err = load_test_config_error(
         r#"
-[providers.local_embed]
+[providers.local_expand]
 kind = "llama_cpp_server"
-operation = "embedding"
-base_url = "http://127.0.0.1:8101"
-model = "embeddinggemma"
+operation = "chat_completion"
+base_url = "http://127.0.0.1:8103"
+model = "qwen3-1.7b"
 parallel_requests = 4
 "#,
     );
     assert!(err.contains(
-        "providers.local_embed.parallel_requests is only supported for reranking providers"
+        "providers.local_expand.parallel_requests is only supported for embedding and reranking providers"
     ));
 
     let err = load_test_config_error(

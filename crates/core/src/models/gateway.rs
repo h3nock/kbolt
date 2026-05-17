@@ -10,6 +10,7 @@ use crate::local::{MANAGED_RERANKER_PARALLEL_REQUESTS, MANAGED_RERANK_PROVIDER};
 use crate::Result;
 
 const DEFAULT_RERANK_PARALLEL_REQUESTS: usize = 1;
+const DEFAULT_EMBEDDER_PARALLEL_REQUESTS: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GatewayProviderKind {
@@ -42,6 +43,7 @@ pub(crate) struct EmbedderBinding {
     pub provider_name: String,
     pub deployment: ProviderDeployment,
     pub batch_size: usize,
+    pub parallel_requests: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,10 +121,15 @@ fn resolve_embedder_binding(
         providers,
         allowed_operations,
     )?;
+    let parallel_requests = providers
+        .get(&provider_name)
+        .and_then(ProviderProfileConfig::parallel_requests)
+        .unwrap_or(DEFAULT_EMBEDDER_PARALLEL_REQUESTS);
     Ok(EmbedderBinding {
         provider_name,
         deployment,
         batch_size: role.batch_size,
+        parallel_requests,
     })
 }
 
@@ -301,6 +308,7 @@ mod tests {
                     max_retries: 2,
                 },
                 batch_size: 16,
+                parallel_requests: 1,
             })
         );
         assert_eq!(
@@ -352,6 +360,36 @@ mod tests {
             bindings
                 .reranker
                 .expect("reranker binding should exist")
+                .parallel_requests,
+            4
+        );
+    }
+
+    #[test]
+    fn resolve_gateway_bindings_carries_llama_embedder_parallel_requests() {
+        let mut config = base_config();
+        config.providers.insert(
+            "local_embed".to_string(),
+            ProviderProfileConfig::LlamaCppServer {
+                operation: ProviderOperation::Embedding,
+                base_url: "http://127.0.0.1:8101".to_string(),
+                model: "embeddinggemma".to_string(),
+                parallel_requests: Some(4),
+                timeout_ms: 30_000,
+                max_retries: 2,
+            },
+        );
+        config.roles.embedder = Some(EmbedderRoleConfig {
+            provider: "local_embed".to_string(),
+            batch_size: 32,
+        });
+
+        let bindings = resolve_inference_gateway_bindings(&config).expect("resolve bindings");
+
+        assert_eq!(
+            bindings
+                .embedder
+                .expect("embedder binding should exist")
                 .parallel_requests,
             4
         );

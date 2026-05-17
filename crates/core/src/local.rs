@@ -25,7 +25,9 @@ const LLAMA_SERVER_BREW_HINT: &str = "brew install llama.cpp";
 const LLAMA_SERVER_LOG_VERBOSITY: &str = "1";
 const MODEL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
 const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) const MANAGED_EMBEDDER_PARALLEL_REQUESTS: usize = 4;
 pub(crate) const MANAGED_RERANKER_PARALLEL_REQUESTS: usize = 4;
+const MANAGED_PARALLEL_CONTEXT_TOKENS: usize = 2048;
 
 const MANAGED_EMBED_PROVIDER: &str = "kbolt_local_embed";
 pub(crate) const MANAGED_RERANK_PROVIDER: &str = "kbolt_local_rerank";
@@ -664,8 +666,9 @@ fn apply_managed_service_config(config: &mut Config, spec: &ManagedServiceSpec, 
             base_url: endpoint_for_port(port),
             model: spec.model_label.to_string(),
             parallel_requests: match spec.role {
+                ManagedRole::Embedder => Some(MANAGED_EMBEDDER_PARALLEL_REQUESTS),
                 ManagedRole::Reranker => Some(MANAGED_RERANKER_PARALLEL_REQUESTS),
-                ManagedRole::Embedder | ManagedRole::Expander => None,
+                ManagedRole::Expander => None,
             },
             timeout_ms: 30_000,
             max_retries: 2,
@@ -869,10 +872,15 @@ fn configure_llama_server_command(
                 .arg("mean")
                 .arg("-ngl")
                 .arg("99")
+                .arg("-np")
+                .arg(MANAGED_EMBEDDER_PARALLEL_REQUESTS.to_string())
                 .arg("-c")
-                .arg("2048")
+                .arg(
+                    (MANAGED_PARALLEL_CONTEXT_TOKENS * MANAGED_EMBEDDER_PARALLEL_REQUESTS)
+                        .to_string(),
+                )
                 .arg("-ub")
-                .arg("2048");
+                .arg(MANAGED_PARALLEL_CONTEXT_TOKENS.to_string());
         }
         ManagedRole::Reranker => {
             command
@@ -884,9 +892,12 @@ fn configure_llama_server_command(
                 .arg("-np")
                 .arg(MANAGED_RERANKER_PARALLEL_REQUESTS.to_string())
                 .arg("-c")
-                .arg("8192")
+                .arg(
+                    (MANAGED_PARALLEL_CONTEXT_TOKENS * MANAGED_RERANKER_PARALLEL_REQUESTS)
+                        .to_string(),
+                )
                 .arg("-ub")
-                .arg("2048");
+                .arg(MANAGED_PARALLEL_CONTEXT_TOKENS.to_string());
         }
         ManagedRole::Expander => {
             command.arg("-ngl").arg("99").arg("-c").arg("2048");
@@ -1129,7 +1140,8 @@ mod tests {
         apply_managed_service_config, configure_llama_server_command, endpoint_for_port,
         load_setup_config, managed_model_path, missing_service_report, open_managed_service_log,
         select_port, started_service_note, ManagedRole, EMBEDDER_SPEC, EXPANDER_SPEC,
-        LLAMA_SERVER_LOG_VERBOSITY, MANAGED_RERANKER_PARALLEL_REQUESTS, RERANKER_SPEC,
+        LLAMA_SERVER_LOG_VERBOSITY, MANAGED_EMBEDDER_PARALLEL_REQUESTS,
+        MANAGED_RERANKER_PARALLEL_REQUESTS, RERANKER_SPEC,
     };
     use crate::config::{self, Config, ProviderProfileConfig};
 
@@ -1168,6 +1180,13 @@ mod tests {
         );
         assert!(config.providers.contains_key("kbolt_local_embed"));
         assert!(config.providers.contains_key("kbolt_local_rerank"));
+        assert_eq!(
+            config
+                .providers
+                .get("kbolt_local_embed")
+                .and_then(ProviderProfileConfig::parallel_requests),
+            Some(MANAGED_EMBEDDER_PARALLEL_REQUESTS)
+        );
         assert_eq!(
             config
                 .providers
@@ -1342,6 +1361,15 @@ operation = "embedding"
                 "expected log verbosity in args for {}: {args:?}",
                 spec.name
             );
+            if spec.role == ManagedRole::Embedder {
+                assert!(
+                    args.windows(2).any(|pair| {
+                        pair[0] == "-np"
+                            && pair[1] == MANAGED_EMBEDDER_PARALLEL_REQUESTS.to_string()
+                    }),
+                    "expected managed embedder parallelism in args: {args:?}"
+                );
+            }
             if spec.role == ManagedRole::Reranker {
                 assert!(
                     args.windows(2).any(|pair| {

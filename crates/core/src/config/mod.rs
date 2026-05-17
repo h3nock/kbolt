@@ -624,9 +624,12 @@ fn validate_provider_profile(scope: &str, profile: &ProviderProfileConfig) -> Re
     )?;
     if let Some(parallel_requests) = profile.parallel_requests() {
         validate_provider_parallel_requests(scope, parallel_requests)?;
-        if profile.operation() != ProviderOperation::Reranking {
+        if !matches!(
+            profile.operation(),
+            ProviderOperation::Embedding | ProviderOperation::Reranking
+        ) {
             return Err(KboltError::Config(format!(
-                "{scope}.parallel_requests is only supported for reranking providers"
+                "{scope}.parallel_requests is only supported for embedding and reranking providers"
             ))
             .into());
         }
