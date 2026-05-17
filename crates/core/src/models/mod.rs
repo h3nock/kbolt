@@ -14,7 +14,9 @@ mod reranker;
 mod text;
 mod variants_expander;
 
-pub(crate) use embedder::{Embedder, EmbeddingDocumentSizer, EmbeddingInputKind};
+pub(crate) use embedder::{
+    Embedder, EmbeddingDocumentSizer, EmbeddingInputKind, DEFAULT_DOCUMENT_BATCH_WINDOW,
+};
 pub(crate) use expander::{normalize_query_text, Expander};
 pub(crate) use inference::{
     build_inference_clients, build_inference_clients_with_recovery_notice,

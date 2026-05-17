@@ -44,9 +44,17 @@ impl crate::models::Embedder for DeterministicEmbedder {
 #[derive(Default)]
 struct RecordingEmbedder {
     calls: Mutex<Vec<Vec<String>>>,
+    preferred_document_batch_window: Option<usize>,
 }
 
 impl RecordingEmbedder {
+    fn with_document_batch_window(window: usize) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            preferred_document_batch_window: Some(window),
+        }
+    }
+
     fn texts(&self) -> Vec<String> {
         self.calls
             .lock()
@@ -54,6 +62,15 @@ impl RecordingEmbedder {
             .iter()
             .flatten()
             .cloned()
+            .collect()
+    }
+
+    fn call_lengths(&self) -> Vec<usize> {
+        self.calls
+            .lock()
+            .expect("lock recording embedder")
+            .iter()
+            .map(Vec::len)
             .collect()
     }
 }
@@ -77,6 +94,11 @@ impl crate::models::Embedder for RecordingEmbedder {
                 ]
             })
             .collect())
+    }
+
+    fn preferred_document_batch_window(&self) -> usize {
+        self.preferred_document_batch_window
+            .unwrap_or(crate::models::DEFAULT_DOCUMENT_BATCH_WINDOW)
     }
 }
 
@@ -4383,6 +4405,58 @@ fn update_embeds_chunks_when_embedder_is_configured() {
             .expect("list files");
         assert_eq!(files.len(), 1);
         assert!(files[0].embedded, "file should be fully embedded");
+    });
+}
+
+#[test]
+fn update_uses_embedder_document_batch_window_for_fresh_embeddings() {
+    with_kbolt_space_env(None, || {
+        let embedder = Arc::new(RecordingEmbedder::with_document_batch_window(2));
+        let engine = test_engine_with_embedder(embedder.clone());
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        write_text_file(&collection_path.join("a.md"), "alpha\n");
+        write_text_file(&collection_path.join("b.md"), "bravo\n");
+        write_text_file(&collection_path.join("c.md"), "charlie\n");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("update with embedder");
+        assert_eq!(report.embedded_chunks, 3);
+        assert_eq!(embedder.call_lengths(), vec![2, 1]);
+    });
+}
+
+#[test]
+fn update_uses_embedder_document_batch_window_for_embedding_backlog() {
+    with_kbolt_space_env(None, || {
+        let embedder = Arc::new(RecordingEmbedder::with_document_batch_window(2));
+        let engine = test_engine_with_embedder(embedder.clone());
+        engine.add_space("work", None).expect("add work");
+
+        let root = tempdir().expect("create temp root");
+        let collection_path = root.path().join("work-api");
+        std::fs::create_dir_all(&collection_path).expect("create collection dir");
+        add_collection_fixture(&engine, "work", "api", collection_path.clone());
+
+        write_text_file(&collection_path.join("a.md"), "alpha\n");
+        write_text_file(&collection_path.join("b.md"), "bravo\n");
+        write_text_file(&collection_path.join("c.md"), "charlie\n");
+
+        let mut no_embed = update_options(Some("work"), &["api"]);
+        no_embed.no_embed = true;
+        engine.update(no_embed).expect("index without embeddings");
+
+        let report = engine
+            .update(update_options(Some("work"), &["api"]))
+            .expect("embed backlog");
+        assert_eq!(report.embedded_chunks, 3);
+        assert_eq!(embedder.call_lengths(), vec![2, 1]);
     });
 }
 

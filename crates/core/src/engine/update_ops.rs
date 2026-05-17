@@ -215,11 +215,17 @@ impl Engine {
         };
 
         let model = self.embedding_model_key();
+        let batch_window = embedder.preferred_document_batch_window().max(1);
         let mut after_chunk_id = 0_i64;
         loop {
             let backlog =
                 crate::profile::timed_update_stage("sqlite_get_unembedded_chunks", || {
-                    self.get_unembedded_chunks_for_scope(model, repair_scope, after_chunk_id, 64)
+                    self.get_unembedded_chunks_for_scope(
+                        model,
+                        repair_scope,
+                        after_chunk_id,
+                        batch_window,
+                    )
                 })?;
             if backlog.is_empty() {
                 break;
@@ -368,6 +374,14 @@ impl Engine {
         }
 
         self.store_chunk_embeddings(self.embedding_model_key(), result.embeddings, report)
+    }
+
+    fn document_embedding_batch_window(&self) -> usize {
+        self.embedder
+            .as_ref()
+            .map(|embedder| embedder.preferred_document_batch_window())
+            .unwrap_or(crate::models::DEFAULT_DOCUMENT_BATCH_WINDOW)
+            .max(1)
     }
 
     fn embed_preflighted_pending_batch_with_partial_failures(
@@ -865,6 +879,7 @@ impl Engine {
             &target.collection.name,
         )?;
         let extractor_registry = default_registry();
+        let embedding_batch_window = self.document_embedding_batch_window();
         let mut touched_collection = false;
         let mut failed_walk_prefixes = Vec::new();
         let mut collection_walk_incomplete = false;
@@ -1327,7 +1342,7 @@ impl Engine {
                             max_document_tokens: prepared.max_document_tokens,
                         });
                     }
-                    if pending_embeddings.len() >= 64 {
+                    if pending_embeddings.len() >= embedding_batch_window {
                         self.flush_buffered_embeddings(
                             pending_embeddings,
                             failed_chunk_ids,
