@@ -17,7 +17,10 @@ use crate::models::gateway::{
 };
 use crate::models::http::{HttpJsonClient, HttpOperation, HttpTransportRecovery};
 use crate::models::variants_expander::{ChatVariantsExpander, VARIANTS_GRAMMAR};
-use crate::models::{Embedder, EmbeddingDocumentSizer, EmbeddingInputKind, Expander, Reranker};
+use crate::models::{
+    Embedder, EmbeddingDocumentSizer, EmbeddingInputKind, Expander, Reranker,
+    DEFAULT_DOCUMENT_BATCH_WINDOW,
+};
 use crate::{RecoveryNoticeSink, Result};
 
 #[cfg(test)]
@@ -30,6 +33,7 @@ struct HttpApiEmbedder {
     client: HttpJsonClient,
     model: String,
     batch_size: usize,
+    parallel_requests: usize,
     endpoint_suffix: &'static str,
 }
 
@@ -199,6 +203,7 @@ fn build_embedder_from_binding(
         ),
         model: binding.deployment.model.clone(),
         batch_size: binding.batch_size,
+        parallel_requests: binding.parallel_requests,
         endpoint_suffix: embedding_endpoint_suffix(binding.deployment.kind),
     }))
 }
@@ -487,13 +492,40 @@ fn validate_openai_expander_sampling(binding: &ExpanderBinding) -> Result<()> {
 }
 
 impl Embedder for HttpApiEmbedder {
-    fn embed_batch(&self, _kind: EmbeddingInputKind, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        embed_with_http_api(
+    fn embed_batch(&self, kind: EmbeddingInputKind, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let batch_size = self.batch_size.max(1);
+        if kind == EmbeddingInputKind::Query
+            || self.parallel_requests <= 1
+            || texts.len() <= batch_size
+        {
+            return embed_with_http_api(
+                &self.client,
+                self.endpoint_suffix,
+                &self.model,
+                batch_size,
+                texts,
+            );
+        }
+
+        embed_documents_with_parallel_http_api(
             &self.client,
             self.endpoint_suffix,
             &self.model,
-            self.batch_size,
+            batch_size,
+            self.parallel_requests,
             texts,
+        )
+    }
+
+    fn preferred_document_batch_window(&self) -> usize {
+        if self.parallel_requests <= 1 {
+            return DEFAULT_DOCUMENT_BATCH_WINDOW;
+        }
+
+        DEFAULT_DOCUMENT_BATCH_WINDOW.max(
+            self.batch_size
+                .max(1)
+                .saturating_mul(self.parallel_requests),
         )
     }
 }
@@ -666,16 +698,121 @@ fn embed_with_http_api(
 
     let mut vectors = Vec::new();
     for batch in texts.chunks(batch_size) {
-        let payload = json!({
-            "model": model,
-            "input": batch,
-        });
-        let parsed: EmbeddingResponseEnvelope =
-            client.post_json(endpoint_suffix, &payload, HttpOperation::Embedding)?;
-        let response_vectors = parsed.into_vectors(batch.len())?;
+        let response_vectors =
+            embed_single_http_embedding_request(client, endpoint_suffix, model, batch)?;
         vectors.extend(response_vectors);
     }
     Ok(vectors)
+}
+
+fn embed_documents_with_parallel_http_api(
+    client: &HttpJsonClient,
+    endpoint_suffix: &str,
+    model: &str,
+    batch_size: usize,
+    parallel_requests: usize,
+    texts: &[String],
+) -> Result<Vec<Vec<f32>>> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let superbatch_size = batch_size
+        .saturating_mul(parallel_requests.max(1))
+        .max(batch_size);
+    let mut vectors = Vec::with_capacity(texts.len());
+    let mut offset = 0;
+    while offset < texts.len() {
+        let end = offset.saturating_add(superbatch_size).min(texts.len());
+        let mut superbatch_vectors = embed_document_superbatch_with_parallel_http_api(
+            client,
+            endpoint_suffix,
+            model,
+            batch_size,
+            &texts[offset..end],
+            offset,
+        )?;
+        vectors.append(&mut superbatch_vectors);
+        offset = end;
+    }
+    Ok(vectors)
+}
+
+fn embed_document_superbatch_with_parallel_http_api(
+    client: &HttpJsonClient,
+    endpoint_suffix: &str,
+    model: &str,
+    batch_size: usize,
+    texts: &[String],
+    base_offset: usize,
+) -> Result<Vec<Vec<f32>>> {
+    let ranges = texts
+        .chunks(batch_size)
+        .scan(0usize, |start, batch| {
+            let end = *start + batch.len();
+            let range = (*start, end);
+            *start = end;
+            Some(range)
+        })
+        .collect::<Vec<_>>();
+
+    std::thread::scope(|scope| {
+        let handles = ranges
+            .into_iter()
+            .map(|(start, end)| {
+                (
+                    (start, end),
+                    scope.spawn(move || {
+                        embed_single_http_embedding_request(
+                            client,
+                            endpoint_suffix,
+                            model,
+                            &texts[start..end],
+                        )
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut vectors = Vec::with_capacity(texts.len());
+        let total_shards = handles.len();
+        for (shard_index, ((start, end), handle)) in handles.into_iter().enumerate() {
+            let absolute_start = base_offset + start;
+            let absolute_end = base_offset + end;
+            let shard_label = format!(
+                "embedding shard {}/{} inputs {absolute_start}..{absolute_end}",
+                shard_index + 1,
+                total_shards
+            );
+            let shard_result = handle.join().map_err(|_| {
+                crate::CoreError::Domain(KboltError::Inference(format!(
+                    "{shard_label} worker panicked"
+                )))
+            })?;
+            let mut shard_vectors = shard_result.map_err(|err| {
+                crate::CoreError::Domain(KboltError::Inference(format!(
+                    "{shard_label} failed: {err}"
+                )))
+            })?;
+            vectors.append(&mut shard_vectors);
+        }
+        Ok(vectors)
+    })
+}
+
+fn embed_single_http_embedding_request(
+    client: &HttpJsonClient,
+    endpoint_suffix: &str,
+    model: &str,
+    batch: &[String],
+) -> Result<Vec<Vec<f32>>> {
+    let payload = json!({
+        "model": model,
+        "input": batch,
+    });
+    let parsed: EmbeddingResponseEnvelope =
+        client.post_json(endpoint_suffix, &payload, HttpOperation::Embedding)?;
+    parsed.into_vectors(batch.len())
 }
 
 fn parse_json_payload<T>(label: &str, content: &str) -> Result<T>
@@ -1140,6 +1277,93 @@ mod tests {
         (format!("http://{addr}"), rx, max_inflight)
     }
 
+    fn serve_embedding_shards(
+        expected_requests: usize,
+    ) -> (String, mpsc::Receiver<Vec<String>>, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("server address");
+        let (tx, rx) = mpsc::channel();
+        let max_inflight = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new((Mutex::new(0usize), Condvar::new()));
+        let max_inflight_for_server = Arc::clone(&max_inflight);
+        std::thread::spawn(move || {
+            for _ in 0..expected_requests {
+                let (mut stream, _) = listener.accept().expect("accept client");
+                let tx = tx.clone();
+                let active = Arc::clone(&active);
+                let max_inflight = Arc::clone(&max_inflight_for_server);
+                let gate = Arc::clone(&gate);
+                std::thread::spawn(move || {
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_inflight.fetch_max(current, Ordering::SeqCst);
+
+                    let body = read_full_request(&mut stream);
+                    let payload: Value =
+                        serde_json::from_slice(&body).expect("parse embedding payload");
+                    let inputs = payload
+                        .get("input")
+                        .and_then(Value::as_array)
+                        .expect("input array")
+                        .iter()
+                        .map(|input| input.as_str().expect("input string").to_string())
+                        .collect::<Vec<_>>();
+                    tx.send(inputs.clone()).expect("send captured inputs");
+
+                    let (lock, cvar) = &*gate;
+                    let mut arrived = lock.lock().expect("lock shard gate");
+                    *arrived += 1;
+                    cvar.notify_all();
+                    let _ = cvar
+                        .wait_timeout_while(arrived, Duration::from_secs(1), |arrived| {
+                            *arrived < expected_requests
+                        })
+                        .expect("wait for concurrent shard arrivals");
+
+                    if inputs.iter().any(|input| input == "fail") {
+                        let payload = r#"{"error":"boom"}"#;
+                        let response = format!(
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            payload.len(),
+                            payload
+                        );
+                        stream
+                            .write_all(response.as_bytes())
+                            .expect("write failure response");
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        return;
+                    }
+
+                    let mut data = inputs
+                        .iter()
+                        .enumerate()
+                        .map(|(index, input)| {
+                            let value = input
+                                .strip_prefix("doc ")
+                                .expect("doc prefix")
+                                .parse::<f32>()
+                                .expect("doc index");
+                            json!({"index": index, "embedding": [value, value + 0.5]})
+                        })
+                        .collect::<Vec<_>>();
+                    data.reverse();
+                    let payload = json!({ "data": data }).to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        payload.len(),
+                        payload
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .expect("write response");
+                    active.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+
+        (format!("http://{addr}"), rx, max_inflight)
+    }
+
     fn read_full_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
         let raw = read_raw_request(stream);
         let header_end = raw
@@ -1229,6 +1453,122 @@ mod tests {
             .embed_batch(EmbeddingInputKind::Document, &["hello".to_string()])
             .expect("embed");
         assert_eq!(vectors, vec![vec![0.1, 0.2]]);
+    }
+
+    #[test]
+    fn llama_cpp_embedder_reports_parallel_document_batch_window() {
+        let mut config = base_config();
+        config.providers.insert(
+            "local_embed".to_string(),
+            ProviderProfileConfig::LlamaCppServer {
+                operation: ProviderOperation::Embedding,
+                base_url: "http://127.0.0.1:8101".to_string(),
+                model: "embeddinggemma".to_string(),
+                parallel_requests: Some(4),
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        );
+        config.roles.embedder = Some(EmbedderRoleConfig {
+            provider: "local_embed".to_string(),
+            batch_size: 32,
+        });
+
+        let built = build_inference_clients(&config).expect("build clients");
+        let embedder = built.embedder.expect("embedder should exist");
+
+        assert_eq!(embedder.preferred_document_batch_window(), 128);
+    }
+
+    #[test]
+    fn llama_cpp_embedder_shards_document_batches_preserving_order() {
+        let (base_url, requests, max_inflight) = serve_embedding_shards(4);
+        let mut config = base_config();
+        config.providers.insert(
+            "local_embed".to_string(),
+            ProviderProfileConfig::LlamaCppServer {
+                operation: ProviderOperation::Embedding,
+                base_url,
+                model: "embeddinggemma".to_string(),
+                parallel_requests: Some(4),
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        );
+        config.roles.embedder = Some(EmbedderRoleConfig {
+            provider: "local_embed".to_string(),
+            batch_size: 2,
+        });
+
+        let built = build_inference_clients(&config).expect("build clients");
+        let embedder = built.embedder.expect("embedder should exist");
+        let inputs = (0..8)
+            .map(|index| format!("doc {index}"))
+            .collect::<Vec<_>>();
+        let vectors = embedder
+            .embed_batch(EmbeddingInputKind::Document, &inputs)
+            .expect("embed sharded batch");
+
+        let expected = (0..8)
+            .map(|index| vec![index as f32, index as f32 + 0.5])
+            .collect::<Vec<_>>();
+        assert_eq!(vectors, expected);
+        let captured = (0..4)
+            .map(|_| {
+                requests
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("captured embedding request")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            captured.iter().all(|batch| batch.len() == 2),
+            "expected 2 inputs per shard: {captured:?}"
+        );
+        assert!(
+            max_inflight.load(Ordering::SeqCst) > 1,
+            "expected concurrent embedding requests"
+        );
+    }
+
+    #[test]
+    fn llama_cpp_embedder_returns_shard_errors() {
+        let (base_url, _requests, _max_inflight) = serve_embedding_shards(2);
+        let mut config = base_config();
+        config.providers.insert(
+            "local_embed".to_string(),
+            ProviderProfileConfig::LlamaCppServer {
+                operation: ProviderOperation::Embedding,
+                base_url,
+                model: "embeddinggemma".to_string(),
+                parallel_requests: Some(2),
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        );
+        config.roles.embedder = Some(EmbedderRoleConfig {
+            provider: "local_embed".to_string(),
+            batch_size: 2,
+        });
+
+        let built = build_inference_clients(&config).expect("build clients");
+        let embedder = built.embedder.expect("embedder should exist");
+        let err = embedder
+            .embed_batch(
+                EmbeddingInputKind::Document,
+                &[
+                    "doc 0".to_string(),
+                    "doc 1".to_string(),
+                    "fail".to_string(),
+                    "doc 3".to_string(),
+                ],
+            )
+            .expect_err("failed shard should fail the batch");
+
+        assert!(
+            err.to_string()
+                .contains("embedding shard 2/2 inputs 2..4 failed"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
