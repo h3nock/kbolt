@@ -1334,20 +1334,7 @@ mod tests {
                         return;
                     }
 
-                    let mut data = inputs
-                        .iter()
-                        .enumerate()
-                        .map(|(index, input)| {
-                            let value = input
-                                .strip_prefix("doc ")
-                                .expect("doc prefix")
-                                .parse::<f32>()
-                                .expect("doc index");
-                            json!({"index": index, "embedding": [value, value + 0.5]})
-                        })
-                        .collect::<Vec<_>>();
-                    data.reverse();
-                    let payload = json!({ "data": data }).to_string();
+                    let payload = embedding_success_payload(&inputs);
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         payload.len(),
@@ -1362,6 +1349,119 @@ mod tests {
         });
 
         (format!("http://{addr}"), rx, max_inflight)
+    }
+
+    fn serve_embedding_retry_once() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("server address");
+        let retried = Arc::new(AtomicUsize::new(0));
+        std::thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().expect("accept client");
+                let retried = Arc::clone(&retried);
+                std::thread::spawn(move || {
+                    let body = read_full_request(&mut stream);
+                    let payload: Value =
+                        serde_json::from_slice(&body).expect("parse embedding payload");
+                    let inputs = payload
+                        .get("input")
+                        .and_then(Value::as_array)
+                        .expect("input array")
+                        .iter()
+                        .map(|input| input.as_str().expect("input string").to_string())
+                        .collect::<Vec<_>>();
+
+                    if inputs.iter().any(|input| input.starts_with("retry "))
+                        && retried.fetch_add(1, Ordering::SeqCst) == 0
+                    {
+                        let payload = r#"{"error":"retry"}"#;
+                        let response = format!(
+                            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            payload.len(),
+                            payload
+                        );
+                        stream
+                            .write_all(response.as_bytes())
+                            .expect("write retry response");
+                        return;
+                    }
+
+                    let payload = embedding_success_payload(&inputs);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        payload.len(),
+                        payload
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .expect("write response");
+                });
+            }
+        });
+
+        format!("http://{addr}")
+    }
+
+    fn serve_embedding_serial_probe(expected_requests: usize) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("server address");
+        let max_inflight = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_inflight_for_server = Arc::clone(&max_inflight);
+        std::thread::spawn(move || {
+            for _ in 0..expected_requests {
+                let (mut stream, _) = listener.accept().expect("accept client");
+                let active = Arc::clone(&active);
+                let max_inflight = Arc::clone(&max_inflight_for_server);
+                std::thread::spawn(move || {
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_inflight.fetch_max(current, Ordering::SeqCst);
+
+                    let body = read_full_request(&mut stream);
+                    let payload: Value =
+                        serde_json::from_slice(&body).expect("parse embedding payload");
+                    let inputs = payload
+                        .get("input")
+                        .and_then(Value::as_array)
+                        .expect("input array")
+                        .iter()
+                        .map(|input| input.as_str().expect("input string").to_string())
+                        .collect::<Vec<_>>();
+
+                    std::thread::sleep(Duration::from_millis(50));
+                    let payload = embedding_success_payload(&inputs);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        payload.len(),
+                        payload
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .expect("write response");
+                    active.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+
+        (format!("http://{addr}"), max_inflight)
+    }
+
+    fn embedding_success_payload(inputs: &[String]) -> String {
+        let mut data = inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                let value = input
+                    .split_whitespace()
+                    .last()
+                    .expect("input index")
+                    .parse::<f32>()
+                    .expect("numeric input index");
+                json!({"index": index, "embedding": [value, value + 0.5]})
+            })
+            .collect::<Vec<_>>();
+        data.reverse();
+        json!({ "data": data }).to_string()
     }
 
     fn read_full_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
@@ -1568,6 +1668,91 @@ mod tests {
             err.to_string()
                 .contains("embedding shard 2/2 inputs 2..4 failed"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn llama_cpp_embedder_keeps_query_batches_serial() {
+        let (base_url, max_inflight) = serve_embedding_serial_probe(2);
+        let mut config = base_config();
+        config.providers.insert(
+            "local_embed".to_string(),
+            ProviderProfileConfig::LlamaCppServer {
+                operation: ProviderOperation::Embedding,
+                base_url,
+                model: "embeddinggemma".to_string(),
+                parallel_requests: Some(4),
+                timeout_ms: 5_000,
+                max_retries: 0,
+            },
+        );
+        config.roles.embedder = Some(EmbedderRoleConfig {
+            provider: "local_embed".to_string(),
+            batch_size: 2,
+        });
+
+        let built = build_inference_clients(&config).expect("build clients");
+        let embedder = built.embedder.expect("embedder should exist");
+        let inputs = (0..4)
+            .map(|index| format!("doc {index}"))
+            .collect::<Vec<_>>();
+        let vectors = embedder
+            .embed_batch(EmbeddingInputKind::Query, &inputs)
+            .expect("embed query batch");
+
+        let expected = (0..4)
+            .map(|index| vec![index as f32, index as f32 + 0.5])
+            .collect::<Vec<_>>();
+        assert_eq!(vectors, expected);
+        assert_eq!(
+            max_inflight.load(Ordering::SeqCst),
+            1,
+            "query batches should remain serial"
+        );
+    }
+
+    #[test]
+    fn llama_cpp_embedder_retries_one_shard_without_failing_batch() {
+        let base_url = serve_embedding_retry_once();
+        let mut config = base_config();
+        config.providers.insert(
+            "local_embed".to_string(),
+            ProviderProfileConfig::LlamaCppServer {
+                operation: ProviderOperation::Embedding,
+                base_url,
+                model: "embeddinggemma".to_string(),
+                parallel_requests: Some(2),
+                timeout_ms: 5_000,
+                max_retries: 1,
+            },
+        );
+        config.roles.embedder = Some(EmbedderRoleConfig {
+            provider: "local_embed".to_string(),
+            batch_size: 2,
+        });
+
+        let built = build_inference_clients(&config).expect("build clients");
+        let embedder = built.embedder.expect("embedder should exist");
+        let vectors = embedder
+            .embed_batch(
+                EmbeddingInputKind::Document,
+                &[
+                    "doc 0".to_string(),
+                    "doc 1".to_string(),
+                    "retry 2".to_string(),
+                    "doc 3".to_string(),
+                ],
+            )
+            .expect("retry shard should eventually succeed");
+
+        assert_eq!(
+            vectors,
+            vec![
+                vec![0.0, 0.5],
+                vec![1.0, 1.5],
+                vec![2.0, 2.5],
+                vec![3.0, 3.5],
+            ]
         );
     }
 

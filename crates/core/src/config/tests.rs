@@ -446,6 +446,21 @@ provider = "remote_rerank"
 
     let err = load_test_config_error(
         r#"
+[providers.local_embed]
+kind = "llama_cpp_server"
+operation = "embedding"
+base_url = "http://127.0.0.1:8101"
+model = "embeddinggemma"
+
+[roles.embedder]
+provider = "local_embed"
+parallel_requests = 4
+"#,
+    );
+    assert!(err.contains("unknown field `parallel_requests`"));
+
+    let err = load_test_config_error(
+        r#"
 [providers.local_rerank]
 kind = "llama_cpp_server"
 operation = "reranking"

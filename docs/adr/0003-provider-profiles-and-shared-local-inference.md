@@ -170,7 +170,7 @@ presence_penalty = 0.5
 - provider URLs must start with `http://` or `https://`
 - `api_key_env` must be non-empty when set
 - `parallel_requests`, when set, must be positive and is valid only for
-  `llama_cpp_server` reranking providers
+  `llama_cpp_server` embedding and reranking providers
 - role-specific knobs keep their own validation rules
 
 ## Consequences

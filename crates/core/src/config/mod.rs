@@ -180,6 +180,7 @@ impl RoleBindingsConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmbedderRoleConfig {
     pub provider: String,
     #[serde(default = "default_embedding_batch_size")]
